@@ -24,7 +24,7 @@ def package(output, release_url, timestamp):
     metadata = {
         "guid": "b2df1c14-4b7e-4e7b-9a95-8f9ad8d2b0c1", "name": "Siphon",
         "description": description, "overview": "Stremio addons in Jellyfin", "owner": "moodiness",
-        "category": "General", "version": version, "targetAbi": "12.0.0.0", "timestamp": timestamp
+        "category": "General", "version": version, "targetAbi": "12.1.0.0", "timestamp": timestamp
     }
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as bundle:
         for name, data in [(dll.name, dll.read_bytes()), ("LICENSE", (root / "LICENSE").read_bytes()),
@@ -35,7 +35,7 @@ def package(output, release_url, timestamp):
             bundle.writestr(entry, data)
     content = archive.read_bytes()
     release = {
-        "version": version, "targetAbi": "12.0.0.0",
+        "version": version, "targetAbi": "12.1.0.0",
         "sourceUrl": release_url.rstrip("/") + "/" + archive.name,
         "checksum": hashlib.md5(content).hexdigest(),
         "timestamp": timestamp,

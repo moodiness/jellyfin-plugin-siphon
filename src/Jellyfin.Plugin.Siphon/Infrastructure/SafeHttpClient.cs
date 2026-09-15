@@ -64,7 +64,7 @@ public sealed class SafeHttpClient : ISafeHttpClient, IDisposable
         {
             _policy.ValidateUri(uri);
             using var request = new HttpRequestMessage(method, uri);
-            request.Headers.UserAgent.ParseAdd("Siphon/12.0");
+            request.Headers.UserAgent.ParseAdd("Siphon/12.1");
             foreach (var (name, value) in forwarded)
             {
                 request.Headers.Remove(name);
