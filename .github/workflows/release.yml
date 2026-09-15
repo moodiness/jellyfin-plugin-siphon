@@ -19,6 +19,8 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: python3 scripts/check-release.py
+      - name: Build and test
+        run: dotnet test Jellyfin.Plugin.Siphon.sln -c Release
       - name: Package plugin
         env:
           RELEASE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}
