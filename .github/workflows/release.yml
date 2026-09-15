@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          dotnet-version: '10.0.x'
+      - name: Verify release version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 scripts/check-release.py
+      - run: dotnet test Jellyfin.Plugin.Siphon.sln -c Release
+      - name: Package plugin
+        env:
+          RELEASE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}
+        run: python3 scripts/package.py --release-url "$RELEASE_URL"
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" artifacts/*.zip artifacts/manifest.json artifacts/SHA256SUMS --title "feat(release): Siphon $RELEASE_TAG" --generate-notes
