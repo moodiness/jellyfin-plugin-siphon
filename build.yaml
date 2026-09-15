@@ -1,0 +1,13 @@
+name: "Siphon"
+guid: "b2df1c14-4b7e-4e7b-9a95-8f9ad8d2b0c1"
+version: 1
+targetAbi: "12.1.0.0"
+framework: "net10.0"
+owner: "moodiness"
+overview: "Stremio addons in Jellyfin"
+description: "Integrate Stremio addons into Jellyfin. Browse their catalogs, import their metadata and play their media through your Jellyfin library."
+category: "General"
+artifacts:
+  - "Jellyfin.Plugin.Siphon.dll"
+changelog: |-
+  - Initial Siphon implementation
