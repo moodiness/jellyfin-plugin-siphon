@@ -1,3 +1,4 @@
+using System.Net;
 using Jellyfin.Plugin.Siphon.Infrastructure;
 using Jellyfin.Plugin.Siphon.Protocol;
 using MediaBrowser.Common.Api;
@@ -10,7 +11,7 @@ namespace Jellyfin.Plugin.Siphon.Configuration;
 [ApiController]
 [Authorize(Policy = Policies.RequiresElevation)]
 [Route("Siphon")]
-public sealed class SiphonAdminController(StremioClient client, ISiphonStateStore state) : ControllerBase
+public sealed class SiphonAdminController(StremioClient client, ISiphonStateStore state, SsrfPolicy policy) : ControllerBase
 {
     [HttpGet("Status")]
     public ActionResult<StatusResponse> GetStatus()
@@ -38,10 +39,38 @@ public sealed class SiphonAdminController(StremioClient client, ISiphonStateStor
         {
             throw;
         }
+        catch (StremioException)
+        {
+            if (TryGetBlockedPrivateLiteralHost(request.ManifestUrl, policy, out var host))
+            {
+                return BadRequest(new { Message = $"The private addon host '{host}' is blocked. Under Server connection and limits, add exactly '{host}' to Allowed private hosts, save, then retry." });
+            }
+
+            return BadRequest(new { Message = "The addon could not be validated. Check its manifest URL and network access." });
+        }
         catch (Exception)
         {
-            // Exception messages may contain credential-bearing URLs or addon response bodies.
-            return BadRequest(new { Message = "The addon could not be validated. Check its manifest URL, network access, and private-host policy." });
+            return BadRequest(new { Message = "The addon could not be validated. Check its manifest URL and network access." });
+        }
+    }
+
+    private static bool TryGetBlockedPrivateLiteralHost(string manifestUrl, SsrfPolicy policy, out string host)
+    {
+        host = string.Empty;
+        try
+        {
+            var uri = StremioClient.ManifestUri(manifestUrl);
+            if (!IPAddress.TryParse(uri.Host, out var address) || SsrfPolicy.IsPublicAddress(address) || policy.AllowsPrivateHost(uri.Host))
+            {
+                return false;
+            }
+
+            host = uri.Host;
+            return true;
+        }
+        catch (StremioException)
+        {
+            return false;
         }
     }
 

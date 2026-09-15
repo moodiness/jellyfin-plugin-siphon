@@ -46,6 +46,13 @@ public sealed class SecurityStateTests : IDisposable
         Assert.False(policy.IsAllowed("evil.addon.local", IPAddress.Loopback));
         Assert.False(policy.IsAllowed("addon.local.evil", IPAddress.Loopback));
     }
+    [Fact]
+    public void PrivateIpExceptionRequiresExactConfiguredAddress()
+    {
+        var policy = new SsrfPolicy(new ConfigurationAccessor(() => new PluginConfiguration { AllowedPrivateHosts = ["10.23.45.67"] }));
+        Assert.True(policy.IsAllowed("10.23.45.67", IPAddress.Parse("10.23.45.67")));
+        Assert.False(policy.IsAllowed("10.23.45.68", IPAddress.Parse("10.23.45.68")));
+    }
 
     [Fact]
     public void CapabilitiesSurviveRestartAndRejectTampering()
