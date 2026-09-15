@@ -31,7 +31,8 @@ public sealed class SiphonChannel(
 
     public ChannelParentalRating ParentalRating => ChannelParentalRating.GeneralAudience;
 
-    public bool IsEnabledFor(string userId) => true;
+    public bool IsEnabledFor(string userId) => string.IsNullOrWhiteSpace(configuration.Current.MoviesLibraryPath)
+        && string.IsNullOrWhiteSpace(configuration.Current.TvShowsLibraryPath);
 
     public IEnumerable<ImageType> GetSupportedChannelImages() => [];
 
