@@ -14,6 +14,7 @@ public sealed class CatalogSyncService(
     AddonRegistry registry,
     StremioClient client,
     ISiphonStateStore state,
+    LibraryMaterializer materializer,
     ILogger<CatalogSyncService> logger)
 {
 
@@ -121,7 +122,7 @@ public sealed class CatalogSyncService(
                                     Description = full.Description ?? meta.Description,
                                     PosterUrl = full.Poster ?? meta.Poster,
                                     Released = full.Released ?? meta.Released,
-                                    Path = previous.GetValueOrDefault(key)?.Path ?? VirtualPath(mediaKind, contentKey),
+                                    Path = VirtualPath(mediaKind, contentKey),
                                     StreamIdentities = ContentIdentity.MovieAliases(meta.Type, meta.Id, ids).ToArray(),
                                     Owners = [owner]
                                 };
@@ -151,7 +152,7 @@ public sealed class CatalogSyncService(
                                     SeriesDescription = full.Description ?? meta.Description,
                                     PosterUrl = full.Poster ?? meta.Poster,
                                     Released = video.Released,
-                                    Path = old?.Path ?? VirtualPath(mediaKind, contentKey + ":" + video.Season + ":" + video.Episode),
+                                    Path = VirtualPath(mediaKind, contentKey + ":" + video.Season + ":" + video.Episode),
                                     StreamIdentities = [new StreamIdentity(meta.Type, video.Id)],
                                     Owners = [owner]
                                 };
@@ -206,7 +207,10 @@ public sealed class CatalogSyncService(
             var removals = desired.Values.Where(item => item.Owners.Length == 0 && config.RemoveMissingItems).ToArray();
             var retained = desired.Values.ExceptBy(removals.Select(item => item.Key), item => item.Key).ToArray();
             await state.SaveAsync(retained, cancellationToken).ConfigureAwait(false);
-            progress.Report(100);
+            if (materializer.IsConfigured)
+            {
+                await materializer.ApplyAsync(retained, removals, cancellationToken).ConfigureAwait(false);
+            }
             logger.LogInformation("Siphon synchronized {ItemCount} virtual channel items, removed {RemoveCount}, failed subscriptions {Failures}", retained.Length, removals.Length, failures);
             if (failures > 0)
             {

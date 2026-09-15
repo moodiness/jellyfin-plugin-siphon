@@ -4,7 +4,7 @@
 
 | Version | Supported |
 | --- | --- |
-| 1.0.x and 1.1.x / Jellyfin 12.1.x | Yes |
+| 1.0.x, 1.1.x and 1.2.x / Jellyfin 12.1.x | Yes |
 | Other Jellyfin major versions | No |
 
 Siphon is a Jellyfin plugin and must be installed only on a compatible Jellyfin server. Upgrade to the latest Siphon release compatible with your Jellyfin version before reporting an issue.

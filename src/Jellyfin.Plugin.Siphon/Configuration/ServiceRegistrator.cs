@@ -37,6 +37,7 @@ public sealed class ServiceRegistrator : MediaBrowser.Controller.Plugins.IPlugin
         serviceCollection.AddSingleton<Protocol.StremioClient>();
         serviceCollection.AddSingleton<Protocol.AddonRegistry>();
         serviceCollection.AddSingleton<Channels.SiphonChannel>();
+        serviceCollection.AddSingleton<Identity.LibraryMaterializer>();
         serviceCollection.AddSingleton<Infrastructure.SiphonItemLocator>();
         serviceCollection.AddSingleton<MediaBrowser.Controller.Channels.IChannel>(services => services.GetRequiredService<Channels.SiphonChannel>());
         serviceCollection.AddSingleton<Playback.StreamResolver>();
