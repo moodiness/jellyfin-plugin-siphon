@@ -42,9 +42,9 @@ public sealed class PluginConfiguration : BasePluginConfiguration
     /// <summary>Gets or sets the number of concurrent addon requests.</summary>
     public int MaxConcurrentRequests { get; set; } = 4;
 
-    /// <summary>Gets or sets configured addons.</summary>
+    /// <summary>Gets or sets configured addons. XML reloads replace the defaults rather than appending to them.</summary>
     [XmlArrayItem("Addon")]
-    public List<ConfiguredAddon> Addons { get; set; } =
+    public ConfiguredAddon[] Addons { get; set; } =
     [
         new()
         {

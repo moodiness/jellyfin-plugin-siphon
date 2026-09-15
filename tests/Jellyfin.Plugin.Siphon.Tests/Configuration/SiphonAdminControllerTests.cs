@@ -15,7 +15,7 @@ public sealed class SiphonAdminControllerTests
     {
         const string manifestUrl = "http://10.23.45.67:12345/addons/example/manifest.json";
         var configuration = new PluginConfiguration();
-        configuration.Addons.Clear();
+        configuration.Addons = [];
         var accessor = new ConfigurationAccessor(() => configuration);
         using var client = new StremioClient(new ThrowingOrigin(), accessor);
         var controller = new SiphonAdminController(client, new EmptyState(), new SsrfPolicy(accessor));
@@ -33,7 +33,7 @@ public sealed class SiphonAdminControllerTests
     {
         const string manifestUrl = "http://10.23.45.67:12345/addons/example/manifest.json";
         var configuration = new PluginConfiguration { AllowedPrivateHosts = ["10.23.45.67"] };
-        configuration.Addons.Clear();
+        configuration.Addons = [];
         var accessor = new ConfigurationAccessor(() => configuration);
         using var client = new StremioClient(new ManifestOrigin(), accessor);
         var controller = new SiphonAdminController(client, new EmptyState(), new SsrfPolicy(accessor));

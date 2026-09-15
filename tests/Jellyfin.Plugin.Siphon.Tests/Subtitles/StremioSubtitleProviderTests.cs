@@ -179,7 +179,7 @@ public sealed class StremioSubtitleProviderTests
         switch (change)
         {
             case "disabled": fixture.Addon.Enabled = false; break;
-            case "uninstalled": fixture.Configuration.Addons.Clear(); break;
+            case "uninstalled": fixture.Configuration.Addons = []; break;
             case "reconfigured": fixture.Addon.ManifestUrl = "https://addon.example/new-token/manifest.json"; break;
             case "removed-item": fixture.State.Item = null; break;
         }
@@ -264,8 +264,7 @@ public sealed class StremioSubtitleProviderTests
                 Path = "/managed/Film.strm",
                 StreamIdentities = [new("movie", "tt1234567")]
             };
-            Configuration.Addons.Clear();
-            Configuration.Addons.Add(Addon);
+            Configuration.Addons = [Addon];
             var accessor = new ConfigurationAccessor(() => Configuration);
             _client = new StremioClient(Http, accessor);
             var registry = new AddonRegistry(_client, accessor, NullLogger<AddonRegistry>.Instance);

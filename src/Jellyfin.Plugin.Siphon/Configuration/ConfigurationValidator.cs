@@ -27,7 +27,7 @@ internal static class ConfigurationValidator
             throw new ArgumentException("Item limits must be 1-10000, timeout 1-120 seconds, and concurrency 1-16.");
         }
 
-        if (config.Addons is null || config.Addons.Count > 64 || config.AllowedPrivateHosts is null || config.AllowedPrivateHosts.Count > 64)
+        if (config.Addons is null || config.Addons.Length > 64 || config.AllowedPrivateHosts is null || config.AllowedPrivateHosts.Count > 64)
         {
             throw new ArgumentException("At most 64 addons and 64 private host exceptions are supported.");
         }
