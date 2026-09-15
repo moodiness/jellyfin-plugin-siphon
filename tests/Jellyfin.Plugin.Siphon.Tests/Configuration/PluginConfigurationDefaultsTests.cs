@@ -11,7 +11,7 @@ public sealed class PluginConfigurationDefaultsTests
         var configuration = new PluginConfiguration();
 
         var addon = Assert.Single(configuration.Addons);
-        Assert.Equal("Cinemeta (official)", addon.DisplayName);
+        Assert.Equal("Cinemata", addon.DisplayName);
         Assert.Equal("stremio://v3-cinemeta.strem.io/manifest.json", addon.ManifestUrl);
         Assert.True(Guid.TryParseExact(addon.Id, "N", out _));
         Assert.True(addon.Enabled);

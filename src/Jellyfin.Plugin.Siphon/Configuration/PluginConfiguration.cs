@@ -45,7 +45,7 @@ public sealed class PluginConfiguration : BasePluginConfiguration
         {
             Id = CinemetaInstallationId,
             ManifestUrl = CinemetaManifestUrl,
-            DisplayName = "Cinemeta (official)",
+            DisplayName = "Cinemata",
             Enabled = true
         }
     ];
