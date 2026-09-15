@@ -8,7 +8,7 @@ public sealed class CatalogSyncTask(CatalogSyncService sync) : IScheduledTask
 {
     public string Name => "Synchronize Stremio catalogs";
     public string Key => "SiphonCatalogSync";
-    public string Description => "Synchronize selected mixed Stremio catalogs into managed movies and TV shows.";
+    public string Description => "Synchronize selected Stremio catalogs into the Siphon home channel.";
     public string Category => "Siphon";
 
     public Task ExecuteAsync(IProgress<double> progress, CancellationToken cancellationToken)

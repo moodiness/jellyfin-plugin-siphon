@@ -18,7 +18,7 @@ public sealed class StremioSubtitleProvider : ISubtitleProvider, IDisposable
     private const int MaximumJsonBytes = 2 * 1024 * 1024;
     private const int MaximumSubtitleBytes = 8 * 1024 * 1024;
     private const int MaximumSubtitleEntries = 256;
-    private readonly ISiphonStateStore _state;
+    private readonly SiphonItemLocator _locator;
     private readonly AddonRegistry _registry;
     private readonly StreamResolver _resolver;
     private readonly ISafeHttpClient _http;
@@ -29,16 +29,35 @@ public sealed class StremioSubtitleProvider : ISubtitleProvider, IDisposable
 
     /// <summary>Initializes the Jellyfin subtitle provider.</summary>
     public StremioSubtitleProvider(
-        ISiphonStateStore state,
+        SiphonItemLocator locator,
         AddonRegistry registry,
         StreamResolver resolver,
         ISafeHttpClient http,
         ConfigurationAccessor configuration,
         ILocalizationManager localization)
-        : this(state, registry, resolver, http, configuration, localization, TimeProvider.System, 4096, TimeSpan.FromMinutes(5))
+        : this(locator, registry, resolver, http, configuration, localization, TimeProvider.System, 4096, TimeSpan.FromMinutes(5))
     {
     }
 
+    internal StremioSubtitleProvider(
+        SiphonItemLocator locator,
+        AddonRegistry registry,
+        StreamResolver resolver,
+        ISafeHttpClient http,
+        ConfigurationAccessor configuration,
+        ILocalizationManager localization,
+        TimeProvider clock,
+        int ticketCapacity,
+        TimeSpan ticketLifetime)
+    {
+        _locator = locator;
+        _registry = registry;
+        _resolver = resolver;
+        _http = http;
+        _configuration = configuration;
+        _languages = new(() => LanguageMap(localization.GetCultures()));
+        _tickets = new SubtitleTicketStore(clock, Math.Clamp(ticketCapacity, 1, 16384), ticketLifetime);
+    }
     internal StremioSubtitleProvider(
         ISiphonStateStore state,
         AddonRegistry registry,
@@ -49,14 +68,8 @@ public sealed class StremioSubtitleProvider : ISubtitleProvider, IDisposable
         TimeProvider clock,
         int ticketCapacity,
         TimeSpan ticketLifetime)
+        : this(new SiphonItemLocator(state), registry, resolver, http, configuration, localization, clock, ticketCapacity, ticketLifetime)
     {
-        _state = state;
-        _registry = registry;
-        _resolver = resolver;
-        _http = http;
-        _configuration = configuration;
-        _languages = new(() => LanguageMap(localization.GetCultures()));
-        _tickets = new SubtitleTicketStore(clock, Math.Clamp(ticketCapacity, 1, 16384), ticketLifetime);
     }
 
     public string Name => "Siphon";
@@ -72,7 +85,7 @@ public sealed class StremioSubtitleProvider : ISubtitleProvider, IDisposable
         if (request.IsAutomated || request.IsPerfectMatch)
             return [];
 
-        var item = _state.FindByPath(request.MediaPath);
+        var item = _locator.Find(request.MediaPath);
         if (item is null || item.Type is not ("movie" or "series"))
             return [];
 
@@ -290,7 +303,7 @@ public sealed class StremioSubtitleProvider : ISubtitleProvider, IDisposable
         if (!IsInstallationCurrent(candidate.InstallationId, candidate.ManifestDigest))
             return false;
 
-        var item = _state.FindByPath(candidate.ItemPath);
+        var item = _locator.Find(candidate.ItemPath);
         return item is not null && string.Equals(item.Key, candidate.ItemKey, StringComparison.Ordinal);
     }
 

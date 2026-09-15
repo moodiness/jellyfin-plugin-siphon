@@ -9,9 +9,10 @@ using MediaBrowser.Model.MediaInfo;
 
 namespace Jellyfin.Plugin.Siphon.Playback;
 
-/// <summary>Exposes opaque proxy sources only for shortcuts registered in Siphon's state.</summary>
+/// <summary>Exposes opaque proxy sources for Siphon virtual channel items.</summary>
 public sealed class SiphonMediaSourceProvider(
     ISiphonStateStore state,
+    SiphonItemLocator locator,
     StreamResolver resolver,
     ProxySessionStore sessions,
     CapabilityTokenService tokens,
@@ -20,7 +21,7 @@ public sealed class SiphonMediaSourceProvider(
 {
     public async Task<IEnumerable<MediaSourceInfo>> GetMediaSources(BaseItem item, CancellationToken cancellationToken)
     {
-        if (item is not Video || string.IsNullOrEmpty(item.Path) || state.FindByPath(item.Path) is not { } managed)
+        if (item is not Video || string.IsNullOrEmpty(item.Path) || locator.Find(item.Path) is not { } managed)
         {
             return [];
         }

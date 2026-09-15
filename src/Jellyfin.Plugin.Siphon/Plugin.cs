@@ -35,7 +35,7 @@ public sealed class Plugin : BasePlugin<Configuration.PluginConfiguration>, IHas
     public override string Name => "Siphon";
 
     /// <inheritdoc />
-    public override string Description => "Integrates Stremio addons into Jellyfin, bringing their catalogs, metadata and playback sources into your media library.";
+    public override string Description => "Brings Stremio addon catalogs, metadata, subtitles and playback to Jellyfin's home channel.";
 
     /// <inheritdoc />
     public override Guid Id => PluginId;

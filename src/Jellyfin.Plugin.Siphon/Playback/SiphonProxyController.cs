@@ -35,6 +35,9 @@ public sealed class SiphonProxyController(
     [HttpGet("source/{token}")]
     [HttpHead("source/{token}")]
     public Task Source(string token) => ExecuteAsync(token, 2);
+    [HttpGet("image/{token}")]
+    public Task Image(string token) => ExecuteImageAsync(token);
+
 
     private async Task ExecuteAsync(string token, int tokenKind)
     {
@@ -148,6 +151,79 @@ public sealed class SiphonProxyController(
             GlobalSlots.Release();
         }
     }
+    private async Task ExecuteImageAsync(string token)
+    {
+        var ct = HttpContext.RequestAborted;
+        if (!AllowRequest() || !GlobalSlots.Wait(0))
+        {
+            Reject();
+            return;
+        }
+
+        try
+        {
+            if (token.Length > 4096 || !tokens.TryReadItem(token, out var key) || state.FindByKey(key) is not { PosterUrl: { } poster })
+            {
+                Response.StatusCode = 404;
+                return;
+            }
+
+            if (!Uri.TryCreate(poster, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
+            {
+                Response.StatusCode = 404;
+                return;
+            }
+
+            using var upstream = await http.SendAsync(uri, HttpMethod.Get, null, ct).ConfigureAwait(false);
+            if (!upstream.IsSuccessStatusCode || upstream.Content.Headers.ContentLength is > 8 * 1024 * 1024)
+            {
+                Response.StatusCode = upstream.StatusCode == HttpStatusCode.NotFound ? 404 : 502;
+                return;
+            }
+
+            var mediaType = upstream.Content.Headers.ContentType?.MediaType?.ToLowerInvariant();
+            if (mediaType is not ("image/jpeg" or "image/png" or "image/webp" or "image/gif"))
+            {
+                Response.StatusCode = 502;
+                return;
+            }
+
+            await using var body = await upstream.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            using var buffer = new MemoryStream();
+            var chunk = new byte[64 * 1024];
+            while (true)
+            {
+                var count = await body.ReadAsync(chunk.AsMemory(), ct).ConfigureAwait(false);
+                if (count == 0) break;
+                if (buffer.Length + count > 8 * 1024 * 1024)
+                {
+                    Response.StatusCode = 502;
+                    return;
+                }
+
+                await buffer.WriteAsync(chunk.AsMemory(0, count), ct).ConfigureAwait(false);
+            }
+
+            Response.StatusCode = 200;
+            Response.ContentType = mediaType;
+            Response.ContentLength = buffer.Length;
+            ProtectBytes();
+            await Response.Body.WriteAsync(buffer.GetBuffer().AsMemory(0, (int)buffer.Length), ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            HttpContext.Abort();
+        }
+        catch
+        {
+            if (!Response.HasStarted) Response.StatusCode = 502;
+        }
+        finally
+        {
+            GlobalSlots.Release();
+        }
+    }
+
 
     private async Task ProxyAsync(ProxySession session, CancellationToken ct)
     {

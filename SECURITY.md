@@ -32,7 +32,7 @@ Siphon is designed around these boundaries:
 - HTTP(S) only; torrent engines, debrid services, and external-player handoffs are not implemented;
 - DNS resolution and redirects are checked against SSRF policy, including HTTPS downgrade and cross-origin credential handling;
 - private destinations require exact hostname exceptions configured by an administrator;
-- managed roots are ownership-marked and Siphon refuses to overwrite or delete unowned files;
+- channel items are persisted by Jellyfin while Siphon keeps catalog state in its private plugin data directory; Siphon does not manage user media files;
 - addon responses, subtitles, playlists, headers, and proxy sessions are size- and concurrency-bounded;
 - Siphon does not store provider API keys or debrid credentials.
 

@@ -5,9 +5,9 @@ internal static class ConfigurationValidator
 {
     public static void Validate(PluginConfiguration config)
     {
-        if (config.PublicBaseUrl is null || config.MoviesRootPath is null || config.TvShowsRootPath is null)
+        if (config.PublicBaseUrl is null)
         {
-            throw new ArgumentException("URL and library paths cannot be null.");
+            throw new ArgumentException("URL cannot be null.");
         }
 
         if (!string.IsNullOrWhiteSpace(config.PublicBaseUrl)
@@ -18,14 +18,6 @@ internal static class ConfigurationValidator
             throw new ArgumentException("PublicBaseUrl must be an HTTP(S) server URL without credentials, query or fragment.");
         }
 
-        ValidateRoot(config.MoviesRootPath);
-        ValidateRoot(config.TvShowsRootPath);
-        if (config.MoviesRootPath.Length != 0 && config.TvShowsRootPath.Length != 0
-            && (Identity.ManagedPath.IsWithin(config.MoviesRootPath, config.TvShowsRootPath)
-                || Identity.ManagedPath.IsWithin(config.TvShowsRootPath, config.MoviesRootPath)))
-        {
-            throw new ArgumentException("Movie and TV roots must be separate, non-overlapping folders.");
-        }
 
         if (config.MaxItemsPerCatalog is < 1 or > 10000 || config.MaxEpisodesPerSeries is < 1 or > 10000
             || config.AddonTimeoutSeconds is < 1 or > 120 || config.MaxConcurrentRequests is < 1 or > 16)
@@ -88,16 +80,4 @@ internal static class ConfigurationValidator
         }
     }
 
-    private static void ValidateRoot(string path)
-    {
-        if (string.IsNullOrEmpty(path))
-        {
-            return;
-        }
-
-        if (!Path.IsPathFullyQualified(path) || Path.TrimEndingDirectorySeparator(path) == Path.GetPathRoot(path))
-        {
-            throw new ArgumentException("Managed roots must be absolute folders, never filesystem roots.");
-        }
-    }
 }
