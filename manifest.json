@@ -1,0 +1,20 @@
+[
+  {
+    "guid": "b2df1c14-4b7e-4e7b-9a95-8f9ad8d2b0c1",
+    "name": "Siphon",
+    "description": "Bring Stremio addon catalogs, metadata, subtitles and playback to Jellyfin's home channel.",
+    "overview": "Stremio addons in Jellyfin",
+    "owner": "moodiness",
+    "category": "General",
+    "versions": [
+      {
+        "version": "1.1.0.0",
+        "targetAbi": "12.1.0.0",
+        "sourceUrl": "https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.1.0/siphon-1.1.0.0.zip",
+        "checksum": "7f6ed95111c66332931b755ec352ef55",
+        "timestamp": "2026-09-15T00:00:00Z",
+        "changelog": "Virtual Jellyfin home channel architecture with mixed catalogs, artwork, metadata, subtitles and server-side playback."
+      }
+    ]
+  }
+]

@@ -27,8 +27,10 @@ Siphon targets **Jellyfin 12.1** and .NET 10. It does not include a torrent engi
 3. Add this repository manifest URL:
 
    ```text
-   https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.1.0/manifest.json
+   https://raw.githubusercontent.com/moodiness/jellyfin-plugin-siphon/main/manifest.json
    ```
+
+The URL is intentionally tied to the repository's `main` branch. Siphon updates this manifest automatically when a new release is published, so Jellyfin can keep using the same repository entry across updates.
 
 4. Open **Dashboard → Plugins → Catalog**, find **Siphon**, and install it.
 5. Restart Jellyfin.

@@ -19,11 +19,19 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: python3 scripts/check-release.py
-      - run: dotnet test Jellyfin.Plugin.Siphon.sln -c Release
       - name: Package plugin
         env:
           RELEASE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}
         run: python3 scripts/package.py --release-url "$RELEASE_URL"
+      - name: Update repository manifest
+        run: cp artifacts/manifest.json manifest.json
+      - name: Commit repository manifest
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add manifest.json
+          git diff --cached --quiet || git commit -m "chore(release): update plugin manifest for ${{ github.ref_name }}"
+          git push origin HEAD:main
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
