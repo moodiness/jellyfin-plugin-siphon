@@ -9,6 +9,10 @@ namespace Jellyfin.Plugin.Siphon.Configuration;
 public sealed class PluginConfiguration : BasePluginConfiguration
 {
 
+    private const string CinemetaInstallationId = "63962eafd14f4d8e93f57120e5f3e645";
+
+    private const string CinemetaManifestUrl = "stremio://v3-cinemeta.strem.io/manifest.json";
+
     /// <summary>Gets or sets the URL clients can use to reach this Jellyfin server.</summary>
     public string PublicBaseUrl { get; set; } = string.Empty;
 
@@ -40,7 +44,16 @@ public sealed class PluginConfiguration : BasePluginConfiguration
 
     /// <summary>Gets or sets configured addons.</summary>
     [XmlArrayItem("Addon")]
-    public List<ConfiguredAddon> Addons { get; set; } = [];
+    public List<ConfiguredAddon> Addons { get; set; } =
+    [
+        new()
+        {
+            Id = CinemetaInstallationId,
+            ManifestUrl = CinemetaManifestUrl,
+            DisplayName = "Cinemeta (official)",
+            Enabled = true
+        }
+    ];
 }
 
 /// <summary>One configured Stremio addon.</summary>

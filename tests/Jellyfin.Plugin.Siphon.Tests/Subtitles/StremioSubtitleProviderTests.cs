@@ -264,6 +264,7 @@ public sealed class StremioSubtitleProviderTests
                 Path = "/managed/Film.strm",
                 StreamIdentities = [new("movie", "tt1234567")]
             };
+            Configuration.Addons.Clear();
             Configuration.Addons.Add(Addon);
             var accessor = new ConfigurationAccessor(() => Configuration);
             _client = new StremioClient(Http, accessor);
