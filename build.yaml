@@ -5,7 +5,7 @@ targetAbi: "12.1.0.0"
 framework: "net10.0"
 owner: "moodiness"
 overview: "Stremio addons in Jellyfin"
-description: "Integrate Stremio addons into Jellyfin. Browse their catalogs, import their metadata and play their media through your Jellyfin library."
+description: "Bring Stremio addon catalogs, metadata, subtitles and playback to Jellyfin's home channel."
 category: "General"
 artifacts:
   - "Jellyfin.Plugin.Siphon.dll"

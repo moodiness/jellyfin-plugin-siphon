@@ -16,11 +16,6 @@ public sealed class PluginConfiguration : BasePluginConfiguration
     /// <summary>Gets or sets the URL clients can use to reach this Jellyfin server.</summary>
     public string PublicBaseUrl { get; set; } = string.Empty;
 
-    /// <summary>Gets or sets the physical root for managed movies.</summary>
-    public string MoviesRootPath { get; set; } = string.Empty;
-
-    /// <summary>Gets or sets the physical root for managed TV shows.</summary>
-    public string TvShowsRootPath { get; set; } = string.Empty;
 
     /// <summary>Gets or sets the maximum number of catalogue metas read per subscription.</summary>
     public int MaxItemsPerCatalog { get; set; } = 500;

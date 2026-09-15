@@ -1,40 +1,97 @@
 <!DOCTYPE html>
 <html lang="en">
-<head><meta charset="utf-8"><title>Siphon</title></head>
+<head>
+    <meta charset="utf-8">
+    <title>Siphon</title>
+    <style>
+        #SiphonConfigPage { --siphon-accent: #70b9ff; --siphon-panel: rgba(255,255,255,.045); --siphon-line: rgba(255,255,255,.12); }
+        #SiphonConfigPage .siphon-shell { max-width: 980px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+        #SiphonConfigPage .siphon-hero { padding: 1.5rem 0 2rem; border-bottom: 1px solid var(--siphon-line); }
+        #SiphonConfigPage .siphon-kicker { color: var(--siphon-accent); font-size: .72rem; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
+        #SiphonConfigPage h1 { margin: .35rem 0 .55rem; font-size: 2.15rem; }
+        #SiphonConfigPage h2 { margin: 2rem 0 .35rem; font-size: 1.35rem; }
+        #SiphonConfigPage h3 { margin: 0; font-size: 1.05rem; }
+        #SiphonConfigPage p { max-width: 70ch; line-height: 1.5; }
+        #SiphonConfigPage .siphon-lead { margin: 0; opacity: .78; font-size: 1rem; }
+        #SiphonConfigPage .siphon-message, #SiphonConfigPage .siphon-status { min-height: 1.5rem; margin: 1rem 0; }
+        #SiphonConfigPage .siphon-card { margin: 1rem 0; padding: 1.1rem 1.2rem; border: 1px solid var(--siphon-line); border-radius: 12px; background: var(--siphon-panel); }
+        #SiphonConfigPage .siphon-card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+        #SiphonConfigPage .siphon-card-header p { margin: .25rem 0 0; opacity: .68; font-size: .9rem; }
+        #SiphonConfigPage .siphon-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .45rem; }
+        #SiphonConfigPage .siphon-actions button { margin: 0; }
+        #SiphonConfigPage .siphon-badge { display: inline-block; margin-left: .65rem; padding: .18rem .55rem; border: 1px solid rgba(112,185,255,.45); border-radius: 999px; color: var(--siphon-accent); font-size: .68rem; letter-spacing: .08em; text-transform: uppercase; vertical-align: .12rem; }
+        #SiphonConfigPage .siphon-add { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: .75rem; }
+        #SiphonConfigPage .siphon-add button { margin: 0; white-space: nowrap; }
+        #SiphonConfigPage .siphon-help { margin: .35rem 0 0; opacity: .65; font-size: .84rem; }
+        #SiphonConfigPage .siphon-fields { border: 0; margin: 0; padding: 0; }
+        #SiphonConfigPage .siphon-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 1rem; }
+        #SiphonConfigPage .siphon-settings .inputContainer:first-child { grid-column: 1 / -1; }
+        #SiphonConfigPage .siphon-catalog { margin-top: .8rem; padding: .85rem 1rem; border: 1px solid var(--siphon-line); border-radius: 10px; }
+        #SiphonConfigPage .siphon-catalog legend { padding: 0 .35rem; font-size: .92rem; }
+        #SiphonConfigPage .siphon-discovery { margin-top: .8rem; padding-top: .8rem; border-top: 1px solid var(--siphon-line); }
+        #SiphonConfigPage .siphon-discovery button { margin: .25rem .35rem .25rem 0; }
+        #SiphonConfigPage .siphon-save { position: sticky; bottom: 1rem; z-index: 2; display: flex; justify-content: flex-end; margin-top: 1.5rem; padding: .75rem; border: 1px solid var(--siphon-line); border-radius: 12px; background: rgba(20,24,30,.92); backdrop-filter: blur(12px); }
+        #SiphonConfigPage .siphon-save button { margin: 0; }
+        #SiphonConfigPage .siphon-sync { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .75rem; }
+        #SiphonConfigPage .siphon-sync button { margin: 0 .4rem .4rem 0; }
+        @media (max-width: 700px) {
+            #SiphonConfigPage .siphon-shell { padding: 1rem .8rem 3rem; }
+            #SiphonConfigPage .siphon-card-header, #SiphonConfigPage .siphon-add { display: block; }
+            #SiphonConfigPage .siphon-actions { justify-content: flex-start; margin-top: .8rem; }
+            #SiphonConfigPage .siphon-add button { margin-top: .5rem; }
+            #SiphonConfigPage .siphon-settings { display: block; }
+        }
+    </style>
+</head>
 <body>
 <div id="SiphonConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-select,emby-checkbox">
-    <div data-role="content"><div class="content-primary">
-        <h1>Siphon</h1>
-        <p>Stremio addons in Jellyfin. Connect your addons to bring their catalogs, metadata and playback sources into your media library.</p>
-        <p>Mixed catalogs and IMDb, TMDB, TVDB, MyAnimeList and addon-specific identifiers are supported. Playback currently uses server-proxied HTTP(S) files and HLS; torrent and external-player sources are not played.</p>
-        <p>Addon URLs may contain credentials. They are masked here but stored in Jellyfin's plugin configuration. Protect configuration backups.</p>
-        <p id="siphonMessage" role="status" aria-live="polite"></p>
-        <form id="SiphonConfigForm">
-            <fieldset id="siphonFields" disabled>
-                <legend>Configuration</legend>
-                <div class="inputContainer"><label class="inputLabel" for="siphonPublicBaseUrl">Public Jellyfin base URL</label><input is="emby-input" id="siphonPublicBaseUrl" type="url" required><div class="fieldDescription">HTTP(S) address reachable by both Jellyfin and your players, including Jellyfin's base path. In Docker, localhost is not the host machine.</div></div>
-                <div class="inputContainer"><label class="inputLabel" for="siphonMoviesRootPath">Movies root path</label><input is="emby-input" id="siphonMoviesRootPath" required><div class="fieldDescription">Absolute server directory for managed movie files. Add this folder to a Jellyfin Movies library.</div></div>
-                <div class="inputContainer"><label class="inputLabel" for="siphonTvShowsRootPath">TV shows root path</label><input is="emby-input" id="siphonTvShowsRootPath" required><div class="fieldDescription">Separate absolute server directory for managed episodes. Add this folder to a Jellyfin Shows library.</div></div>
-                <div class="inputContainer"><label class="inputLabel" for="siphonMaxItemsPerCatalog">Maximum items per catalog</label><input is="emby-input" id="siphonMaxItemsPerCatalog" type="number" min="1" max="10000" step="1" required></div>
-                <div class="inputContainer"><label class="inputLabel" for="siphonMaxEpisodesPerSeries">Maximum episodes per series</label><input is="emby-input" id="siphonMaxEpisodesPerSeries" type="number" min="1" max="10000" step="1" required></div>
-                <div class="inputContainer"><label class="inputLabel" for="siphonAddonTimeoutSeconds">Addon request timeout (seconds)</label><input is="emby-input" id="siphonAddonTimeoutSeconds" type="number" min="1" max="120" step="1" required></div>
-                <div class="inputContainer"><label class="inputLabel" for="siphonMaxConcurrentRequests">Concurrent addon requests</label><input is="emby-input" id="siphonMaxConcurrentRequests" type="number" min="1" max="16" step="1" required></div>
-                <div class="inputContainer"><label class="inputLabel" for="siphonAllowedPrivateHosts">Allowed private hosts (one exact hostname per line)</label><textarea id="siphonAllowedPrivateHosts" class="emby-input" rows="4" autocomplete="off" spellcheck="false"></textarea><div class="fieldDescription">Optional security exceptions for trusted private-network addons or streams. No wildcards, URLs, or CIDR ranges. Save these exceptions before validating a private addon.</div></div>
-                <div class="checkboxContainer checkboxContainer-withDescription"><label class="emby-checkbox-label"><input is="emby-checkbox" id="siphonRemoveMissingItems" type="checkbox"><span>Remove missing managed items after a complete successful sync</span></label><div class="fieldDescription">Caution: opt in only if you want previously imported items removed when they are no longer returned by any enabled subscription. Other library files are not managed by Siphon.</div></div>
-                <h2>Addons and catalogs</h2>
-                <div id="siphonAddons"></div>
-                <div class="inputContainer"><label class="inputLabel" for="siphonManifestUrl">Addon manifest URL</label><input is="emby-input" id="siphonManifestUrl" type="password" autocomplete="new-password" spellcheck="false"><div class="fieldDescription">Paste an HTTP(S) or stremio:// manifest URL. stremio:// is fetched through HTTPS; the configured path and credentials are preserved.</div></div>
-                <button is="emby-button" id="siphonAdd" type="button" class="raised emby-button">Validate and add addon</button>
-                <p>Changes are not active until saved. Sync uses the last saved configuration.</p>
-                <button is="emby-button" type="submit" class="raised button-submit block emby-button">Save configuration</button>
-            </fieldset>
-        </form>
-        <h2>Synchronization</h2>
-        <p id="siphonStatus" role="status" aria-live="polite">Status has not been loaded.</p>
-        <button is="emby-button" id="siphonRefresh" type="button" class="raised emby-button">Refresh status</button>
-        <button is="emby-button" id="siphonSync" type="button" class="raised emby-button">Synchronize saved catalogs</button>
-        <button is="emby-button" id="siphonReload" type="button" class="raised emby-button">Reload saved configuration</button>
-    </div></div>
+    <div data-role="content">
+        <div class="content-primary siphon-shell">
+            <header class="siphon-hero">
+                <div class="siphon-kicker">Stremio → Jellyfin</div>
+                <h1>Your addons, in Jellyfin</h1>
+                <p class="siphon-lead">Add an addon once, choose its catalogs, and browse its movies and series from the Siphon channel on your Jellyfin home screen.</p>
+                <p id="siphonMessage" class="siphon-message" role="status" aria-live="polite">Loading Siphon…</p>
+            </header>
+
+            <form id="SiphonConfigForm">
+                <fieldset id="siphonFields" class="siphon-fields" disabled>
+                    <section aria-labelledby="siphonAddonsTitle">
+                        <h2 id="siphonAddonsTitle">Your addons</h2>
+                        <p class="siphon-help">Cinemeta (official) is ready to explore. To add another addon, paste its manifest URL below and press <strong>Add addon</strong>.</p>
+                        <div id="siphonAddons"></div>
+                        <div class="siphon-card siphon-add">
+                            <div>
+                                <label class="inputLabel" for="siphonManifestUrl">Addon manifest URL</label>
+                                <input is="emby-input" id="siphonManifestUrl" type="url" autocomplete="off" spellcheck="false" placeholder="https://…/manifest.json">
+                                <p class="siphon-help">Paste an HTTP(S) or <code>stremio://</code> manifest URL, then press <strong>Add addon</strong>. The latter is fetched through HTTPS.</p>
+                            </div>
+                            <button is="emby-button" id="siphonAdd" type="button" class="raised emby-button">Add addon</button>
+                        </div>
+                    </section>
+
+                    <details class="siphon-card">
+                        <summary>Server connection and limits</summary>
+                        <div class="siphon-settings">
+                            <div class="inputContainer"><label class="inputLabel" for="siphonPublicBaseUrl">Public Jellyfin base URL</label><input is="emby-input" id="siphonPublicBaseUrl" type="url" required><div class="fieldDescription">URL reachable by Jellyfin and playback clients, including any base path.</div></div>
+                            <div class="inputContainer"><label class="inputLabel" for="siphonMaxItemsPerCatalog">Maximum items per catalog</label><input is="emby-input" id="siphonMaxItemsPerCatalog" type="number" min="1" max="10000" step="1" required></div>
+                            <div class="inputContainer"><label class="inputLabel" for="siphonMaxEpisodesPerSeries">Maximum episodes per series</label><input is="emby-input" id="siphonMaxEpisodesPerSeries" type="number" min="1" max="10000" step="1" required></div>
+                            <div class="inputContainer"><label class="inputLabel" for="siphonAddonTimeoutSeconds">Addon request timeout (seconds)</label><input is="emby-input" id="siphonAddonTimeoutSeconds" type="number" min="1" max="120" step="1" required></div>
+                            <div class="inputContainer"><label class="inputLabel" for="siphonMaxConcurrentRequests">Concurrent addon requests</label><input is="emby-input" id="siphonMaxConcurrentRequests" type="number" min="1" max="16" step="1" required></div>
+                            <div class="inputContainer"><label class="inputLabel" for="siphonAllowedPrivateHosts">Allowed private hosts</label><textarea id="siphonAllowedPrivateHosts" class="emby-input" rows="3" autocomplete="off" spellcheck="false"></textarea><div class="fieldDescription">One exact trusted hostname per line. No wildcards or CIDR ranges.</div></div>
+                            <div class="checkboxContainer checkboxContainer-withDescription"><label class="emby-checkbox-label"><input is="emby-checkbox" id="siphonRemoveMissingItems" type="checkbox"><span>Remove items no longer returned by enabled catalogs</span></label><div class="fieldDescription">Only Siphon channel items are affected.</div></div>
+                        </div>
+                    </details>
+                    <div class="siphon-save"><button is="emby-button" type="submit" class="raised button-submit block emby-button">Save changes</button></div>
+                </fieldset>
+            </form>
+
+            <section class="siphon-card siphon-sync" aria-labelledby="siphonSyncTitle">
+                <div><h2 id="siphonSyncTitle">Siphon channel</h2><p id="siphonStatus" class="siphon-status" role="status" aria-live="polite">Status is loading…</p></div>
+                <div><button is="emby-button" id="siphonSync" type="button" class="raised emby-button">Sync catalogs</button><button is="emby-button" id="siphonRefresh" type="button" class="emby-button">Refresh status</button><button is="emby-button" id="siphonReload" type="button" class="emby-button">Reload saved</button></div>
+            </section>
+        </div>
+    </div>
     <script>
     (function () {
         'use strict';
@@ -46,291 +103,32 @@
         var busy = false;
         var dirty = false;
         var nextId = 0;
-        var textFields = ['PublicBaseUrl', 'MoviesRootPath', 'TvShowsRootPath'];
+        var textFields = ['PublicBaseUrl'];
         var numberFields = ['MaxItemsPerCatalog', 'MaxEpisodesPerSeries', 'AddonTimeoutSeconds', 'MaxConcurrentRequests'];
         function get(id) { return page.querySelector('#' + id); }
         function message(text) { get('siphonMessage').textContent = text; }
-        function node(tag, text, parent) {
-            var element = document.createElement(tag);
-            if (text !== undefined) element.textContent = text;
-            if (parent) parent.appendChild(element);
-            return element;
-        }
-        function uuid() {
-            var bytes = crypto.getRandomValues(new Uint8Array(16));
-            bytes[6] = (bytes[6] & 15) | 64;
-            bytes[8] = (bytes[8] & 63) | 128;
-            return Array.from(bytes, function (byte) { return byte.toString(16).padStart(2, '0'); }).join('');
-        }
-        function request(path, method, data) {
-            var options = { url: ApiClient.getUrl(path), type: method, dataType: 'json' };
-            if (data !== undefined) { options.contentType = 'application/json'; options.data = JSON.stringify(data); }
-            return ApiClient.ajax(options);
-        }
-        async function work(action) {
-            if (busy) return;
-            busy = true;
-            get('siphonFields').disabled = true;
-            ['siphonSync', 'siphonRefresh', 'siphonReload'].forEach(function (id) { get(id).disabled = true; });
-            Dashboard.showLoadingMsg();
-            try { await action(); }
-            finally {
-                busy = false;
-                get('siphonFields').disabled = !config;
-                ['siphonSync', 'siphonRefresh', 'siphonReload'].forEach(function (id) { get(id).disabled = false; });
-                Dashboard.hideLoadingMsg();
-            }
-        }
-        function input(parent, title, value, type) {
-            var container = node('div', undefined, parent); container.className = 'inputContainer';
-            var id = 'siphonDynamic' + (++nextId);
-            var label = node('label', title, container); label.className = 'inputLabel'; label.htmlFor = id;
-            var control = document.createElement('input');
-            control.setAttribute('is', 'emby-input'); control.className = 'emby-input';
-            control.id = id; control.type = type || 'text'; control.value = value == null ? '' : value;
-            container.appendChild(control);
-            return control;
-        }
-        function checkbox(parent, title, value, changed) {
-            var container = node('div', undefined, parent); container.className = 'checkboxContainer';
-            var label = node('label', undefined, container); label.className = 'emby-checkbox-label';
-            var control = document.createElement('input');
-            control.setAttribute('is', 'emby-checkbox'); control.type = 'checkbox'; control.checked = value;
-            label.appendChild(control); node('span', title, label);
-            control.addEventListener('change', function () { dirty = true; changed(control.checked); });
-            return control;
-        }
-        function button(parent, title, action) {
-            var control = document.createElement('button');
-            control.setAttribute('is', 'emby-button'); control.className = 'raised emby-button'; control.type = 'button';
-            control.textContent = title; control.addEventListener('click', action); parent.appendChild(control);
-            return control;
-        }
-        function mergeCatalogs(addon, manifest) {
-            manifest.Catalogs.forEach(function (catalog) {
-                if (!addon.Catalogs.some(function (saved) { return saved.Type === catalog.Type && saved.Id === catalog.Id; })) {
-                    addon.Catalogs.push({ Key: uuid(), Type: catalog.Type, Id: catalog.Id, Enabled: false, MaxItems: null, Extras: [] });
-                }
-            });
-        }
+        function node(tag, text, parent) { var element = document.createElement(tag); if (text !== undefined) element.textContent = text; if (parent) parent.appendChild(element); return element; }
+        function uuid() { var bytes = crypto.getRandomValues(new Uint8Array(16)); bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128; return Array.from(bytes, function (byte) { return byte.toString(16).padStart(2, '0'); }).join(''); }
+        function request(path, method, data) { var options = { url: ApiClient.getUrl(path), type: method, dataType: 'json' }; if (data !== undefined) { options.contentType = 'application/json'; options.data = JSON.stringify(data); } return ApiClient.ajax(options); }
+        async function work(action) { if (busy) return; busy = true; get('siphonFields').disabled = true; ['siphonSync', 'siphonRefresh', 'siphonReload'].forEach(function (id) { get(id).disabled = true; }); Dashboard.showLoadingMsg(); try { await action(); } finally { busy = false; get('siphonFields').disabled = !config; ['siphonSync', 'siphonRefresh', 'siphonReload'].forEach(function (id) { get(id).disabled = false; }); Dashboard.hideLoadingMsg(); } }
+        function input(parent, title, value, type) { var container = node('div', undefined, parent); container.className = 'inputContainer'; var id = 'siphonDynamic' + (++nextId); var label = node('label', title, container); label.className = 'inputLabel'; label.htmlFor = id; var control = document.createElement('input'); control.setAttribute('is', 'emby-input'); control.className = 'emby-input'; control.id = id; control.type = type || 'text'; control.value = value == null ? '' : value; container.appendChild(control); return control; }
+        function checkbox(parent, title, value, changed) { var container = node('div', undefined, parent); container.className = 'checkboxContainer'; var label = node('label', undefined, container); label.className = 'emby-checkbox-label'; var control = document.createElement('input'); control.setAttribute('is', 'emby-checkbox'); control.type = 'checkbox'; control.checked = value; label.appendChild(control); node('span', title, label); control.addEventListener('change', function () { dirty = true; changed(control.checked); }); return control; }
+        function button(parent, title, action) { var control = document.createElement('button'); control.setAttribute('is', 'emby-button'); control.className = 'raised emby-button'; control.type = 'button'; control.textContent = title; control.addEventListener('click', action); parent.appendChild(control); return control; }
+        function mergeCatalogs(addon, manifest) { manifest.Catalogs.forEach(function (catalog) { if (!addon.Catalogs.some(function (saved) { return saved.Type === catalog.Type && saved.Id === catalog.Id; })) addon.Catalogs.push({ Key: uuid(), Type: catalog.Type, Id: catalog.Id, Enabled: false, MaxItems: null, Extras: [] }); }); }
         function manifestKey(url) { return url.replace(/^stremio:\/\//i, 'https://'); }
-        function isConfigured(url) {
-            return config.Addons.some(function (addon) { return manifestKey(addon.ManifestUrl) === manifestKey(url); });
-        }
-        async function installAddon(url) {
-            if (isConfigured(url)) { message('This addon URL is already configured.'); return false; }
-            if (config.Addons.length >= 64) { message('At most 64 addons can be configured. Remove an addon and save before adding another.'); return false; }
-            message('Validating the selected addon…');
-            try {
-                var manifest = await request('Siphon/Addons/Validate', 'POST', { ManifestUrl: url });
-                var addon = { Id: uuid(), ManifestUrl: url, DisplayName: manifest.Name, Enabled: true, Catalogs: [] };
-                mergeCatalogs(addon, manifest); config.Addons.push(addon); manifests.set(addon.Id, manifest);
-                dirty = true; renderAddons();
-                message('Addon validated and added locally. Select catalogs, complete required extras, then save.');
-                return true;
-            } catch (_) {
-                message('Addon validation failed. Nothing was added. The addon may need a configured manifest URL; check network access and saved private-host exceptions.');
-                return false;
-            }
-        }
-        function renderDiscovery(section, addon) {
-            var discovery = discoveries.get(addon.Id);
-            if (!discovery) return;
-            var group = node('fieldset', undefined, section);
-            node('legend', 'Discover addons', group);
-            if (!discovery.Catalogs.length) {
-                node('p', 'This addon does not advertise any addon discovery catalogs.', group);
-                return;
-            }
-            node('p', 'Choose a discovery catalog. Addons are validated only when you choose Install addon, and are not active until you save.', group);
-            discovery.Catalogs.forEach(function (catalog) {
-                button(group, catalog.Name + ' (' + catalog.Type + ')', function () {
-                    work(async function () {
-                        message('Loading discoverable addons…');
-                        try {
-                            var result = await request('Siphon/Addons/Discover', 'POST', { ManifestUrl: addon.ManifestUrl, Type: catalog.Type, Id: catalog.Id });
-                            discoveries.set(addon.Id, { Catalogs: result.Catalogs, Addons: result.Addons, Selected: catalog, Visible: 50 });
-                            renderAddons(); message('Discovery catalog loaded. Choose an addon to validate and add locally.');
-                        } catch (_) { message('Could not load this discovery catalog. Refresh discovery, check network access and saved private-host exceptions, then try again.'); }
-                    });
-                });
-            });
-            if (!discovery.Selected) return;
-            node('h4', discovery.Selected.Name + ' (' + discovery.Selected.Type + ')', group);
-            if (!discovery.Addons.length) node('p', 'This catalog returned no installable HTTP addon links.', group);
-            discovery.Addons.slice(0, discovery.Visible).forEach(function (entry) {
-                var item = node('div', undefined, group); item.className = 'inputContainer';
-                node('h4', entry.Name, item);
-                if (entry.Description) node('p', entry.Description, item);
-                var installed = isConfigured(entry.TransportUrl);
-                var install = button(item, installed ? 'Already configured' : 'Install addon', function () {
-                    work(function () { return installAddon(entry.TransportUrl); });
-                });
-                install.disabled = installed;
-            });
-            if (discovery.Visible < discovery.Addons.length) {
-                button(group, 'Show more addons', function () { discovery.Visible += 50; renderAddons(); });
-            }
-        }
-        function renderAddons() {
-            var list = get('siphonAddons'); list.replaceChildren();
-            if (!config.Addons.length) node('p', 'No addons configured. Validate a manifest URL below to choose catalogs.', list);
-            config.Addons.forEach(function (addon) {
-                var section = node('section', undefined, list);
-                node('h3', addon.DisplayName || 'Unnamed addon', section);
-                checkbox(section, 'Enable addon', addon.Enabled, function (checked) { addon.Enabled = checked; renderAddons(); });
-                var url = input(section, 'Saved manifest URL (masked)', addon.ManifestUrl, 'password');
-                url.readOnly = true; url.autocomplete = 'new-password'; url.spellcheck = false;
-                button(section, 'Refresh catalog definitions', function () {
-                    work(async function () {
-                        message('Validating addon…');
-                        try {
-                            var manifest = await request('Siphon/Addons/Validate', 'POST', { ManifestUrl: addon.ManifestUrl });
-                            manifests.set(addon.Id, manifest); discoveries.delete(addon.Id); mergeCatalogs(addon, manifest); renderAddons();
-                            message('Catalog definitions refreshed. Select catalogs and save to apply changes.');
-                        } catch (_) { message('Could not validate this addon. Check its URL, network access, and saved private-host exceptions.'); }
-                    });
-                });
-                button(section, 'Discover addons', function () {
-                    work(async function () {
-                        message('Loading addon discovery catalogs…');
-                        try {
-                            var result = await request('Siphon/Addons/Discover', 'POST', { ManifestUrl: addon.ManifestUrl });
-                            discoveries.set(addon.Id, { Catalogs: result.Catalogs, Addons: [], Selected: null, Visible: 50 });
-                            renderAddons(); message(result.Catalogs.length ? 'Choose an addon discovery catalog below.' : 'This addon does not advertise any addon discovery catalogs.');
-                        } catch (_) { message('Addon discovery failed. Check network access, saved private-host exceptions, and addon availability.'); }
-                    });
-                });
-                button(section, 'Remove addon', function () {
-                    config.Addons = config.Addons.filter(function (entry) { return entry !== addon; });
-                    manifests.delete(addon.Id); discoveries.delete(addon.Id); dirty = true; renderAddons(); message('Addon removed locally. Save to apply.');
-                });
-                renderDiscovery(section, addon);
-                var manifest = manifests.get(addon.Id);
-                if (!manifest) node('p', 'Catalog definitions unavailable. Refresh them before saving an enabled addon.', section);
-                if (!addon.Catalogs.length) node('p', 'This addon has no media catalogs. It may still provide metadata, subtitles, playback sources or addon discovery.', section);
-                addon.Catalogs.forEach(function (catalog) {
-                    var definition = manifest && manifest.Catalogs.find(function (entry) { return entry.Type === catalog.Type && entry.Id === catalog.Id; });
-                    var group = node('fieldset', undefined, section);
-                    node('legend', (definition ? definition.Name : catalog.Id) + ' (' + catalog.Type + ')', group);
-                    checkbox(group, 'Import this catalog', catalog.Enabled, function (checked) { catalog.Enabled = checked; renderAddons(); });
-                    if (manifest && !definition) node('p', 'This saved catalog is no longer advertised. Disable it or verify the addon before syncing.', group);
-                    var limit = input(group, 'Item limit override (blank uses global limit)', catalog.MaxItems, 'number');
-                    limit.min = '1'; limit.max = '10000'; limit.step = '1'; limit.disabled = !addon.Enabled || !catalog.Enabled;
-                    limit.addEventListener('input', function () { catalog.MaxItems = limit.value === '' ? null : Number(limit.value); });
-                    var extras = definition ? definition.Extras.filter(function (extra) { return extra.Name !== 'skip'; }) : [];
-                    catalog.Extras.forEach(function (saved) {
-                        if (saved.Name !== 'skip' && !extras.some(function (entry) { return entry.Name === saved.Name; })) extras.push({ Name: saved.Name, IsRequired: false, Options: [] });
-                    });
-                    extras.forEach(function (extra) {
-                        var saved = catalog.Extras.find(function (entry) { return entry.Name === extra.Name; });
-                        var control = input(group, extra.Name + (extra.IsRequired ? ' (required)' : ' (optional)'), saved ? saved.Value : '');
-                        control.required = extra.IsRequired; control.disabled = !addon.Enabled || !catalog.Enabled;
-                        control.autocomplete = 'off'; control.spellcheck = false;
-                        if (extra.Options && extra.Options.length && (!extra.OptionsLimit || extra.OptionsLimit === 1)) {
-                            var select = document.createElement('select');
-                            select.setAttribute('is', 'emby-select'); select.className = 'emby-select-withcolor emby-select'; select.id = control.id;
-                            select.required = control.required; select.disabled = control.disabled;
-                            var blank = node('option', 'Choose a value', select); blank.value = '';
-                            var options = extra.Options.slice();
-                            if (saved && saved.Value && options.indexOf(saved.Value) === -1) options.push(saved.Value);
-                            options.forEach(function (value) { var option = node('option', value, select); option.value = value; });
-                            select.value = control.value; control.replaceWith(select); control = select;
-                        } else if (extra.Options && extra.Options.length) {
-                            var suggestions = node('datalist', undefined, group); suggestions.id = control.id + 'Options'; control.setAttribute('list', suggestions.id);
-                            extra.Options.forEach(function (value) { var option = node('option', undefined, suggestions); option.value = value; });
-                            node('p', 'Suggested values: ' + extra.Options.join(', ') + '. Use comma-separated choices; maximum: ' + extra.OptionsLimit + '.', group);
-                            control.addEventListener('input', function () {
-                                control.setCustomValidity(control.value.split(',').filter(Boolean).length > extra.OptionsLimit ? 'Too many choices for this extra.' : '');
-                            });
-                        }
-                        control.addEventListener('input', function () {
-                            catalog.Extras = catalog.Extras.filter(function (entry) { return entry.Name !== extra.Name; });
-                            if (control.value !== '') catalog.Extras.push({ Name: extra.Name, Value: control.value });
-                        });
-                    });
-                });
-            });
-        }
-        async function refreshStatus() {
-            get('siphonStatus').textContent = 'Loading synchronization status…';
-            try {
-                var status = await request('Siphon/Status', 'GET');
-                var tasks = await request('ScheduledTasks', 'GET');
-                var task = tasks.find(function (entry) { return entry.Key === 'SiphonCatalogSync'; });
-                var text = status.ItemCount + ' managed items: ' + status.MovieCount + ' movies, ' + status.EpisodeCount + ' episodes.';
-                if (task) {
-                    text += ' Sync state: ' + task.State + '.';
-                    if (task.LastExecutionResult) text += ' Last result: ' + task.LastExecutionResult.Status + '.';
-                } else text += ' The Siphon synchronization task is unavailable.';
-                get('siphonStatus').textContent = text;
-            } catch (_) { get('siphonStatus').textContent = 'Status could not be loaded. Check your administrator session and server connectivity.'; }
-        }
-        async function load() {
-            message('Loading saved configuration and catalog definitions…');
-            try {
-                config = await ApiClient.getPluginConfiguration(pluginId);
-                config.Addons = config.Addons || []; manifests.clear(); discoveries.clear();
-                textFields.concat(numberFields).forEach(function (key) { get('siphon' + key).value = config[key]; });
-                get('siphonAllowedPrivateHosts').value = (config.AllowedPrivateHosts || []).join('\n');
-                get('siphonRemoveMissingItems').checked = config.RemoveMissingItems;
-                var failed = false;
-                for (var addon of config.Addons) {
-                    addon.Catalogs = addon.Catalogs || [];
-                    addon.Catalogs.forEach(function (catalog) { catalog.Extras = (catalog.Extras || []).filter(function (extra) { return extra.Name !== 'skip'; }); });
-                    try {
-                        var manifest = await request('Siphon/Addons/Validate', 'POST', { ManifestUrl: addon.ManifestUrl });
-                        manifests.set(addon.Id, manifest); mergeCatalogs(addon, manifest);
-                    } catch (_) { failed = true; }
-                }
-                renderAddons(); dirty = false;
-                message(failed ? 'Configuration loaded. Some addon definitions are unavailable; their saved settings are preserved.' : 'Configuration loaded.');
-            } catch (_) { config = null; message('Configuration could not be loaded. Check your administrator session, then reload.'); }
-            await refreshStatus();
-        }
-        get('siphonAdd').addEventListener('click', function () {
-            work(async function () {
-                var url = get('siphonManifestUrl').value.trim();
-                if (!url) { message('Enter an addon manifest URL first.'); return; }
-                if (await installAddon(url)) get('siphonManifestUrl').value = '';
-            });
-        });
+        function isConfigured(url) { return config.Addons.some(function (addon) { return manifestKey(addon.ManifestUrl) === manifestKey(url); }); }
+        async function installAddon(url) { if (isConfigured(url)) { message('This addon is already in your list.'); return false; } if (config.Addons.length >= 64) { message('You reached the 64-addon limit.'); return false; } message('Checking addon manifest…'); try { var manifest = await request('Siphon/Addons/Validate', 'POST', { ManifestUrl: url }); var addon = { Id: uuid(), ManifestUrl: url, DisplayName: manifest.Name, Enabled: true, Catalogs: [] }; mergeCatalogs(addon, manifest); config.Addons.push(addon); manifests.set(addon.Id, manifest); dirty = true; renderAddons(); message('Addon added. Choose its catalogs, then save.'); return true; } catch (_) { message('This manifest could not be validated. Check the URL and network access.'); return false; } }
+        function renderDiscovery(section, addon) { var discovery = discoveries.get(addon.Id); if (!discovery) return; var group = node('div', undefined, section); group.className = 'siphon-discovery'; node('h4', 'Discover more addons', group); if (!discovery.Catalogs.length) { node('p', 'This addon does not advertise an addon discovery catalog.', group); return; } node('p', 'Choose a catalog to see installable addons.', group); discovery.Catalogs.forEach(function (catalog) { button(group, catalog.Name + ' (' + catalog.Type + ')', function () { work(async function () { message('Loading discoverable addons…'); try { var result = await request('Siphon/Addons/Discover', 'POST', { ManifestUrl: addon.ManifestUrl, Type: catalog.Type, Id: catalog.Id }); discoveries.set(addon.Id, { Catalogs: result.Catalogs, Addons: result.Addons, Selected: catalog, Visible: 50 }); renderAddons(); message('Choose an addon below to validate and add it.'); } catch (_) { message('Discovery failed. Check addon access and private-host settings.'); } }); }); }); if (!discovery.Selected) return; node('h4', discovery.Selected.Name, group); if (!discovery.Addons.length) node('p', 'No installable HTTP addons were returned.', group); discovery.Addons.slice(0, discovery.Visible).forEach(function (entry) { var item = node('div', undefined, group); item.className = 'inputContainer'; node('strong', entry.Name, item); if (entry.Description) node('p', entry.Description, item); var installed = isConfigured(entry.TransportUrl); var install = button(item, installed ? 'Already added' : 'Add discovered addon', function () { work(function () { return installAddon(entry.TransportUrl); }); }); install.disabled = installed; }); }
+        function renderCatalog(group, addon, catalog, manifest) { var definition = manifest && manifest.Catalogs.find(function (entry) { return entry.Type === catalog.Type && entry.Id === catalog.Id; }); var fieldset = node('fieldset', undefined, group); fieldset.className = 'siphon-catalog'; node('legend', (definition ? definition.Name : catalog.Id) + ' · ' + catalog.Type, fieldset); checkbox(fieldset, 'Import this catalog into Siphon', catalog.Enabled, function (checked) { catalog.Enabled = checked; renderAddons(); }); if (manifest && !definition) node('p', 'This catalog is no longer advertised. Disable it before saving.', fieldset); var limit = input(fieldset, 'Item limit override (optional)', catalog.MaxItems, 'number'); limit.min = '1'; limit.max = '10000'; limit.step = '1'; limit.disabled = !addon.Enabled || !catalog.Enabled; limit.addEventListener('input', function () { catalog.MaxItems = limit.value === '' ? null : Number(limit.value); dirty = true; }); var extras = definition ? definition.Extras.filter(function (extra) { return extra.Name !== 'skip'; }) : []; catalog.Extras.forEach(function (saved) { if (saved.Name !== 'skip' && !extras.some(function (entry) { return entry.Name === saved.Name; })) extras.push({ Name: saved.Name, IsRequired: false, Options: [] }); }); extras.forEach(function (extra) { var saved = catalog.Extras.find(function (entry) { return entry.Name === extra.Name; }); var control = input(fieldset, extra.Name + (extra.IsRequired ? ' (required)' : ' (optional)'), saved ? saved.Value : ''); control.required = extra.IsRequired; control.disabled = !addon.Enabled || !catalog.Enabled; control.autocomplete = 'off'; control.addEventListener('input', function () { catalog.Extras = catalog.Extras.filter(function (entry) { return entry.Name !== extra.Name; }); if (control.value !== '') catalog.Extras.push({ Name: extra.Name, Value: control.value }); dirty = true; }); }); }
+        function renderAddons() { var list = get('siphonAddons'); list.replaceChildren(); if (!config.Addons.length) { var empty = node('div', undefined, list); empty.className = 'siphon-card'; node('strong', 'No addons yet', empty); node('p', 'Paste a manifest URL below to add your first addon.', empty); } config.Addons.forEach(function (addon) { var section = node('article', undefined, list); section.className = 'siphon-card'; var header = node('div', undefined, section); header.className = 'siphon-card-header'; var title = node('div', undefined, header); var name = node('h3', addon.DisplayName || 'Unnamed addon', title); if (manifestKey(addon.ManifestUrl) === 'https://v3-cinemeta.strem.io/manifest.json') node('span', 'Official', name).className = 'siphon-badge'; var manifest = manifests.get(addon.Id); node('p', manifest && manifest.Description ? manifest.Description : 'Manifest URL saved. Catalog definitions are loaded when available.', title); var actions = node('div', undefined, header); actions.className = 'siphon-actions'; checkbox(actions, addon.Enabled ? 'Enabled' : 'Disabled', addon.Enabled, function (checked) { addon.Enabled = checked; renderAddons(); }); button(actions, 'Refresh', function () { work(async function () { try { var refreshed = await request('Siphon/Addons/Validate', 'POST', { ManifestUrl: addon.ManifestUrl }); manifests.set(addon.Id, refreshed); mergeCatalogs(addon, refreshed); renderAddons(); message('Addon definition refreshed.'); } catch (_) { message('Could not refresh this addon definition.'); } }); }); button(actions, 'Discover', function () { work(async function () { try { var result = await request('Siphon/Addons/Discover', 'POST', { ManifestUrl: addon.ManifestUrl }); discoveries.set(addon.Id, { Catalogs: result.Catalogs, Addons: [], Selected: null, Visible: 50 }); renderAddons(); message(result.Catalogs.length ? 'Choose a discovery catalog.' : 'This addon has no discovery catalog.'); } catch (_) { message('Discovery failed for this addon.'); } }); }); button(actions, 'Remove', function () { config.Addons = config.Addons.filter(function (entry) { return entry !== addon; }); manifests.delete(addon.Id); discoveries.delete(addon.Id); dirty = true; renderAddons(); message('Addon removed locally. Save to apply.'); }); var url = input(section, 'Manifest URL (hidden)', addon.ManifestUrl, 'password'); url.readOnly = true; url.autocomplete = 'new-password'; url.spellcheck = false; renderDiscovery(section, addon); if (!manifest) node('p', 'Catalog definitions unavailable. Refresh this addon before selecting catalogs.', section); if (manifest && !addon.Catalogs.length) node('p', 'No media catalogs are configured yet. Select catalogs after refreshing this addon.', section); addon.Catalogs.forEach(function (catalog) { renderCatalog(section, addon, catalog, manifest); }); }); }
+        async function refreshStatus() { get('siphonStatus').textContent = 'Loading status…'; try { var status = await request('Siphon/Status', 'GET'); var tasks = await request('ScheduledTasks', 'GET'); var task = tasks.find(function (entry) { return entry.Key === 'SiphonCatalogSync'; }); var text = status.ItemCount + ' channel items: ' + status.MovieCount + ' movies, ' + status.EpisodeCount + ' episodes.'; if (task) text += ' Sync: ' + task.State + (task.LastExecutionResult ? ' · ' + task.LastExecutionResult.Status : '') + '.'; get('siphonStatus').textContent = text; } catch (_) { get('siphonStatus').textContent = 'Status unavailable. Check your administrator session.'; } }
+        async function load() { message('Loading saved addons…'); try { config = await ApiClient.getPluginConfiguration(pluginId); config.Addons = config.Addons || []; manifests.clear(); discoveries.clear(); textFields.concat(numberFields).forEach(function (key) { get('siphon' + key).value = config[key] == null ? '' : config[key]; }); get('siphonAllowedPrivateHosts').value = (config.AllowedPrivateHosts || []).join('\n'); get('siphonRemoveMissingItems').checked = config.RemoveMissingItems; var failed = false; for (var addon of config.Addons) { addon.Catalogs = addon.Catalogs || []; addon.Catalogs.forEach(function (catalog) { catalog.Extras = (catalog.Extras || []).filter(function (extra) { return extra.Name !== 'skip'; }); }); try { var manifest = await request('Siphon/Addons/Validate', 'POST', { ManifestUrl: addon.ManifestUrl }); manifests.set(addon.Id, manifest); mergeCatalogs(addon, manifest); } catch (_) { failed = true; } } renderAddons(); dirty = false; message(failed ? 'Loaded. Some addon definitions are unavailable.' : 'Ready. Choose catalogs or add an addon.'); } catch (_) { config = null; message('Configuration could not be loaded. Reload after checking your administrator session.'); } await refreshStatus(); }
+        get('siphonAdd').addEventListener('click', function () { work(async function () { var url = get('siphonManifestUrl').value.trim(); if (!url) { message('Paste an addon manifest URL first.'); return; } if (await installAddon(url)) get('siphonManifestUrl').value = ''; }); });
         get('SiphonConfigForm').addEventListener('input', function (event) { if (event.target.id !== 'siphonManifestUrl') dirty = true; });
-        get('SiphonConfigForm').addEventListener('submit', function (event) {
-            event.preventDefault();
-            if (!config || !get('SiphonConfigForm').reportValidity()) return;
-            work(async function () {
-                textFields.forEach(function (key) { config[key] = get('siphon' + key).value; });
-                numberFields.forEach(function (key) { config[key] = Number(get('siphon' + key).value); });
-                config.AllowedPrivateHosts = get('siphonAllowedPrivateHosts').value.split(/\r?\n/).map(function (host) { return host.trim(); }).filter(Boolean);
-                config.RemoveMissingItems = get('siphonRemoveMissingItems').checked;
-                message('Saving configuration…');
-                try {
-                    var result = await ApiClient.updatePluginConfiguration(pluginId, config);
-                    dirty = false; Dashboard.processPluginConfigurationUpdateResult(result);
-                    message('Configuration saved. You can now synchronize saved catalogs.');
-                } catch (_) { message('Configuration was not saved. Check paths, base URL, numeric limits, private hosts, and your administrator session.'); }
-            });
-        });
+        get('SiphonConfigForm').addEventListener('submit', function (event) { event.preventDefault(); if (!config || !get('SiphonConfigForm').reportValidity()) return; work(async function () { textFields.forEach(function (key) { config[key] = get('siphon' + key).value; }); numberFields.forEach(function (key) { config[key] = Number(get('siphon' + key).value); }); config.AllowedPrivateHosts = get('siphonAllowedPrivateHosts').value.split(/\r?\n/).map(function (host) { return host.trim(); }).filter(Boolean); config.RemoveMissingItems = get('siphonRemoveMissingItems').checked; message('Saving changes…'); try { var result = await ApiClient.updatePluginConfiguration(pluginId, config); dirty = false; Dashboard.processPluginConfigurationUpdateResult(result); message('Saved. Sync when you are ready.'); } catch (_) { message('Could not save. Check the URL, limits, and private hosts.'); } }); });
         get('siphonRefresh').addEventListener('click', function () { work(refreshStatus); });
-        get('siphonReload').addEventListener('click', function () {
-            if (!dirty || window.confirm('Discard unsaved changes and reload the saved configuration?')) work(load);
-        });
-        get('siphonSync').addEventListener('click', function () {
-            work(async function () {
-                if (dirty) { message('Save your changes before synchronizing, or reload to discard them.'); return; }
-                message('Starting synchronization…');
-                try {
-                    var tasks = await request('ScheduledTasks', 'GET');
-                    var task = tasks.find(function (entry) { return entry.Key === 'SiphonCatalogSync'; });
-                    if (!task) { message('The Siphon catalog synchronization task was not found. Restart Jellyfin after installing the plugin.'); return; }
-                    if (task.State !== 'Idle') { message('Synchronization is already active. Refresh status to see its current state.'); await refreshStatus(); return; }
-                    await ApiClient.ajax({ url: ApiClient.getUrl('ScheduledTasks/Running/' + encodeURIComponent(task.Id)), type: 'POST' });
-                    message('Synchronization was requested. Use Refresh status to check completion.');
-                    await refreshStatus();
-                } catch (_) { message('Synchronization could not be started. Check your administrator session and server connectivity.'); }
-            });
-        });
+        get('siphonReload').addEventListener('click', function () { if (!dirty || window.confirm('Discard unsaved changes and reload?')) work(load); });
+        get('siphonSync').addEventListener('click', function () { work(async function () { if (dirty) { message('Save changes before syncing, or reload to discard them.'); return; } message('Starting sync…'); try { var tasks = await request('ScheduledTasks', 'GET'); var task = tasks.find(function (entry) { return entry.Key === 'SiphonCatalogSync'; }); if (!task) { message('Sync task unavailable. Restart Jellyfin.'); return; } if (task.State !== 'Idle') { message('Sync is already active.'); return; } await ApiClient.ajax({ url: ApiClient.getUrl('ScheduledTasks/Running/' + encodeURIComponent(task.Id)), type: 'POST' }); message('Sync requested.'); await refreshStatus(); } catch (_) { message('Could not start sync.'); } }); });
         page.addEventListener('viewshow', function () { work(load); });
     }());
     </script>

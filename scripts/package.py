@@ -20,7 +20,7 @@ def package(output, release_url, timestamp):
         raise FileNotFoundError("Build the Release plugin before packaging")
     output.mkdir(parents=True, exist_ok=True)
     archive = output / f"siphon-{version}.zip"
-    description = "Integrate Stremio addons into Jellyfin: catalogs, metadata and playback sources."
+    description = "Bring Stremio addon catalogs, metadata, subtitles and playback to Jellyfin's home channel."
     metadata = {
         "guid": "b2df1c14-4b7e-4e7b-9a95-8f9ad8d2b0c1", "name": "Siphon",
         "description": description, "overview": "Stremio addons in Jellyfin", "owner": "moodiness",

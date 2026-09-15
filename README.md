@@ -1,19 +1,17 @@
 # Siphon
 
-Siphon brings **Stremio addons into Jellyfin**: catalogs, metadata, subtitles, and playback through a server-side proxy.
+Siphon brings **Stremio addons into Jellyfin**: catalogs, metadata, subtitles, and playback through a server-side proxy and the Jellyfin home channel.
 
 Siphon targets **Jellyfin 12.1** and .NET 10. It does not include a torrent engine, debrid client, or external-player integration.
 
 ## Features
 
-- Import Stremio movie and series catalogs, including mixed catalogs.
-- Expand series metadata into Jellyfin seasons and episodes.
-- Preserve IMDb, TMDB, TVDB, MyAnimeList, and addon-specific identities.
-- Write Jellyfin-compatible NFO metadata and local artwork.
+- Import Stremio movie and series catalogs, including mixed catalogs, into a virtual Jellyfin channel.
+- Expand series metadata into Jellyfin channel seasons and episodes.
+- Expose artwork and metadata directly through Jellyfin channel items.
+- Show catalog rows on Jellyfin home/channel surfaces without creating filesystem media folders.
 - Discover addons advertised through Stremio `addon_catalog` resources.
-- Search and download HTTP(S) subtitles exposed by enabled addons.
 - Proxy HTTP(S) progressive media and HLS server-side without exposing upstream URLs or addon headers to players.
-- Keep managed files isolated in separate Movies and TV Shows library roots.
 - Enable the official Cinemeta addon by default as a removable example configuration. It has no catalog subscriptions selected by default.
 
 ## Requirements
@@ -21,7 +19,6 @@ Siphon targets **Jellyfin 12.1** and .NET 10. It does not include a torrent engi
 - Jellyfin Server **12.1.x**.
 - A server runtime supported by Jellyfin 12.1.
 - .NET 10 is required to build Siphon from source.
-- Two empty, separate directories for Siphon-managed Movies and TV Shows. Each directory must be registered as a folder location in an existing Jellyfin library of the matching type.
 
 ## Installation from the Jellyfin plugin repository
 
@@ -51,21 +48,13 @@ The plugin directory depends on the installation method. For Docker, mount a per
 
 ## First configuration
 
-1. Create separate empty directories, for example:
+1. Set **Public Jellyfin base URL** to a URL reachable by Jellyfin and playback clients. Include Jellyfin's base path when one is configured.
+2. Review the preconfigured **Cinemeta (official)** addon. It is enabled, but no catalog is imported until you select one.
+3. Enable the catalogs you want and save the configuration.
+4. Run **Sync catalogs**. Siphon updates its virtual Jellyfin channel; no Movies or TV Shows folder is created.
+5. Open the Jellyfin home screen or Channels view and select **Siphon**.
 
-   ```text
-   /srv/jellyfin/siphon/movies
-   /srv/jellyfin/siphon/tv
-   ```
-
-2. Add the Movies directory to an existing Jellyfin Movies library and the TV directory to an existing Jellyfin Shows library.
-3. Set **Public Jellyfin base URL** to a URL reachable by both Jellyfin and playback clients. Include Jellyfin's base path when one is configured.
-4. Set the Movies and TV Shows root paths using the paths as seen by the Jellyfin server/container.
-5. Review the preconfigured **Cinemeta (official)** addon. It is enabled, but no catalog is imported until you select one.
-6. Enable the catalogs you want and save the configuration.
-7. Run **Synchronize saved catalogs**.
-
-Siphon writes only files under owned roots marked with `.siphon-owned`. It refuses to overwrite or remove files that are not owned by Siphon.
+Siphon stores catalog state in its private plugin data directory and exposes media through Jellyfin channel items. It does not require a filesystem library location.
 
 ## Cinemeta and addon management
 

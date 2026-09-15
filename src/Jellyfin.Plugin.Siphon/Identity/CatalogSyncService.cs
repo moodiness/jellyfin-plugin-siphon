@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using Jellyfin.Plugin.Siphon.Configuration;
 using Jellyfin.Plugin.Siphon.Infrastructure;
 using Jellyfin.Plugin.Siphon.Protocol;
@@ -8,11 +10,10 @@ namespace Jellyfin.Plugin.Siphon.Identity;
 
 /// <summary>Reconciles complete catalog snapshots with owned movies and episodes.</summary>
 public sealed class CatalogSyncService(
-    ConfigurationAccessor configuration,
+    Configuration.ConfigurationAccessor configuration,
     AddonRegistry registry,
     StremioClient client,
     ISiphonStateStore state,
-    LibraryWriter writer,
     ILogger<CatalogSyncService> logger)
 {
 
@@ -34,7 +35,7 @@ public sealed class CatalogSyncService(
                 progress.Report(100);
                 return;
             }
-            writer.ValidateTargets();
+
 
             var addons = await registry.GetEnabledAsync(cancellationToken).ConfigureAwait(false);
             var previous = state.GetItems().ToDictionary(item => item.Key, StringComparer.Ordinal);
@@ -120,9 +121,8 @@ public sealed class CatalogSyncService(
                                     Description = full.Description ?? meta.Description,
                                     PosterUrl = full.Poster ?? meta.Poster,
                                     Released = full.Released ?? meta.Released,
-                                    Genres = full.Genres.Count > 0 ? full.Genres.ToArray() : meta.Genres.ToArray(),
+                                    Path = previous.GetValueOrDefault(key)?.Path ?? VirtualPath(mediaKind, contentKey),
                                     StreamIdentities = ContentIdentity.MovieAliases(meta.Type, meta.Id, ids).ToArray(),
-                                    Path = previous.GetValueOrDefault(key)?.Path ?? writer.GetPath(mediaKind, contentKey, ids, title, year, null, null),
                                     Owners = [owner]
                                 };
                                 continue;
@@ -151,9 +151,8 @@ public sealed class CatalogSyncService(
                                     SeriesDescription = full.Description ?? meta.Description,
                                     PosterUrl = full.Poster ?? meta.Poster,
                                     Released = video.Released,
-                                    Genres = full.Genres.Count > 0 ? full.Genres.ToArray() : meta.Genres.ToArray(),
+                                    Path = old?.Path ?? VirtualPath(mediaKind, contentKey + ":" + video.Season + ":" + video.Episode),
                                     StreamIdentities = [new StreamIdentity(meta.Type, video.Id)],
-                                    Path = old?.Path ?? writer.GetPath(mediaKind, contentKey, ids, priorContent?.SeriesName ?? title, year, video.Season, video.Episode),
                                     Owners = [owner]
                                 };
                             }
@@ -164,17 +163,6 @@ public sealed class CatalogSyncService(
                             break;
                         }
                     }
-                    foreach (var candidate in candidates.Values)
-                    {
-                        if (candidate.Type == "movie") _ = NfoMetadata.Movie(candidate);
-                        else
-                        {
-                            _ = NfoMetadata.Series(candidate);
-                            _ = NfoMetadata.Episode(candidate);
-                        }
-                    }
-
-
                     // An owner is replaced only after every page and series expansion succeeded.
                     if (complete)
                     {
@@ -217,22 +205,12 @@ public sealed class CatalogSyncService(
 
             var removals = desired.Values.Where(item => item.Owners.Length == 0 && config.RemoveMissingItems).ToArray();
             var retained = desired.Values.ExceptBy(removals.Select(item => item.Key), item => item.Key).ToArray();
-            // Persist a write-ahead ownership snapshot: an interrupted write can safely be retried.
-            await state.SaveAsync(desired.Values.ToArray(), cancellationToken).ConfigureAwait(false);
-            var written = await writer.WriteAsync(retained, cancellationToken).ConfigureAwait(false);
-            foreach (var item in removals)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                writer.Delete(item);
-            }
-
             await state.SaveAsync(retained, cancellationToken).ConfigureAwait(false);
-            progress.Report(80);
-            await writer.IngestAsync(new Progress<double>(value => progress.Report(80 + value * .2)), cancellationToken).ConfigureAwait(false);
-            logger.LogInformation("Siphon synchronized {ItemCount} items, wrote {WriteCount} shortcuts, removed {RemoveCount}, failed subscriptions {Failures}", retained.Length, written, removals.Length, failures);
+            progress.Report(100);
+            logger.LogInformation("Siphon synchronized {ItemCount} virtual channel items, removed {RemoveCount}, failed subscriptions {Failures}", retained.Length, removals.Length, failures);
             if (failures > 0)
             {
-                throw new InvalidOperationException($"{failures} catalog subscription(s) failed. Their previous media were preserved. See Siphon logs for subscription IDs.");
+                throw new InvalidOperationException($"{failures} catalog subscription(s) failed. Their previous items were preserved. See Siphon logs for subscription IDs.");
             }
 
             progress.Report(100);
@@ -286,4 +264,10 @@ public sealed class CatalogSyncService(
         return text is { Length: >= 4 } && int.TryParse(text.AsSpan(0, 4), NumberStyles.None, CultureInfo.InvariantCulture, out var year)
             && year is >= 1800 and <= 2200 ? year : null;
     }
+    private static string VirtualPath(string type, string identity)
+    {
+        var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity)));
+        return "/siphon/items/" + type + "/" + digest;
+    }
+
 }
