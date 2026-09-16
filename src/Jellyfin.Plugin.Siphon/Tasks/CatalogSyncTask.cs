@@ -8,7 +8,7 @@ public sealed class CatalogSyncTask(CatalogSyncService sync) : IScheduledTask
 {
     public string Name => "Synchronize Stremio catalogs";
     public string Key => "SiphonCatalogSync";
-    public string Description => "Synchronize selected Stremio catalogs into native Jellyfin home rows.";
+    public string Description => "Synchronize selected Stremio catalogs into the Siphon media library.";
     public string Category => "Siphon";
 
     public Task ExecuteAsync(IProgress<double> progress, CancellationToken cancellationToken)
