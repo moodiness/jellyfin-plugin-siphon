@@ -142,6 +142,30 @@ public sealed class SecurityStateTests : IDisposable
         Assert.Equal(item.Key, restarted.FindByPath(path)?.Key);
     }
 
+    [Fact]
+    public async Task NativePlaybackUrlResolvesSignedIdentityWithoutFilesystemNormalization()
+    {
+        var paths = Paths();
+        using var state = new SiphonStateStore(paths);
+        var item = new ManagedItem
+        {
+            Key = "movie:tt1234567",
+            Type = "movie",
+            ContentId = "tt1234567",
+            ContentKey = "movie:tt1234567",
+            VideoId = "tt1234567",
+            Name = "Film",
+            Path = Path.Combine(_directory, "Film.strm")
+        };
+        await state.SaveAsync([item], CancellationToken.None);
+        var tokens = new CapabilityTokenService(new SiphonSecretStore(paths));
+        var locator = new SiphonItemLocator(state, tokens);
+        var url = "https://jellyfin.example/base/Siphon/s/" + tokens.SignItem(item.Key);
+
+        Assert.Equal(item.Key, locator.Find(url)?.Key);
+        Assert.Null(locator.Find(url + "invalid"));
+    }
+
     private SiphonPaths Paths()
     {
         var proxy = DispatchProxy.Create<IApplicationPaths, PathsProxy>();

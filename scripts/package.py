@@ -39,7 +39,7 @@ def package(output, release_url, timestamp):
         "sourceUrl": release_url.rstrip("/") + "/" + archive.name,
         "checksum": hashlib.md5(content).hexdigest(),
         "timestamp": timestamp,
-        "changelog": "Fix configuration loading, status refresh, addon persistence across restarts, and private-host validation feedback."
+        "changelog": "Publish enabled catalogs directly on native Jellyfin home; remove the Siphon channel and manual library paths, restore rows on startup, and preserve native series/season navigation."
     }
     manifest = [{k: v for k, v in metadata.items() if k not in ("version", "targetAbi", "timestamp")} | {"versions": [release]}]
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
@@ -51,7 +51,7 @@ def package(output, release_url, timestamp):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("artifacts"))
-    parser.add_argument("--release-url", default="https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.2.1")
-    parser.add_argument("--timestamp", default="2026-09-15T00:00:00Z")
+    parser.add_argument("--release-url", default="https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.3.0")
+    parser.add_argument("--timestamp", default="2026-09-16T00:00:00Z")
     args = parser.parse_args()
     package(args.output, args.release_url, args.timestamp)

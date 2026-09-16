@@ -2,7 +2,7 @@ using Jellyfin.Plugin.Siphon.Identity;
 
 namespace Jellyfin.Plugin.Siphon.Infrastructure;
 
-/// <summary>Resolves Siphon items from virtual channel paths and capability URLs.</summary>
+/// <summary>Resolves stored item paths and signed native playback URLs.</summary>
 public sealed class SiphonItemLocator
 {
     private readonly ISiphonStateStore _state;
@@ -22,8 +22,11 @@ public sealed class SiphonItemLocator
     public ManagedItem? Find(string? path)
     {
         if (string.IsNullOrWhiteSpace(path)) return null;
-        var item = _state.FindByPath(path);
-        if (item is not null || _tokens is null || !Uri.TryCreate(path, UriKind.Absolute, out var uri)) return item;
+        if (!Uri.TryCreate(path, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
+        {
+            return _state.FindByPath(path);
+        }
+        if (_tokens is null) return null;
 
         var segments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
         var tokenIndex = Array.FindIndex(segments, segment => segment.Equals("siphon", StringComparison.OrdinalIgnoreCase));

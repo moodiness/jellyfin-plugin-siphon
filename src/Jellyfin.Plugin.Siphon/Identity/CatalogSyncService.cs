@@ -41,6 +41,7 @@ public sealed class CatalogSyncService(
             var addons = await registry.GetEnabledAsync(cancellationToken).ConfigureAwait(false);
             var previous = state.GetItems().ToDictionary(item => item.Key, StringComparer.Ordinal);
             var desired = new Dictionary<string, ManagedItem>(previous, StringComparer.Ordinal);
+            var catalogNames = new Dictionary<string, string>(StringComparer.Ordinal);
             var activeOwners = configuredSubscriptions.Select(s => s.Addon.Id + ":" + s.Catalog.Key).ToHashSet(StringComparer.Ordinal);
             if (config.RemoveMissingItems)
             {
@@ -61,6 +62,7 @@ public sealed class CatalogSyncService(
                         ?? throw new InvalidOperationException("The selected addon is unavailable.");
                     var catalog = addon.Manifest.Catalogs.FirstOrDefault(c => c.Id == subscription.Id && c.Type == subscription.Type)
                         ?? throw new InvalidOperationException("The selected catalog is no longer advertised by the addon.");
+                    catalogNames[owner] = addonConfig.DisplayName + " · " + catalog.Name;
                     var extras = subscription.Extras.ToDictionary(e => e.Name, e => e.Value, StringComparer.Ordinal);
                     foreach (var required in catalog.GetExtras().Where(e => e.IsRequired))
                     {
@@ -105,7 +107,6 @@ public sealed class CatalogSyncService(
                             var contentKey = ContentIdentity.Key(mediaKind, meta.Id, addonConfig.Id, ids);
                             var title = full.Name;
                             var year = GetYear(full) ?? GetYear(meta);
-                            var priorContent = state.FindByContentKey(contentKey);
                             if (mediaKind == "movie")
                             {
                                 var key = contentKey;
@@ -133,7 +134,6 @@ public sealed class CatalogSyncService(
                             foreach (var video in full.Videos.Where(v => v.Season is >= 0 and <= 9999 && v.Episode is >= 1 and <= 9999).Take(config.MaxEpisodesPerSeries))
                             {
                                 var key = $"{contentKey}:{video.Season}:{video.Episode}";
-                                var old = previous.GetValueOrDefault(key);
                                 candidates[key] = new ManagedItem
                                 {
                                     Key = key,
@@ -165,7 +165,7 @@ public sealed class CatalogSyncService(
                         }
                     }
                     // An owner is replaced only after every page and series expansion succeeded.
-                    if (complete)
+                    if (complete && config.RemoveMissingItems)
                     {
                         foreach (var existing in desired.Values.Where(item => item.Owners.Contains(owner, StringComparer.Ordinal)).ToArray())
                         {
@@ -207,11 +207,8 @@ public sealed class CatalogSyncService(
             var removals = desired.Values.Where(item => item.Owners.Length == 0 && config.RemoveMissingItems).ToArray();
             var retained = desired.Values.ExceptBy(removals.Select(item => item.Key), item => item.Key).ToArray();
             await state.SaveAsync(retained, cancellationToken).ConfigureAwait(false);
-            if (materializer.IsConfigured)
-            {
-                await materializer.ApplyAsync(retained, removals, cancellationToken).ConfigureAwait(false);
-            }
-            logger.LogInformation("Siphon synchronized {ItemCount} virtual channel items, removed {RemoveCount}, failed subscriptions {Failures}", retained.Length, removals.Length, failures);
+            await materializer.ApplyAsync(retained, removals, cancellationToken, catalogNames).ConfigureAwait(false);
+            logger.LogInformation("Siphon synchronized {ItemCount} home media items, removed {RemoveCount}, failed subscriptions {Failures}", retained.Length, removals.Length, failures);
             if (failures > 0)
             {
                 throw new InvalidOperationException($"{failures} catalog subscription(s) failed. Their previous items were preserved. See Siphon logs for subscription IDs.");

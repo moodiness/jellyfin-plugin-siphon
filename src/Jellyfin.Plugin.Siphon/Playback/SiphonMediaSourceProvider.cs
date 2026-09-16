@@ -9,7 +9,7 @@ using MediaBrowser.Model.MediaInfo;
 
 namespace Jellyfin.Plugin.Siphon.Playback;
 
-/// <summary>Exposes opaque proxy sources for Siphon virtual channel items.</summary>
+/// <summary>Exposes opaque proxy sources for native Siphon catalog items.</summary>
 public sealed class SiphonMediaSourceProvider(
     ISiphonStateStore state,
     SiphonItemLocator locator,
