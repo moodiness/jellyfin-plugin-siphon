@@ -55,6 +55,7 @@ The plugin directory depends on the installation method. For Docker, mount a per
 3. Enable the catalogs you want and save the configuration.
 4. Run **Sync catalogs** and wait for its status to become **Completed**.
 5. Open **Dashboard → Libraries**: Siphon has registered a mixed-content library named **Siphon** (Jellyfin labels its content type **Other**). It also appears in **My Media** on home (`#/home`).
+6. If home was already open before the first import, fully reload the web page to refresh Jellyfin's cached library navigation.
 
 Movies and series from all selected catalogs share this library without duplicate copies. Series contain native seasons and episodes. Siphon manages the library's backing directory under its private data directory automatically; no existing library or manual Movies/TV Shows target path is required, and no `.strm` or NFO files are written.
 
