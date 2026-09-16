@@ -24,7 +24,7 @@ public sealed class SiphonItemLocator
         if (string.IsNullOrWhiteSpace(path)) return null;
         if (!Uri.TryCreate(path, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
         {
-            return Path.IsPathFullyQualified(path) ? _state.FindByPath(path) : null;
+            return _state.FindByPath(path);
         }
         if (_tokens is null) return null;
 
