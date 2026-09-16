@@ -1,6 +1,6 @@
 name: "Siphon"
 guid: "b2df1c14-4b7e-4e7b-9a95-8f9ad8d2b0c1"
-version: "1.2.1.0"
+version: "1.3.0.0"
 targetAbi: "12.1.0.0"
 framework: "net10.0"
 owner: "moodiness"
@@ -10,4 +10,4 @@ category: "General"
 artifacts:
   - "Jellyfin.Plugin.Siphon.dll"
 changelog: |-
-  - Restore configuration loading, status refresh and styling; preserve addon identities across restarts and display private-host validation errors.
+  - Publish every enabled catalog directly on native Jellyfin home; remove the Siphon channel and manual library paths, restore catalog rows on startup, and preserve native series/season navigation.

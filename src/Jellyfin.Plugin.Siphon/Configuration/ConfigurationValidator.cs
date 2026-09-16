@@ -17,8 +17,6 @@ internal static class ConfigurationValidator
         {
             throw new ArgumentException("PublicBaseUrl must be an HTTP(S) server URL without credentials, query or fragment.");
         }
-        ValidateLibraryTarget(config.MoviesLibraryPath);
-        ValidateLibraryTarget(config.TvShowsLibraryPath);
 
 
         if (config.MaxItemsPerCatalog is < 1 or > 10000 || config.MaxEpisodesPerSeries is < 1 or > 10000
@@ -79,14 +77,6 @@ internal static class ConfigurationValidator
                     throw new ArgumentException("Catalog subscriptions require unique keys, type and ID, valid item limits, and unique extras excluding skip.");
                 }
             }
-        }
-    }
-    private static void ValidateLibraryTarget(string path)
-    {
-        if (string.IsNullOrWhiteSpace(path)) return;
-        if (!Path.IsPathFullyQualified(path) || Path.TrimEndingDirectorySeparator(path) == Path.GetPathRoot(path))
-        {
-            throw new ArgumentException("Native home library targets must be absolute non-root paths.");
         }
     }
 

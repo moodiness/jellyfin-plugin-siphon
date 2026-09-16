@@ -6,20 +6,19 @@ Siphon targets **Jellyfin 12.1** and .NET 10. It does not include a torrent engi
 
 ## Features
 
-- Import Stremio movie and series catalogs, including mixed catalogs, into existing Jellyfin libraries.
-- Show addon catalog media in native horizontal Jellyfin home rows without creating Siphon media folders.
+- Import Stremio movie, series, and mixed catalogs as native Jellyfin catalog views.
+- Show each enabled catalog directly as a horizontal row on Jellyfin home, without a Siphon channel or filesystem libraries.
 - Preserve IMDb, TMDB, TVDB, MyAnimeList, and addon-specific identities.
 - Expose artwork and metadata directly through Jellyfin media items.
 - Discover addons advertised through Stremio `addon_catalog` resources.
 - Proxy HTTP(S) progressive media and HLS server-side without exposing upstream URLs or addon headers to players.
-- Enable the official Cinemata addon by default as a removable example configuration. It has no catalog subscriptions selected by default.
+- Enable the Cinemata addon by default as a removable example configuration. It has no catalog subscriptions selected by default.
 
 ## Requirements
 
 - Jellyfin Server **12.1.x**.
 - A server runtime supported by Jellyfin 12.1.
 - .NET 10 is required to build Siphon from source.
-- An existing Movies and/or TV Shows library location where Siphon items should appear in native home rows.
 
 ## Installation from the Jellyfin plugin repository
 
@@ -41,9 +40,9 @@ The repository manifest points to the release archive and includes its Jellyfin 
 
 ## Manual installation
 
-1. Download `siphon-1.2.1.0.zip` from the [v1.2.1 release](https://github.com/moodiness/jellyfin-plugin-siphon/releases/tag/v1.2.1).
+1. Download `siphon-1.3.0.0.zip` from the [v1.3.0 release](https://github.com/moodiness/jellyfin-plugin-siphon/releases/tag/v1.3.0).
 2. Verify the archive against `SHA256SUMS`.
-3. Create a versioned folder named `Jellyfin.Plugin.Siphon_1.2.1` inside Jellyfin's plugin directory and extract the archive contents into that folder. The folder must contain `Jellyfin.Plugin.Siphon.dll` and `meta.json`.
+3. Create a versioned folder named `Jellyfin.Plugin.Siphon_1.3.0` inside Jellyfin's plugin directory and extract the archive contents into that folder. The folder must contain `Jellyfin.Plugin.Siphon.dll` and `meta.json`.
 4. Restart Jellyfin.
 5. Configure Siphon from the plugin dashboard.
 
@@ -52,13 +51,18 @@ The plugin directory depends on the installation method. For Docker, mount a per
 ## First configuration
 
 1. Set **Public Jellyfin base URL** to a URL reachable by Jellyfin and playback clients. Include Jellyfin's base path when one is configured.
-2. Optionally set **Existing Movies library location** and/or **Existing TV Shows library location** to paths already registered in Jellyfin libraries. These are existing user libraries, not Siphon folders.
-3. Review the preconfigured **Cinemata** addon. It is enabled, but no catalog is imported until you select one.
-4. Enable the catalogs you want and save the configuration.
-5. Run **Sync catalogs**. Siphon adds virtual Movie/Episode items to the selected existing libraries.
-6. Open Jellyfin home. The items appear in native horizontal rows such as Recently Added. The Siphon channel remains available only when no native target library is configured.
+2. Review the preconfigured **Cinemata** addon. It is enabled, but no catalog is imported until you select one.
+3. Enable the catalogs you want and save the configuration.
+4. Run **Sync catalogs** and wait for its status to become **Completed**.
+5. Open Jellyfin home (`#/home`). Each populated catalog has its own native Recently Added row. Series contain native seasons and episodes.
 
 Siphon stores catalog state in its private plugin data directory. It does not create a Siphon media folder or write `.strm` or NFO files.
+
+No existing media library or library path is required. Catalog rows are restored from saved state on startup, without requiring another addon fetch. The former Siphon channel and manual Movies/TV Shows target fields have been removed.
+
+After upgrading from the channel-based version, fully reload the Jellyfin web page once to discard its cached Siphon navigation entry.
+
+Home rows follow Jellyfin's per-user home preferences, including recently-added visibility and watched-item filtering. With no catalogs selected, or no matching items returned, there is no catalog row to display.
 
 ## Cinemata and addon management
 
@@ -77,7 +81,7 @@ Addon manifest URLs are stored in Jellyfin's plugin configuration. Protect confi
 
 ## Playback and security model
 
-Siphon fetches upstream resources from the Jellyfin server. Clients receive only Siphon URLs with short-lived opaque capabilities. HTTP(S) progressive streams and HLS are supported; torrent URLs and unsupported protocols are rejected.
+Siphon fetches upstream resources from the Jellyfin server. Clients receive signed Siphon URLs; playback sessions use short-lived opaque capabilities. HTTP(S) progressive streams and HLS are supported; torrent URLs and unsupported protocols are rejected.
 
 Private destinations are rejected by default. Add an exact trusted hostname under **Allowed private hosts** only when required, and never use wildcards or broad network ranges. See [SECURITY.md](SECURITY.md) for reporting security issues and the security boundaries.
 
