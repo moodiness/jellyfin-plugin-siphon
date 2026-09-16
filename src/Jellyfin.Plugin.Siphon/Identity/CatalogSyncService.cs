@@ -41,7 +41,6 @@ public sealed class CatalogSyncService(
             var addons = await registry.GetEnabledAsync(cancellationToken).ConfigureAwait(false);
             var previous = state.GetItems().ToDictionary(item => item.Key, StringComparer.Ordinal);
             var desired = new Dictionary<string, ManagedItem>(previous, StringComparer.Ordinal);
-            var catalogNames = new Dictionary<string, string>(StringComparer.Ordinal);
             var activeOwners = configuredSubscriptions.Select(s => s.Addon.Id + ":" + s.Catalog.Key).ToHashSet(StringComparer.Ordinal);
             if (config.RemoveMissingItems)
             {
@@ -62,7 +61,6 @@ public sealed class CatalogSyncService(
                         ?? throw new InvalidOperationException("The selected addon is unavailable.");
                     var catalog = addon.Manifest.Catalogs.FirstOrDefault(c => c.Id == subscription.Id && c.Type == subscription.Type)
                         ?? throw new InvalidOperationException("The selected catalog is no longer advertised by the addon.");
-                    catalogNames[owner] = addonConfig.DisplayName + " · " + catalog.Name;
                     var extras = subscription.Extras.ToDictionary(e => e.Name, e => e.Value, StringComparer.Ordinal);
                     foreach (var required in catalog.GetExtras().Where(e => e.IsRequired))
                     {
@@ -207,8 +205,8 @@ public sealed class CatalogSyncService(
             var removals = desired.Values.Where(item => item.Owners.Length == 0 && config.RemoveMissingItems).ToArray();
             var retained = desired.Values.ExceptBy(removals.Select(item => item.Key), item => item.Key).ToArray();
             await state.SaveAsync(retained, cancellationToken).ConfigureAwait(false);
-            await materializer.ApplyAsync(retained, removals, cancellationToken, catalogNames).ConfigureAwait(false);
-            logger.LogInformation("Siphon synchronized {ItemCount} home media items, removed {RemoveCount}, failed subscriptions {Failures}", retained.Length, removals.Length, failures);
+            await materializer.ApplyAsync(retained, cancellationToken).ConfigureAwait(false);
+            logger.LogInformation("Siphon synchronized {ItemCount} library media items, removed {RemoveCount}, failed subscriptions {Failures}", retained.Length, removals.Length, failures);
             if (failures > 0)
             {
                 throw new InvalidOperationException($"{failures} catalog subscription(s) failed. Their previous items were preserved. See Siphon logs for subscription IDs.");
