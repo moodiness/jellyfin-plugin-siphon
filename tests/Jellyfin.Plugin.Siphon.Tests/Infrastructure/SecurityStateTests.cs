@@ -2,9 +2,11 @@ using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Text;
+using System.Text.Json;
 using Jellyfin.Plugin.Siphon.Configuration;
 using Jellyfin.Plugin.Siphon.Identity;
 using Jellyfin.Plugin.Siphon.Infrastructure;
+using Jellyfin.Plugin.Siphon.Protocol;
 using MediaBrowser.Common.Configuration;
 using Xunit;
 
@@ -154,6 +156,36 @@ public sealed class SecurityStateTests : IDisposable
         await state.SaveAsync(state.GetItems(), CancellationToken.None);
         using var restarted = new SiphonStateStore(paths);
         Assert.Equal(item.Key, restarted.FindByPath(path)?.Key);
+    }
+
+    [Fact]
+    public async Task ParsedProducerCreditsSurviveStatePersistenceAndRestart()
+    {
+        using var json = JsonDocument.Parse("""
+            {"id":"show","type":"series","name":"Show",
+             "app_extras":{"producers":[{"name":"Series producer","photo":"https://example.org/producer.jpg"}]},
+             "videos":[{"id":"episode:1","season":1,"episode":1,"producer":"Episode producer"}]}
+            """);
+        var meta = Assert.IsType<StremioMeta>(StremioJson.Meta(json.RootElement));
+        var item = new ManagedItem
+        {
+            Key = "series:show:1:1",
+            Type = "series",
+            ContentId = meta.Id,
+            ContentKey = "series:show",
+            VideoId = meta.Videos[0].Id,
+            Name = meta.Name,
+            Path = Path.Combine(_directory, "episode.strm"),
+            People = meta.People,
+            EpisodePeople = meta.Videos[0].People
+        };
+        var paths = Paths();
+        using var store = new SiphonStateStore(paths);
+        await store.SaveAsync([item], CancellationToken.None);
+        using var restarted = new SiphonStateStore(paths);
+        var restored = Assert.Single(restarted.GetItems());
+        Assert.Equal(new ManagedPerson("Series producer", "Producer", PhotoUrl: "https://example.org/producer.jpg"), Assert.Single(restored.People));
+        Assert.Equal(new ManagedPerson("Episode producer", "Producer"), Assert.Single(restored.EpisodePeople));
     }
 
     [Fact]

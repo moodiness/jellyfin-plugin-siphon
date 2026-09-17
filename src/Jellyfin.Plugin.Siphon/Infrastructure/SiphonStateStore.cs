@@ -123,7 +123,11 @@ public sealed class SiphonStateStore : ISiphonStateStore, IDisposable
                 || !Path.IsPathFullyQualified(item.Path) || string.IsNullOrWhiteSpace(item.ContentId) || string.IsNullOrWhiteSpace(item.ContentKey)
                 || string.IsNullOrWhiteSpace(item.VideoId) || string.IsNullOrWhiteSpace(item.Name)
                 || item.Type is not ("movie" or "series") || item.Owners is null || item.ProviderIds is null || item.EpisodeProviderIds is null
+                || item.MissingOwners is null || item.MissingOwners.Any(owner => !item.Owners.Contains(owner, StringComparer.Ordinal))
                 || item.Genres is null || item.StreamIdentities is null || item.StreamIdentities.Any(identity => identity is null || string.IsNullOrWhiteSpace(identity.Type) || string.IsNullOrWhiteSpace(identity.VideoId))
+                || item.ProductionLocations is null || item.People is null || item.EpisodeGenres is null
+                || item.EpisodeProductionLocations is null || item.EpisodePeople is null
+                || item.People.Concat(item.EpisodePeople).Any(person => person is null || string.IsNullOrWhiteSpace(person.Name) || person.Type is not ("Actor" or "Director" or "Writer" or "Producer"))
                 || item.Owners.Any(string.IsNullOrWhiteSpace))
             {
                 throw new InvalidDataException("Siphon state contains an invalid managed item.");
@@ -145,7 +149,13 @@ public sealed class SiphonStateStore : ISiphonStateStore, IDisposable
     private static ManagedItem Clone(ManagedItem item) => item with
     {
         Owners = (string[])item.Owners.Clone(),
+        MissingOwners = (string[])item.MissingOwners.Clone(),
         Genres = (string[])item.Genres.Clone(),
+        ProductionLocations = (string[])item.ProductionLocations.Clone(),
+        People = (ManagedPerson[])item.People.Clone(),
+        EpisodeGenres = (string[])item.EpisodeGenres.Clone(),
+        EpisodeProductionLocations = (string[])item.EpisodeProductionLocations.Clone(),
+        EpisodePeople = (ManagedPerson[])item.EpisodePeople.Clone(),
         StreamIdentities = (StreamIdentity[])item.StreamIdentities.Clone(),
         ProviderIds = new Dictionary<string, string>(item.ProviderIds, StringComparer.OrdinalIgnoreCase),
         EpisodeProviderIds = new Dictionary<string, string>(item.EpisodeProviderIds, StringComparer.OrdinalIgnoreCase)
