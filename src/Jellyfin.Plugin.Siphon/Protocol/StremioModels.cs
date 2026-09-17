@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using Jellyfin.Plugin.Siphon.Identity;
 
@@ -15,7 +16,7 @@ public sealed class StremioManifest
 }
 
 public sealed record StremioResource(string Name, List<string>? Types = null, List<string>? IdPrefixes = null, bool IsObject = false);
-public sealed record StremioExtra(string Name, bool IsRequired, List<string> Options, int? OptionsLimit);
+public sealed record StremioExtra(string Name, bool IsRequired, List<string> Options, int? OptionsLimit, string? Default = null);
 public sealed class StremioCatalog
 {
     public string Type { get; init; } = "";
@@ -32,6 +33,15 @@ public sealed class StremioMeta
     public Dictionary<string, string> ProviderIds { get; init; } = new(StringComparer.OrdinalIgnoreCase);
     public string? Description { get; init; }
     public string? Poster { get; init; }
+    public string?[] SeasonPosters { get; init; } = [];
+    public string? Background { get; init; }
+    public string? Logo { get; init; }
+    public float? CommunityRating { get; init; }
+    public long? RunTimeTicks { get; init; }
+    public string? OfficialRating { get; init; }
+    public string? Status { get; init; }
+    public string[] ProductionLocations { get; init; } = [];
+    public ManagedPerson[] People { get; init; } = [];
     public string? Released { get; init; }
     public List<string> Genres { get; init; } = [];
     public string? ReleaseInfo { get; init; }
@@ -44,12 +54,21 @@ public sealed record StremioVideo(string Id, string Name, int? Season, int? Epis
     public Dictionary<string, string> ProviderIds { get; init; } = new(StringComparer.OrdinalIgnoreCase);
     public string? Description { get; init; }
     public string? Thumbnail { get; init; }
+    public string? Background { get; init; }
+    public string? Logo { get; init; }
+    public float? CommunityRating { get; init; }
+    public long? RunTimeTicks { get; init; }
+    public string? OfficialRating { get; init; }
+    public string[] Genres { get; init; } = [];
+    public string[] ProductionLocations { get; init; } = [];
+    public ManagedPerson[] People { get; init; } = [];
 }
 public sealed record StremioStream(string? Url, string Name, string Description, IReadOnlyDictionary<string, string> RequestHeaders, string? FileName, long? Size, IReadOnlyList<string>? CountryWhitelist, bool UnsupportedHeaders);
 
 /// <summary>Bounded, tolerant parsing; malformed array members are skipped, not coerced.</summary>
 public static class StremioJson
 {
+    private static readonly string[] RuntimeSuffixes = ["minutes", "minute", "mins", "min", "m"];
     private static JsonElement Field(JsonElement e, string key, string? alias = null)
     {
         if (e.ValueKind != JsonValueKind.Object) return default;
@@ -66,6 +85,120 @@ public static class StremioJson
         return e.EnumerateArray();
     }
     private static List<string>? Strings(JsonElement e) => e.ValueKind == JsonValueKind.Array ? Array(e).Select(Text).OfType<string>().ToList() : null;
+    private static string? MetadataText(JsonElement e, int maximum = 1024)
+    {
+        var value = Text(e)?.Trim();
+        return value is { Length: > 0 } && value.Length <= maximum ? value : null;
+    }
+    private static string? MetadataText(JsonElement e, string key, string? alias = null, int maximum = 1024)
+        => MetadataText(Field(e, key), maximum) ?? (alias is null ? null : MetadataText(Field(e, alias), maximum));
+    private static string[] MetadataStrings(JsonElement e)
+    {
+        if (MetadataText(e, 512) is { } single) return [single];
+        return Array(e).Select(value => MetadataText(value, 512)).OfType<string>()
+            .Distinct(StringComparer.OrdinalIgnoreCase).Take(256).ToArray();
+    }
+    private static string[] MetadataStrings(JsonElement e, string key, string alias)
+    {
+        var values = MetadataStrings(Field(e, key));
+        return values.Length > 0 ? values : MetadataStrings(Field(e, alias));
+    }
+    private static decimal? DecimalNumber(JsonElement e)
+    {
+        if (e.ValueKind == JsonValueKind.Number && e.TryGetDecimal(out var number)) return number;
+        return MetadataText(e, 32) is { } text && decimal.TryParse(text, NumberStyles.AllowDecimalPoint | NumberStyles.AllowLeadingSign,
+            CultureInfo.InvariantCulture, out number) ? number : null;
+    }
+    private static float? Rating(JsonElement e)
+    {
+        var rating = DecimalNumber(Field(e, "imdbRating"));
+        return rating is >= 0 and <= 10 ? (float)rating.Value : null;
+    }
+    private static long? Runtime(JsonElement e)
+    {
+        var runtime = Field(e, "runtime");
+        var minutes = DecimalNumber(runtime);
+        if (minutes is null && MetadataText(runtime, 48) is { } text)
+        {
+            var duration = text.AsSpan();
+            decimal hours = 0;
+            var hourSeparator = duration.IndexOfAny('h', 'H');
+            if (hourSeparator >= 0)
+            {
+                if (!decimal.TryParse(duration[..hourSeparator].Trim(), NumberStyles.AllowDecimalPoint,
+                    CultureInfo.InvariantCulture, out hours) || hours > 168) return null;
+                duration = duration[(hourSeparator + 1)..].Trim();
+                if (duration.IsEmpty) minutes = hours * 60;
+            }
+            foreach (var suffix in RuntimeSuffixes)
+            {
+                if (!duration.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) continue;
+                if (decimal.TryParse(duration[..^suffix.Length].Trim(), NumberStyles.AllowDecimalPoint,
+                    CultureInfo.InvariantCulture, out var parsed) && parsed <= 10080) minutes = hours * 60 + parsed;
+                break;
+            }
+        }
+        return minutes is > 0 and <= 10080 ? decimal.ToInt64(decimal.Round(minutes.Value * TimeSpan.TicksPerMinute)) : null;
+    }
+    private static string? Certification(JsonElement e)
+        => MetadataText(Field(e, "app_extras"), "certification", maximum: 64) ?? MetadataText(e, "certification", maximum: 64);
+    private static ManagedPerson[] People(JsonElement e)
+    {
+        var credits = new List<ManagedPerson>();
+        var extras = Field(e, "app_extras");
+        Add(Field(extras, "cast"), "Actor");
+        Add(Field(e, "cast"), "Actor");
+        Add(Field(extras, "directors"), "Director");
+        Add(Field(e, "director"), "Director");
+        Add(Field(extras, "writers"), "Writer");
+        Add(Field(e, "writer"), "Writer");
+        Add(Field(extras, "producers"), "Producer");
+        Add(Field(e, "producer"), "Producer");
+        return credits.ToArray();
+
+        void Add(JsonElement field, string type)
+        {
+            if (field.ValueKind == JsonValueKind.String) AddCredit(field);
+            else foreach (var value in Array(field)) AddCredit(value);
+
+            void AddCredit(JsonElement value)
+            {
+                if (credits.Count >= 256) return;
+                var name = MetadataText(value, 512) ?? MetadataText(value, "name", maximum: 512);
+                if (name is null) return;
+                var role = MetadataText(value, "character", "role", 512);
+                var photo = MetadataText(value, "photo", maximum: 8192);
+                var existing = credits.FindIndex(person => person.Type == type && person.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+                if (existing < 0) credits.Add(new(name, type, role, photo));
+                else credits[existing] = credits[existing] with
+                {
+                    Role = credits[existing].Role ?? role,
+                    PhotoUrl = credits[existing].PhotoUrl ?? photo
+                };
+            }
+        }
+    }
+    private static string? Status(JsonElement e)
+    {
+        var explicitStatus = MetadataText(e, "status", maximum: 64)?.ToLowerInvariant();
+        if (explicitStatus is not null)
+        {
+            return explicitStatus switch
+            {
+                "continuing" or "ongoing" or "returning series" => "Continuing",
+                "ended" or "canceled" or "cancelled" => "Ended",
+                "unreleased" or "planned" or "in production" => "Unreleased",
+                _ => null
+            };
+        }
+        var release = MetadataText(e, "releaseInfo", "release_info", 32);
+        if (release is { Length: 5 } && release[4] == '-' && ValidYear(release.AsSpan(0, 4))) return "Continuing";
+        if (release is { Length: 9 } && release[4] == '-' && ValidYear(release.AsSpan(0, 4)) && ValidYear(release.AsSpan(5, 4))) return "Ended";
+        return null;
+
+        static bool ValidYear(ReadOnlySpan<char> text)
+            => int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var year) && year is >= 1800 and <= 2200;
+    }
     private static JsonElement FirstField(JsonElement e, params string[] names)
     {
         foreach (var name in names)
@@ -110,7 +243,7 @@ public static class StremioJson
             if (canonical.ValueKind != JsonValueKind.Undefined)
             {
                 foreach (var e in Array(canonical))
-                    if (Text(e, "name") is { Length: > 0 } name) extras.Add(new(name, Field(e, "isRequired", "is_required").ValueKind == JsonValueKind.True, Strings(Field(e, "options")) ?? [], Number(Field(e, "optionsLimit", "options_limit"))));
+                    if (Text(e, "name") is { Length: > 0 } name) extras.Add(new(name, Field(e, "isRequired", "is_required").ValueKind == JsonValueKind.True, Strings(Field(e, "options")) ?? [], Number(Field(e, "optionsLimit", "options_limit")), MetadataText(e, "default", maximum: 512)));
             }
             else
             {
@@ -123,15 +256,25 @@ public static class StremioJson
     }
     public static StremioMeta? Meta(JsonElement e)
     {
-        if (Text(e, "id") is not { Length: > 0 } id || Text(e, "type") is not { Length: > 0 } type || Text(e, "name") is not { Length: > 0 } name) return null;
+        var id = Text(e, "id");
+        var type = Text(e, "type");
+        if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(type) || MetadataText(e, "name", maximum: 512) is not { } name) return null;
         var videos = new List<StremioVideo>();
         var videoElements = Array(Field(e, "videos")).ToArray();
         foreach (var v in videoElements)
-            if (Text(v, "id") is { Length: > 0 } videoId) videos.Add(new(videoId, Text(v, "title", "name") ?? name, Number(Field(v, "season")), Number(Field(v, "episode", "number")), Text(v, "released", "firstAired"))
+            if (Text(v, "id") is { } videoId && !string.IsNullOrWhiteSpace(videoId)) videos.Add(new(videoId, MetadataText(v, "title", "name", 512) ?? "", Number(Field(v, "season")), Number(Field(v, "episode", "number")), MetadataText(v, "released", "firstAired", 64))
             {
                 ProviderIds = ExternalIds(v, ""),
-                Description = Text(v, "description", "overview"),
-                Thumbnail = Text(v, "thumbnail")
+                Description = MetadataText(v, "description", "overview", 16384),
+                Thumbnail = MetadataText(v, "thumbnail", maximum: 8192),
+                Background = MetadataText(v, "background", maximum: 8192),
+                Logo = MetadataText(v, "logo", maximum: 8192),
+                CommunityRating = Rating(v),
+                RunTimeTicks = Runtime(v),
+                OfficialRating = Certification(v),
+                Genres = MetadataStrings(v, "genres", "genre"),
+                ProductionLocations = MetadataStrings(Field(v, "country")),
+                People = People(v)
             });
         var year = Field(e, "year");
         return new()
@@ -140,12 +283,22 @@ public static class StremioJson
             Type = type,
             Name = name,
             ProviderIds = ExternalIds(e, id),
-            Description = Text(e, "description", "overview"),
-            Poster = Text(e, "poster"),
-            Released = Text(e, "released", "firstAired"),
-            Genres = Strings(Field(e, "genres")) ?? [],
-            ReleaseInfo = Text(e, "releaseInfo", "release_info"),
-            Year = Text(year) ?? Number(year)?.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            Description = MetadataText(e, "description", "overview", 16384),
+            Poster = MetadataText(e, "poster", maximum: 8192),
+            SeasonPosters = Array(Field(Field(e, "app_extras"), "seasonPosters")).Take(10000)
+                .Select(poster => MetadataText(poster, 8192)).ToArray(),
+            Background = MetadataText(e, "background", maximum: 8192),
+            Logo = MetadataText(e, "logo", maximum: 8192),
+            CommunityRating = Rating(e),
+            RunTimeTicks = Runtime(e),
+            OfficialRating = Certification(e),
+            Status = Status(e),
+            ProductionLocations = MetadataStrings(Field(e, "country")),
+            People = People(e),
+            Released = MetadataText(e, "released", "firstAired", 64),
+            Genres = MetadataStrings(e, "genres", "genre").ToList(),
+            ReleaseInfo = MetadataText(e, "releaseInfo", "release_info", 32),
+            Year = MetadataText(year, 4) ?? Number(year)?.ToString(CultureInfo.InvariantCulture),
             Videos = videos,
             VideosComplete = videos.Count == videoElements.Length && videos.All(v => v.Season is >= 0 and <= 9999 && v.Episode is >= 1 and <= 9999)
         };

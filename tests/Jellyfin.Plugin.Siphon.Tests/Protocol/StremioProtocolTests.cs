@@ -108,4 +108,80 @@ public sealed class StremioProtocolTests
         Assert.Equal("Episode plot", meta.Videos[1].Description);
         Assert.Equal("https://example.org/episode.jpg", meta.Videos[1].Thumbnail);
     }
+    [Fact]
+    public void RuntimeUnitsAndRatingsRemainSpecificToEachEpisode()
+    {
+        using var json = JsonDocument.Parse("""
+            {"id":"show","type":"series","name":"Show","runtime":44,"imdbRating":"8.1",
+             "videos":[{"id":"episode:1","season":1,"episode":1,"runtime":"47.5 min","imdbRating":9.2},
+                       {"id":"episode:2","season":1,"episode":2,"runtime":"NaN","imdbRating":11}]}
+            """);
+        var meta = Assert.IsType<StremioMeta>(StremioJson.Meta(json.RootElement));
+        Assert.Equal(TimeSpan.FromMinutes(44).Ticks, meta.RunTimeTicks);
+        Assert.Equal(TimeSpan.FromMinutes(47.5).Ticks, meta.Videos[0].RunTimeTicks);
+        Assert.Equal(9.2f, meta.Videos[0].CommunityRating);
+        Assert.Null(meta.Videos[1].RunTimeTicks);
+        Assert.Null(meta.Videos[1].CommunityRating);
+    }
+
+    [Fact]
+    public void SparseCreditsMergeWithoutLosingRolesOrDifferentCreditTypes()
+    {
+        using var json = JsonDocument.Parse("""
+            {"id":"movie","type":"movie","name":"Movie","cast":["A. Actor","B. Actor"],
+             "director":"A. Actor","app_extras":{"cast":[{"name":"a. actor","character":"The narrator"}]}}
+            """);
+        var meta = Assert.IsType<StremioMeta>(StremioJson.Meta(json.RootElement));
+        var actors = meta.People.Where(person => person.Type == "Actor").ToArray();
+        Assert.Equal(2, actors.Length);
+        Assert.Equal("The narrator", Assert.Single(actors, person => person.Name.Equals("A. Actor", StringComparison.OrdinalIgnoreCase)).Role);
+        Assert.Equal("A. Actor", Assert.Single(meta.People, person => person.Type == "Director").Name);
+    }
+
+    [Fact]
+    public void MissingSeasonArtworkDoesNotShiftLaterSeasons()
+    {
+        using var json = JsonDocument.Parse("""
+            {"id":"show","type":"series","name":"Show","app_extras":{"seasonPosters":[
+              "https://example.org/specials.jpg",null,"https://example.org/season2.jpg",7,"https://example.org/season4.jpg"]}}
+            """);
+        var meta = Assert.IsType<StremioMeta>(StremioJson.Meta(json.RootElement));
+        Assert.Null(meta.SeasonPosters[1]);
+        Assert.Equal("https://example.org/season2.jpg", meta.SeasonPosters[2]);
+        Assert.Null(meta.SeasonPosters[3]);
+        Assert.Equal("https://example.org/season4.jpg", meta.SeasonPosters[4]);
+    }
+
+    [Fact]
+    public void BlankIdentitiesMakeCatalogAndEpisodeSnapshotsIncomplete()
+    {
+        using var json = JsonDocument.Parse("""
+            {"metas":[{"id":" ","type":"movie","name":"Invalid movie"},
+              {"id":"opaque","type":" ","name":"Invalid type"},
+              {"id":"show","type":"series","name":"Show","videos":[
+                {"id":" ","season":1,"episode":1},
+                {"id":"episode:2","season":1,"episode":2}]}]}
+            """);
+        var page = StremioJson.Catalog(json.RootElement);
+        Assert.False(page.IsComplete);
+        var show = Assert.Single(page.Items);
+        Assert.Equal("show", show.Id);
+        Assert.False(show.VideosComplete);
+        Assert.Equal("episode:2", Assert.Single(show.Videos).Id);
+    }
+
+    [Theory]
+    [InlineData("2h32min", 152d)]
+    [InlineData("2h", 120d)]
+    [InlineData("1H 0.5 MIN", 60.5)]
+    [InlineData("168h", 10080d)]
+    [InlineData("168h1min", null)]
+    [InlineData("9999999999999999999999999999h", null)]
+    [InlineData("2h9999999999999999999999999999min", null)]
+    public void HourDurationsAreConvertedWithoutOverflow(string runtime, double? minutes)
+    {
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(new { id = "movie", type = "movie", name = "Movie", runtime }));
+        var meta = Assert.IsType<StremioMeta>(StremioJson.Meta(json.RootElement));
+        Assert.Equal(minutes is { } value ? TimeSpan.FromMinutes(value).Ticks : (long?)null, meta.RunTimeTicks);
+    }
 }

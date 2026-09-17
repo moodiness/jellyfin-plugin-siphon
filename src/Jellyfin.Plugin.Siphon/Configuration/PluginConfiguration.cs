@@ -16,6 +16,32 @@ public sealed class PluginConfiguration : BasePluginConfiguration
     /// <summary>Gets or sets the URL clients can use to reach this Jellyfin server.</summary>
     public string PublicBaseUrl { get; set; } = string.Empty;
 
+    /// <summary>Gets or sets the optional TMDB application read-access token.</summary>
+    public string TmdbReadAccessToken { get; set; } = string.Empty;
+
+    /// <summary>Gets or sets the optional TVDB API key.</summary>
+    public string TvdbApiKey { get; set; } = string.Empty;
+
+    /// <summary>Gets or sets the optional Fanart API key.</summary>
+    public string FanartApiKey { get; set; } = string.Empty;
+
+    /// <summary>Gets or sets the optional MDBList API key.</summary>
+    public string MdbListApiKey { get; set; } = string.Empty;
+
+    public bool EnableTmdbMetadata { get; set; }
+    public bool EnableTvdbMetadata { get; set; }
+    public bool EnableFanartMetadata { get; set; }
+    public bool EnableMdbListMetadata { get; set; }
+    public string TvdbSubscriberPin { get; set; } = string.Empty;
+
+    /// <summary>Empty inherits the native Jellyfin metadata language.</summary>
+    public string MetadataLanguage { get; set; } = string.Empty;
+    public string MetadataUpdateMode { get; set; } = "FillMissing";
+    public int MetadataCacheHours { get; set; } = 24;
+
+    [XmlArrayItem("Field")]
+    public string[] MetadataRefreshFields { get; set; } = ["Overview", "Genres", "Ratings", "Images"];
+
 
     /// <summary>Gets or sets the maximum number of catalogue metas read per subscription.</summary>
     public int MaxItemsPerCatalog { get; set; } = 500;
@@ -30,6 +56,11 @@ public sealed class PluginConfiguration : BasePluginConfiguration
 
     /// <summary>Gets or sets whether complete successful syncs remove unreferenced managed items.</summary>
     public bool RemoveMissingItems { get; set; }
+
+    /// <summary>Only confirmed absence from complete catalog snapshots starts this grace period.</summary>
+    public int MissingItemRetentionDays { get; set; } = 7;
+    public bool ProtectFavorites { get; set; } = true;
+    public bool ProtectResumePositions { get; set; } = true;
 
     /// <summary>Gets or sets the time budget for one addon request.</summary>
     public int AddonTimeoutSeconds { get; set; } = 15;
