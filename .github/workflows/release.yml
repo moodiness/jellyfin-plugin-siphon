@@ -39,4 +39,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$RELEASE_TAG" artifacts/*.zip artifacts/SHA256SUMS --title "feat(release): Siphon $RELEASE_TAG" --generate-notes
+          gh release create "$RELEASE_TAG" artifacts/*.zip artifacts/SHA256SUMS --title "$RELEASE_TAG" --generate-notes
