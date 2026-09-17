@@ -5,7 +5,7 @@
 | Version | Supported |
 | --- | --- |
 | 1.0.x, 1.1.x, 1.2.x, 1.3.x and 1.4.x / Jellyfin 12.1.x | Yes |
-| 1.5.0.0 / Jellyfin 12.1.x | Prepared source; not yet published |
+| 1.5.0.0 / Jellyfin 12.1.x | Yes; latest published release |
 | 1.6.0.0 / Jellyfin 12.1.x | Prepared source; not yet published |
 | Other Jellyfin major versions | No |
 

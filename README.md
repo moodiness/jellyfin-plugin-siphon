@@ -6,11 +6,11 @@ Siphon brings **Stremio addons into Jellyfin**: catalogs, metadata, subtitles, a
 
 Siphon targets **Jellyfin 12.1** and .NET 10. The current source includes an opt-in, bounded MonoTorrent engine. It is not a debrid client or an external-player integration.
 
-**Latest published release: 1.4.1.0. Prepared source version: 1.6.0.0.** The 1.5.0.0 pull requests are merged; neither merging source nor preparing a newer candidate publishes a release. The repository manifest continues to advertise the last published archive until the release workflow runs.
+**Latest published release: 1.5.0.0. Prepared source version: 1.6.0.0.** The repository manifest advertises the published 1.5 archive. The newer 1.6 source is merged but is not yet released; merging source does not publish a release.
 
-**Siphon 1.5.0.0 (not yet published)** adds isolated per-user playback/subtitle addons and search preferences; durable native collections and playlists; catalog collections; selected-version resumable downloads; selective orphan-history recovery; field provenance and per-title source diagnostics; a followed-series calendar and opt-in notifications; all IntroDB timing types; and real, bounded P2P playback. It also includes native addon Search, targeted synchronization, a twenty-run decision history, provider quota/cooldown tracking, shared response caching, the supplied Siphon icon, and authoritative addon metadata with an optional missing-season-only TMDB supplement. These changes are not included in the published 1.4.1.0 package.
+**Siphon 1.5.0.0** adds isolated per-user playback/subtitle addons and search preferences; durable native collections and playlists; catalog collections; selected-version resumable downloads; selective orphan-history recovery; field provenance and per-title source diagnostics; a followed-series calendar and opt-in notifications; all IntroDB timing types; and real, bounded P2P playback. It also includes native addon Search, targeted synchronization, a twenty-run decision history, provider quota/cooldown tracking, shared response caching, the supplied Siphon icon, and authoritative addon metadata with an optional missing-season-only TMDB supplement. The published package also validates media response types and constrains document rendering on media routes.
 
-**Siphon 1.6.0.0 (not yet published)** adds a private, persistent server download queue, real finite-HLS offline exports, and opt-in signed notification webhooks. Both background downloads and external delivery are disabled by default. This candidate extends the merged 1.5 functionality; it is not included in the published 1.4.1.0 package.
+**Siphon 1.6.0.0 (not yet published)** adds a private, persistent server download queue, real finite-HLS offline exports, and opt-in signed notification webhooks. Both background downloads and external delivery are disabled by default. This candidate extends the published 1.5 functionality; it is not included in the published 1.5.0.0 package.
 
 ## Features
 
@@ -66,7 +66,7 @@ The repository manifest points to the release archive and includes its Jellyfin 
 
 ## Manual installation
 
-1. For the prepared 1.6.0.0 source, build `siphon-1.6.0.0.zip` using the commands below or download the matching CI artifact. The intended release tag is `v1.6.0`; no download at that tag exists until publication. The current stable download remains the [v1.4.1 release](https://github.com/moodiness/jellyfin-plugin-siphon/releases/tag/v1.4.1).
+1. For the prepared 1.6.0.0 source, build `siphon-1.6.0.0.zip` using the commands below or download the matching CI artifact. The intended release tag is `v1.6.0`; no download at that tag exists until publication. The current stable download is the [v1.5.0 release](https://github.com/moodiness/jellyfin-plugin-siphon/releases/tag/v1.5.0), containing `siphon-1.5.0.0.zip`.
 2. Verify the archive against `SHA256SUMS`.
 3. For 1.6.0.0, create a versioned folder named `Jellyfin.Plugin.Siphon_1.6.0.0` inside Jellyfin's plugin directory and extract the archive contents into that folder. The folder must contain `Jellyfin.Plugin.Siphon.dll` and `meta.json`. Use the matching versioned folder when installing an older release; do not leave two copies of the plugin installed.
 4. Restart Jellyfin.
