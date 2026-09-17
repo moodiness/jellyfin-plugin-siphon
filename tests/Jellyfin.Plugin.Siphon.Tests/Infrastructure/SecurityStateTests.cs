@@ -68,6 +68,20 @@ public sealed class SecurityStateTests : IDisposable
     }
 
     [Fact]
+    public void OversizedProviderIdsCannotPoisonPlaybackCapabilities()
+    {
+        var key = ContentIdentity.Key("movie", "opaque", "installation", new Dictionary<string, string>
+        {
+            ["Tmdb"] = new string('9', 1024),
+            ["Tvdb"] = "42"
+        });
+        var tokens = new CapabilityTokenService(new SiphonSecretStore(Paths()));
+        var capability = tokens.SignSource(key, new string('A', 64));
+        Assert.True(tokens.TryReadSource(capability, out var restored, out _));
+        Assert.Equal("movie:tvdb:42", restored);
+    }
+
+    [Fact]
     public void CorruptKeyIsNeverRegenerated()
     {
         var paths = Paths();
@@ -206,15 +220,46 @@ public sealed class SecurityStateTests : IDisposable
         await blocked;
     }
 
-    private static async Task<string> ServeOnce(TcpListener listener, string response, CancellationToken cancellationToken)
+    [Fact]
+    public async Task AuthenticationRedirectsCannotReplayCredentials()
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var origin = new TcpListener(IPAddress.Loopback, 0);
+        using var target = new TcpListener(IPAddress.Loopback, 0);
+        origin.Start();
+        target.Start();
+        var originPort = ((IPEndPoint)origin.LocalEndpoint).Port;
+        var targetPort = ((IPEndPoint)target.LocalEndpoint).Port;
+        var served = ServeOnce(origin,
+            $"HTTP/1.1 307 Temporary Redirect\r\nLocation: http://localhost:{targetPort}/collect\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            deadline.Token, readBody: true);
+        var configuration = new ConfigurationAccessor(() => new PluginConfiguration { AllowedPrivateHosts = ["localhost"] });
+        using var client = new SafeHttpClient(configuration, new SsrfPolicy(configuration));
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => client.PostJsonAsync(
+            new Uri($"http://localhost:{originPort}/login"), "{\"apikey\":\"fixture-secret\"}", null, deadline.Token));
+        await served;
+        Assert.False(target.Pending());
+    }
+
+    private static async Task<string> ServeOnce(TcpListener listener, string response, CancellationToken cancellationToken, bool readBody = false)
     {
         using var connection = await listener.AcceptTcpClientAsync(cancellationToken);
         await using var stream = connection.GetStream();
         using var reader = new StreamReader(stream, Encoding.ASCII, leaveOpen: true);
         var headers = new StringBuilder();
+        var contentLength = 0;
         while (await reader.ReadLineAsync(cancellationToken) is { Length: > 0 } line)
         {
             headers.AppendLine(line);
+            if (readBody && line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
+                contentLength = int.Parse(line["Content-Length:".Length..], System.Globalization.CultureInfo.InvariantCulture);
+        }
+        if (contentLength > 0)
+        {
+            var body = new char[contentLength];
+            var received = await reader.ReadBlockAsync(body.AsMemory(), cancellationToken);
+            if (received != contentLength) throw new EndOfStreamException();
         }
 
         await stream.WriteAsync(Encoding.ASCII.GetBytes(response), cancellationToken);
