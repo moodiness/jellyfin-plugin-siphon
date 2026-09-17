@@ -28,7 +28,7 @@ public sealed class CatalogSyncService(
 
     public async Task SynchronizeAsync(IProgress<double> progress, CancellationToken cancellationToken, SyncKind kind = SyncKind.Catalogs)
     {
-        if (!await configuration.MutationGate.WaitAsync(0, cancellationToken).ConfigureAwait(false))
+        if (!await configuration.SynchronizationGate.WaitAsync(0, cancellationToken).ConfigureAwait(false))
         {
             throw new InvalidOperationException("A Siphon synchronization is already running.");
         }
@@ -266,7 +266,7 @@ public sealed class CatalogSyncService(
             }
             finally
             {
-                configuration.MutationGate.Release();
+                configuration.SynchronizationGate.Release();
             }
         }
     }
@@ -379,14 +379,22 @@ public sealed class CatalogSyncService(
         var retainedKeys = retained.Select(item => item.Key).ToHashSet(StringComparer.Ordinal);
         var removed = previous.Keys.Count(key => !retainedKeys.Contains(key));
         diagnostics.SetSummary(added, updated, unchanged, removed, preserved, failures);
-        diagnostics.ReportStage("Saving", "Items", 0, retained.Count);
-        await state.SaveAsync(retained, ct).ConfigureAwait(false);
-        diagnostics.ReportStage("Saving", "Items", retained.Count, retained.Count);
-        progress.Report(86);
-        diagnostics.ReportStage("Publishing", "Items", 0, retained.Count);
-        await materializer.ApplyAsync(retained, ct, catalogNames, new ProgressRange(progress, 86, 99),
-            kind == SyncKind.FullRefresh ? null : changed, scopedContentKeys).ConfigureAwait(false);
-        diagnostics.ReportStage("Finalizing", "Items", retained.Count, retained.Count);
+        await configuration.MutationGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            diagnostics.ReportStage("Saving", "Items", 0, retained.Count);
+            await state.SaveAsync(retained, ct).ConfigureAwait(false);
+            diagnostics.ReportStage("Saving", "Items", retained.Count, retained.Count);
+            progress.Report(86);
+            diagnostics.ReportStage("Publishing", "Items", 0, retained.Count);
+            await materializer.ApplyAsync(retained, ct, catalogNames, new ProgressRange(progress, 86, 99),
+                kind == SyncKind.FullRefresh ? null : changed, scopedContentKeys).ConfigureAwait(false);
+            diagnostics.ReportStage("Finalizing", "Items", retained.Count, retained.Count);
+        }
+        finally
+        {
+            configuration.MutationGate.Release();
+        }
     }
 
     private static (bool Complete, bool Limited) ConvertMetadata(StremioMeta meta, StremioMeta full, string addonId,

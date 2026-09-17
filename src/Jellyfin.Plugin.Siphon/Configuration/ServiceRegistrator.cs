@@ -8,6 +8,9 @@ namespace Jellyfin.Plugin.Siphon.Configuration;
 public sealed class ConfigurationAccessor
 {
     private readonly Func<PluginConfiguration> _getConfiguration;
+    // Snapshot/configuration operations take this before MutationGate when both are needed.
+    internal SemaphoreSlim SynchronizationGate { get; } = new(1, 1);
+    // Native library writes only; upstream I/O must never hold this gate.
     internal SemaphoreSlim MutationGate { get; } = new(1, 1);
 
     public ConfigurationAccessor() : this(() => Plugin.Instance?.Configuration

@@ -613,10 +613,15 @@
             catalog.Extras.forEach(function (saved) {
                 if (saved.Name !== 'skip' && !extras.some(function (entry) { return entry.Name === saved.Name; })) extras.push({ Name: saved.Name, IsRequired: false, Options: [] });
             });
-            extras.forEach(function (extra) {
+            extras.forEach(function (extra, index) {
                 var saved = catalog.Extras.find(function (entry) { return entry.Name === extra.Name; });
                 var required = extra.IsRequired && !extra.Default;
-                var control = input(fields, extra.Name + (required ? ' (required)' : ''), saved ? saved.Value : (extra.Default || ''));
+                var filterLabel = 'Catalog filter' + (extras.length > 1 ? ' ' + (index + 1) : '');
+                var control = input(fields, filterLabel + (required ? ' (required)' : ''), saved ? saved.Value : (extra.Default || ''));
+                var help = node('p', 'Addon parameter: ' + extra.Name + '. Its meaning and values are defined by the addon.', control.parentElement);
+                help.className = 'siphon-help';
+                help.id = control.id + 'Help';
+                control.setAttribute('aria-describedby', help.id);
                 control.required = required;
                 control.maxLength = 16384;
                 control.disabled = !addon.Enabled || !catalog.Enabled;

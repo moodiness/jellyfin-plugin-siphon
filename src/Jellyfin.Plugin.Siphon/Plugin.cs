@@ -48,19 +48,31 @@ public sealed class Plugin : BasePlugin<Configuration.PluginConfiguration>, IHas
             throw new ArgumentException("Invalid Siphon configuration type.", nameof(configuration));
         }
 
-        if (!_configurationAccessor.MutationGate.Wait(0))
+        if (!_configurationAccessor.SynchronizationGate.Wait(0))
         {
             throw new ArgumentException("Stop the Siphon synchronization before changing its configuration.");
         }
 
         try
         {
-            Jellyfin.Plugin.Siphon.Configuration.ConfigurationValidator.Validate(config);
-            base.UpdateConfiguration(config);
+            if (!_configurationAccessor.MutationGate.Wait(0))
+            {
+                throw new ArgumentException("Wait for the current Siphon library update before changing its configuration.");
+            }
+
+            try
+            {
+                Jellyfin.Plugin.Siphon.Configuration.ConfigurationValidator.Validate(config);
+                base.UpdateConfiguration(config);
+            }
+            finally
+            {
+                _configurationAccessor.MutationGate.Release();
+            }
         }
         finally
         {
-            _configurationAccessor.MutationGate.Release();
+            _configurationAccessor.SynchronizationGate.Release();
         }
     }
 

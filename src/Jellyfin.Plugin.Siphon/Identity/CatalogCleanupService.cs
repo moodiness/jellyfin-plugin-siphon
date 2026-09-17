@@ -20,7 +20,7 @@ public sealed class CatalogCleanupService(
     private PreviewGrant? _preview;
     private bool _uncertainSynchronization;
 
-    // Caller owns MutationGate. A cancelled/failed commit must not leave an older preview executable.
+    // Caller owns SynchronizationGate. A cancelled/failed commit must not leave an older preview executable.
     internal void BeginSynchronization()
     {
         _preview = null;
@@ -39,7 +39,7 @@ public sealed class CatalogCleanupService(
 
     public async Task<CleanupPreview> PreviewAsync(int startIndex, int limit, CancellationToken ct, string? previewToken = null)
     {
-        await configuration.MutationGate.WaitAsync(ct).ConfigureAwait(false);
+        await configuration.SynchronizationGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             var generated = _clock.GetUtcNow();
@@ -70,14 +70,14 @@ public sealed class CatalogCleanupService(
         }
         finally
         {
-            configuration.MutationGate.Release();
+            configuration.SynchronizationGate.Release();
         }
     }
 
     public async Task<CleanupExecution> ExecuteAsync(string previewToken, bool confirmed, CancellationToken ct)
     {
         if (!confirmed) throw new InvalidOperationException("Explicit cleanup confirmation is required.");
-        await configuration.MutationGate.WaitAsync(ct).ConfigureAwait(false);
+        await configuration.SynchronizationGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             var grant = _preview;
@@ -95,13 +95,21 @@ public sealed class CatalogCleanupService(
             var remove = assessment.Where(item => item.Reason == "Eligible").Select(item => item.Key).ToHashSet(StringComparer.Ordinal);
             if (remove.Count == 0) return new CleanupExecution(0);
             var retained = items.Where(item => !remove.Contains(item.Key)).ToArray();
-            await state.SaveAsync(retained, ct).ConfigureAwait(false);
-            await materializer.ApplyAsync(retained, ct).ConfigureAwait(false);
+            await configuration.MutationGate.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                await state.SaveAsync(retained, ct).ConfigureAwait(false);
+                await materializer.ApplyAsync(retained, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                configuration.MutationGate.Release();
+            }
             return new CleanupExecution(remove.Count);
         }
         finally
         {
-            configuration.MutationGate.Release();
+            configuration.SynchronizationGate.Release();
         }
     }
 

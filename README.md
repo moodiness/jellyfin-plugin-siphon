@@ -4,7 +4,7 @@ Siphon brings **Stremio addons into Jellyfin**: catalogs, metadata, subtitles, a
 
 Siphon targets **Jellyfin 12.1** and .NET 10. It does not include a torrent engine, debrid client, or external-player integration.
 
-**Siphon 1.4.0.0** adds per-catalog libraries, incremental metadata, followed-series refresh, native stream versions, redesigned settings, and the security fixes described below.
+**Siphon 1.4.1.0 (unreleased)** fixes media-detail loading during synchronization and clarifies addon-defined catalog filters. The manual installation instructions below refer to the latest published release.
 
 ## Features
 
@@ -75,7 +75,7 @@ Jellyfin library names customized by an administrator and additional personal me
 
 - **Addons** manages manifests, capabilities, enablement, and playback priority. **Catalogs** manages imported libraries separately. Catalog lists start collapsed; expand an addon or use **Manage catalogs** at the bottom right of its addon card to open its list. The selection count stays visible.
 - **Hide catalogs** and **Hide all catalog lists** only collapse the interface: they never disable subscriptions or create unsaved configuration changes. **Selected**, **All available**, and search filter the lists independently of whether they are expanded.
-- Expand a catalog's options to change its import limit and advertised filters. Movie, series, and anime catalogs are supported; live-TV catalogs are not.
+- Expand a catalog's options to change its import limit and advertised filters. Each filter shows its technical addon parameter as help text: a key such as `genre` can represent genres, periods, or other addon-defined choices. Parameter names and values stay unchanged in requests. Movie, series, and anime catalogs are supported; live-TV catalogs are not.
 - Addon manifests load in the background without blocking access to saved settings. Capabilities come from their declared resources, types, and resource-specific ID prefixes, not manual role switches. A declared `tv` type is shown but is not imported as native live TV. **Move up** and **Move down** change addon priority, which also controls stream ordering.
 - **Save changes** persists the draft; **Discard changes** restores saved values. Unsaved edits survive navigation away and back within the same dashboard session, but are not stored as a recoverable draft after closing or reloading the browser.
 - Saving checks for configuration changes made by another session rather than silently overwriting them. Reload and reapply the draft if a conflict is reported.
@@ -88,6 +88,8 @@ Jellyfin library names customized by an administrator and additional personal me
 ### Incremental synchronization and followed series
 
 Normal catalog synchronization defaults to every twelve hours. It still retrieves selected catalogs and their episode listings, but reuses fresh successful metadata-provider responses and skips unchanged native metadata and credits. A durable publication checkpoint lets a later run repair publication interrupted after managed state was saved.
+
+Opening media details and resolving stream versions do not wait for catalog or metadata fetches during synchronization. Publication and cleanup still serialize native library writes, and settings cannot be changed while a sync is running.
 
 **Refresh followed series** defaults to every two hours. A series is followed when any user has favorited the series, a season, or an episode, or has watched, played, or started one of its episodes, including an alternate version. Normal synchronization processes these series first. The focused task requests their episode metadata directly and bypasses the metadata-provider cache; it does not request catalog pages. Unfollowed series and catalog ownership remain unchanged. Omitted episodes and failed series retain their previous items and user history.
 
@@ -174,7 +176,7 @@ dotnet test Jellyfin.Plugin.Siphon.sln -c Release
 python3 scripts/package.py
 ```
 
-The build targets `net10.0` and Jellyfin ABI `12.1.0.0`. Release packaging produces `artifacts/siphon-1.4.0.0.zip`, a repository manifest, and `SHA256SUMS`. The matching release tag is `v1.4.0`; generating these files does not create a tag or publish a release. The release workflow publishes only the plugin ZIP and `SHA256SUMS`, and updates the root `manifest.json` in the repository. Jellyfin should use the stable repository manifest URL above, not a release attachment.
+The build targets `net10.0` and Jellyfin ABI `12.1.0.0`. Release packaging produces `artifacts/siphon-1.4.1.0.zip`, a repository manifest, and `SHA256SUMS`. The matching release tag is `v1.4.1`; generating these files does not create a tag or publish a release. The release workflow publishes only the plugin ZIP and `SHA256SUMS`, and updates the root `manifest.json` in the repository. Jellyfin should use the stable repository manifest URL above, not a release attachment.
 
 ## License
 
