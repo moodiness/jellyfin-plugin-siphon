@@ -147,7 +147,7 @@ public static class ContentIdentity
 
     private static string? Numeric(string value)
     {
-        if (value.Length == 0 || value.AsSpan().IndexOfAnyExceptInRange('0', '9') >= 0) return null;
+        if (value.Length is 0 or > 64 || value.AsSpan().IndexOfAnyExceptInRange('0', '9') >= 0) return null;
         var first = 0;
         while (first < value.Length && value[first] == '0') first++;
         return first == value.Length ? null : first == 0 ? value : value[first..];

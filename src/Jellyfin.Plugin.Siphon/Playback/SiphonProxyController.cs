@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
+using Jellyfin.Plugin.Siphon.Configuration;
 using Jellyfin.Plugin.Siphon.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
@@ -16,7 +17,8 @@ public sealed class SiphonProxyController(
     ISiphonStateStore state,
     StreamResolver resolver,
     ProxySessionStore sessions,
-    ISafeHttpClient http) : ControllerBase
+    ISafeHttpClient http,
+    ConfigurationAccessor configuration) : ControllerBase
 {
     private static readonly SemaphoreSlim GlobalSlots = new(64, 64);
     private static readonly SemaphoreSlim ResolutionGate = new(4, 4);
@@ -153,7 +155,9 @@ public sealed class SiphonProxyController(
     }
     private async Task ExecuteImageAsync(string token)
     {
-        var ct = HttpContext.RequestAborted;
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
+        deadline.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(configuration.Current.AddonTimeoutSeconds, 1, 120)));
+        var ct = deadline.Token;
         if (!AllowRequest() || !GlobalSlots.Wait(0))
         {
             Reject();
@@ -162,13 +166,13 @@ public sealed class SiphonProxyController(
 
         try
         {
-            if (token.Length > 4096 || !tokens.TryReadItem(token, out var key) || state.FindByKey(key) is not { PosterUrl: { } poster })
+            if (token.Length > 4096 || !tokens.TryReadItem(token, out var key) || state.FindByKey(key) is not { } item)
             {
                 Response.StatusCode = 404;
                 return;
             }
 
-            if (!Uri.TryCreate(poster, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
+            if (!Uri.TryCreate(item.PosterUrl, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
             {
                 Response.StatusCode = 404;
                 return;
@@ -210,7 +214,7 @@ public sealed class SiphonProxyController(
             ProtectBytes();
             await Response.Body.WriteAsync(buffer.GetBuffer().AsMemory(0, (int)buffer.Length), ct).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
         {
             HttpContext.Abort();
         }
@@ -227,6 +231,7 @@ public sealed class SiphonProxyController(
 
     private async Task ProxyAsync(ProxySession session, CancellationToken ct)
     {
+        using var readDeadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var headers = new Dictionary<string, string>(session.Source.RequestHeaders, StringComparer.OrdinalIgnoreCase);
         headers.Remove("Range");
         headers.Remove("If-Range");
@@ -271,49 +276,53 @@ public sealed class SiphonProxyController(
         {
             throw new InvalidDataException("Unexpected content encoding.");
         }
+        if (upstream.StatusCode == HttpStatusCode.PartialContent
+            && upstream.Content.Headers.ContentRange is not { Unit: "bytes", From: not null, To: not null })
+        {
+            throw new InvalidDataException("Invalid upstream byte range.");
+        }
 
         var finalUrl = upstream.RequestMessage?.RequestUri ?? session.Source.Url;
-        // A ranged extensionless playlist may not include #EXTM3U. Classify from byte zero before forwarding it.
-        if (upstream.StatusCode == HttpStatusCode.PartialContent && upstream.Content.Headers.ContentRange?.From > 0
-            && !IsKnownBinary(finalUrl.AbsolutePath))
+        // An upstream extension is not proof of binary content. Classify nonzero ranges
+        // from byte zero so a mislabeled playlist cannot expose unrewritten resource URLs.
+        if (upstream.StatusCode == HttpStatusCode.PartialContent && upstream.Content.Headers.ContentRange?.From > 0)
         {
             var classificationHeaders = new Dictionary<string, string>(session.Source.RequestHeaders, StringComparer.OrdinalIgnoreCase)
             {
                 ["Range"] = "bytes=0-511",
                 ["Accept-Encoding"] = "identity"
             };
+            classificationHeaders.Remove("If-Range");
             using var classification = await http.SendAsync(session.Source.Url, HttpMethod.Get, classificationHeaders, ct).ConfigureAwait(false);
+            if (classification.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.PartialContent)
+                || (classification.StatusCode == HttpStatusCode.PartialContent
+                    && classification.Content.Headers.ContentRange is not { Unit: "bytes", From: 0, To: not null })
+                || classification.Content.Headers.ContentEncoding.Any(e => !e.Equals("identity", StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new InvalidDataException("Unable to classify upstream representation.");
+            }
             await using var classificationBody = await classification.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
             var start = new byte[512];
-            var length = await classificationBody.ReadAtLeastAsync(start, start.Length, throwOnEndOfStream: false, ct).ConfigureAwait(false);
+            var length = await ReadPrefixAsync(classificationBody, start, readDeadline).ConfigureAwait(false);
             if (Encoding.UTF8.GetString(start, 0, length).TrimStart('\uFEFF', ' ', '\r', '\n', '\t').StartsWith("#EXTM3U", StringComparison.Ordinal))
             {
                 classificationHeaders.Remove("Range");
                 using var full = await http.SendAsync(session.Source.Url, HttpMethod.Get, classificationHeaders, ct).ConfigureAwait(false);
-                if (full.StatusCode != HttpStatusCode.OK)
+                if (full.StatusCode != HttpStatusCode.OK
+                    || full.Content.Headers.ContentEncoding.Any(e => !e.Equals("identity", StringComparison.OrdinalIgnoreCase)))
                 {
                     throw new InvalidDataException("Invalid HLS response.");
                 }
 
                 await using var fullBody = await full.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-                await WritePlaylistAsync(session, fullBody, ReadOnlyMemory<byte>.Empty, full.RequestMessage?.RequestUri ?? finalUrl, ct).ConfigureAwait(false);
+                await WritePlaylistAsync(session, fullBody, ReadOnlyMemory<byte>.Empty, full.RequestMessage?.RequestUri ?? finalUrl, readDeadline, ct).ConfigureAwait(false);
                 return;
             }
         }
         var mediaType = upstream.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
         await using var body = await upstream.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
         var prefix = new byte[512];
-        var prefixLength = 0;
-        while (prefixLength < prefix.Length)
-        {
-            var read = await body.ReadAsync(prefix.AsMemory(prefixLength), ct).ConfigureAwait(false);
-            if (read == 0)
-            {
-                break;
-            }
-
-            prefixLength += read;
-        }
+        var prefixLength = await ReadPrefixAsync(body, prefix, readDeadline).ConfigureAwait(false);
 
         var hls = finalUrl.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase)
             || mediaType.Equals("application/vnd.apple.mpegurl", StringComparison.OrdinalIgnoreCase)
@@ -335,11 +344,11 @@ public sealed class SiphonProxyController(
                 }
 
                 await using var completeBody = await full.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-                await WritePlaylistAsync(session, completeBody, ReadOnlyMemory<byte>.Empty, full.RequestMessage?.RequestUri ?? finalUrl, ct).ConfigureAwait(false);
+                await WritePlaylistAsync(session, completeBody, ReadOnlyMemory<byte>.Empty, full.RequestMessage?.RequestUri ?? finalUrl, readDeadline, ct).ConfigureAwait(false);
             }
             else
             {
-                await WritePlaylistAsync(session, body, prefix.AsMemory(0, prefixLength), finalUrl, ct).ConfigureAwait(false);
+                await WritePlaylistAsync(session, body, prefix.AsMemory(0, prefixLength), finalUrl, readDeadline, ct).ConfigureAwait(false);
             }
 
             return;
@@ -362,18 +371,23 @@ public sealed class SiphonProxyController(
         if (!HttpMethods.IsHead(Request.Method))
         {
             await Response.Body.WriteAsync(prefix.AsMemory(0, prefixLength), ct).ConfigureAwait(false);
-            await body.CopyToAsync(Response.Body, 64 * 1024, ct).ConfigureAwait(false);
+            var chunk = new byte[64 * 1024];
+            int count;
+            while ((count = await ReadUpstreamAsync(body, chunk, readDeadline).ConfigureAwait(false)) != 0)
+            {
+                await Response.Body.WriteAsync(chunk.AsMemory(0, count), ct).ConfigureAwait(false);
+            }
         }
     }
 
-    private async Task WritePlaylistAsync(ProxySession session, Stream body, ReadOnlyMemory<byte> prefix, Uri finalUrl, CancellationToken ct)
+    private async Task WritePlaylistAsync(ProxySession session, Stream body, ReadOnlyMemory<byte> prefix, Uri finalUrl, CancellationTokenSource readDeadline, CancellationToken ct)
     {
         using var buffer = new MemoryStream();
         await buffer.WriteAsync(prefix, ct).ConfigureAwait(false);
         var chunk = new byte[16 * 1024];
         while (true)
         {
-            var count = await body.ReadAsync(chunk, ct).ConfigureAwait(false);
+            var count = await ReadUpstreamAsync(body, chunk, readDeadline).ConfigureAwait(false);
             if (count == 0)
             {
                 break;
@@ -402,8 +416,32 @@ public sealed class SiphonProxyController(
         }
     }
 
-    private static bool IsKnownBinary(string path)
-        => Path.GetExtension(path).ToLowerInvariant() is ".ts" or ".m4s" or ".mp4" or ".m4a" or ".aac" or ".mp3" or ".webm" or ".mkv" or ".key";
+    private async ValueTask<int> ReadPrefixAsync(Stream body, Memory<byte> buffer, CancellationTokenSource deadline)
+    {
+        var length = 0;
+        while (length < buffer.Length)
+        {
+            var count = await ReadUpstreamAsync(body, buffer[length..], deadline).ConfigureAwait(false);
+            if (count == 0) break;
+            length += count;
+        }
+        return length;
+    }
+
+    private async ValueTask<int> ReadUpstreamAsync(Stream body, Memory<byte> buffer, CancellationTokenSource deadline)
+    {
+        // Only upstream inactivity expires the lease's request: an entire film may run
+        // for hours, and downstream backpressure must not consume its read deadline.
+        deadline.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(configuration.Current.AddonTimeoutSeconds, 1, 120)));
+        try
+        {
+            return await body.ReadAsync(buffer, deadline.Token).ConfigureAwait(false);
+        }
+        finally
+        {
+            deadline.CancelAfter(Timeout.InfiniteTimeSpan);
+        }
+    }
 
     private void ProtectBytes()
     {
