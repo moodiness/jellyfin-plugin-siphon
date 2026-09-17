@@ -172,7 +172,7 @@ public sealed class P2pSafetyTests
         var root = Path.GetTempPath();
         for (var cursor = new DirectoryInfo(root); cursor is not null; cursor = cursor.Parent)
         {
-            if (cursor.ResolveLinkTarget(true) is { } target)
+            if ((cursor.Attributes & FileAttributes.ReparsePoint) != 0 && cursor.ResolveLinkTarget(true) is { } target)
                 root = Path.Combine(target.FullName, Path.GetRelativePath(cursor.FullName, root));
         }
         return Path.Combine(root, "siphon-p2p-tests-" + Guid.NewGuid().ToString("N"));
