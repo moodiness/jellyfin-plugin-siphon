@@ -24,10 +24,12 @@ def package(output, release_url, timestamp):
     metadata = {
         "guid": "b2df1c14-4b7e-4e7b-9a95-8f9ad8d2b0c1", "name": "Siphon",
         "description": description, "overview": "Stremio addons in Jellyfin", "owner": "moodiness",
-        "category": "General", "version": version, "targetAbi": "12.1.0.0", "timestamp": timestamp
+        "category": "General", "version": version, "targetAbi": "12.1.0.0", "timestamp": timestamp,
+        "imagePath": "siphon.png"
     }
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as bundle:
         for name, data in [(dll.name, dll.read_bytes()), ("LICENSE", (root / "LICENSE").read_bytes()),
+                           ("siphon.png", (root / "assets/siphon.png").read_bytes()),
                            ("meta.json", json.dumps(metadata, indent=2).encode())]:
             entry = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
             entry.compress_type = zipfile.ZIP_DEFLATED
@@ -41,7 +43,10 @@ def package(output, release_url, timestamp):
         "timestamp": timestamp,
         "changelog": "Fix media-detail loading during catalog and metadata synchronization by separating synchronization from native library writes. Clarify addon-defined catalog filters without changing their parameter names or values."
     }
-    manifest = [{k: v for k, v in metadata.items() if k not in ("version", "targetAbi", "timestamp")} | {"versions": [release]}]
+    manifest = [{k: v for k, v in metadata.items() if k not in ("version", "targetAbi", "timestamp", "imagePath")} | {
+        "imageUrl": "https://raw.githubusercontent.com/moodiness/jellyfin-plugin-siphon/main/assets/siphon.png",
+        "versions": [release]
+    }]
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     (output / "SHA256SUMS").write_text(hashlib.sha256(content).hexdigest() + "  " + archive.name + "\n", encoding="utf-8")
     print(archive)

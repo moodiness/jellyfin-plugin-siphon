@@ -10,6 +10,9 @@ public sealed class Plugin : BasePlugin<Configuration.PluginConfiguration>, IHas
 {
     /// <summary>The stable plugin identifier.</summary>
     public static readonly Guid PluginId = new("b2df1c14-4b7e-4e7b-9a95-8f9ad8d2b0c1");
+
+    /// <summary>The embedded, offline settings icon resource.</summary>
+    internal const string IconResourceName = "Jellyfin.Plugin.Siphon.Assets.siphon.png";
     private readonly Configuration.ConfigurationAccessor _configurationAccessor;
 
     /// <summary>Initializes the plugin.</summary>
