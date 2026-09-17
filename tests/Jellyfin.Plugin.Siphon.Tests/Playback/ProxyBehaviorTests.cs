@@ -68,6 +68,36 @@ public sealed class ProxyBehaviorTests : IDisposable
         Assert.Empty(((MemoryStream)context.Response.Body).ToArray());
     }
 
+    [Fact]
+    public async Task DocumentResponseIsRejectedBeforeAnyBodyIsRelayed()
+    {
+        var document = Encoding.UTF8.GetBytes("<!doctype html><html><body>Not a media stream</body></html>");
+        using var fixture = CreateFixture(document, "https://upstream.example/stream", "text/html");
+        var context = NewContext("GET", "");
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = context };
+
+        await fixture.Controller.Media(fixture.Session.Token);
+
+        Assert.Equal(502, context.Response.StatusCode);
+        Assert.Empty(((MemoryStream)context.Response.Body).ToArray());
+    }
+
+    [Fact]
+    public async Task UnrecognizedMediaTypePreservesBytesWithoutDocumentRenderingAuthority()
+    {
+        var content = Enumerable.Range(0, 1024).Select(n => (byte)n).ToArray();
+        using var fixture = CreateFixture(content, "https://upstream.example/opaque", "application/x-provider-media");
+        var context = NewContext("GET", "bytes=100-199");
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = context };
+
+        await fixture.Controller.Media(fixture.Session.Token);
+
+        Assert.Equal(206, context.Response.StatusCode);
+        Assert.Equal(content[100..200], ((MemoryStream)context.Response.Body).ToArray());
+        Assert.Equal("application/octet-stream", context.Response.ContentType);
+        Assert.Contains("sandbox", context.Response.Headers.ContentSecurityPolicy.ToString().Split(';').Select(value => value.Trim()));
+    }
+
     [Theory]
     [InlineData("opaque")]
     [InlineData("misleading.mp4")]
