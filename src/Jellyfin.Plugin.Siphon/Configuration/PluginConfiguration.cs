@@ -44,8 +44,17 @@ public sealed class PluginConfiguration : BasePluginConfiguration
     public bool P2pEnableDht { get; set; } = true;
     public int P2pListenPort { get; set; }
 
+    /// <summary>Server-side downloads are opt-in and remain private to the requesting user.</summary>
+    public bool EnableDownloadQueue { get; set; }
+    public int DownloadMaxConcurrentJobs { get; set; } = 2;
+    public int DownloadMaxStorageMiB { get; set; } = 51200;
+    public int DownloadMaxFileMiB { get; set; } = 10240;
+    public int DownloadMaxJobsPerUser { get; set; } = 20;
+    public int DownloadRetentionDays { get; set; } = 7;
+
     /// <summary>Users must also opt in individually before release notifications are emitted.</summary>
     public bool EnableCalendarNotifications { get; set; }
+    public bool EnableNotificationWebhooks { get; set; }
 
     /// <summary>Selected metadata addon installation; empty keeps automatic addon selection.</summary>
     public string MetadataAddonId { get; set; } = string.Empty;

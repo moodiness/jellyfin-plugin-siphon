@@ -1,3 +1,4 @@
+using Jellyfin.Plugin.Siphon.Configuration;
 using Jellyfin.Plugin.Siphon.Infrastructure;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Model.Entities;
@@ -6,7 +7,7 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace Jellyfin.Plugin.Siphon.Playback;
 
-public sealed record SourceSummary(string MediaSourceId, string Name, string Kind, long? Size, bool CanDownload, string? DownloadUnavailableReason);
+public sealed record SourceSummary(string MediaSourceId, string Name, string Kind, long? Size, bool CanDownload, string? DownloadUnavailableReason, bool CanQueue);
 public sealed record SourcesResponse(Guid ItemId, IReadOnlyList<SourceSummary> Sources, IReadOnlyList<AddonSourceDiagnostic> Addons, DateTimeOffset CreatedAt, DateTimeOffset ExpiresAt, bool CanDownload);
 public sealed record DownloadTicketRequest(string MediaSourceId);
 public sealed record DownloadTicketResponse(string Url, DateTimeOffset ExpiresAtUtc);
@@ -15,7 +16,7 @@ public sealed record DownloadTicketResponse(string Url, DateTimeOffset ExpiresAt
 [Authorize]
 [Route("Siphon/Items/{itemId:guid}")]
 public sealed class PlaybackSourcesController(PlaybackAccess access, ISiphonStateStore state, StreamResolver resolver,
-    NativeVersionService versions, ProxySessionStore sessions, PlaybackDownloadService downloads) : ControllerBase
+    NativeVersionService versions, ProxySessionStore sessions, PlaybackDownloadService downloads, ConfigurationAccessor configuration) : ControllerBase
 {
     [HttpGet("Sources")]
     public Task<ActionResult<SourcesResponse>> Sources(Guid itemId) => Inspect(itemId, false);
@@ -36,10 +37,13 @@ public sealed class PlaybackSourcesController(PlaybackAccess access, ISiphonStat
         {
             var available = await versions.GetVersionsAsync(video, user.Id, HttpContext.RequestAborted).ConfigureAwait(false);
             var resolution = await resolver.GetResolutionAsync(managed, user.Id, HttpContext.RequestAborted).ConfigureAwait(false);
+            var canDownload = PlaybackAccess.CanDownload(video, user);
+            var canQueue = canDownload && configuration.Current.EnableDownloadQueue;
             return new SourcesResponse(video.PrimaryVersionId ?? video.Id,
                 available.Select(version => new SourceSummary(version.Item.Id.ToString("N"), version.Stream.Name, version.Stream.P2p is null ? "Http" : "P2p", version.Stream.Size,
-                    PlaybackAccess.CanDownload(video, user) && PlaybackDownloadService.DownloadUnavailableReason(version.Stream) is null, PlaybackDownloadService.DownloadUnavailableReason(version.Stream))).ToArray(),
-                resolution.Addons, resolution.CreatedAt, resolution.ExpiresAt, PlaybackAccess.CanDownload(video, user));
+                    canDownload && PlaybackDownloadService.DownloadUnavailableReason(version.Stream) is null,
+                    PlaybackDownloadService.DownloadUnavailableReason(version.Stream), canQueue)).ToArray(),
+                resolution.Addons, resolution.CreatedAt, resolution.ExpiresAt, canDownload);
         }
         catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested) { throw; }
         catch { return StatusCode(502, new { Message = "Sources are temporarily unavailable." }); }
@@ -61,7 +65,7 @@ public sealed class PlaybackSourcesController(PlaybackAccess access, ISiphonStat
         var selected = await Select(itemId, request.MediaSourceId).ConfigureAwait(false);
         if (selected is null) return NotFound();
         if (PlaybackDownloadService.DownloadUnavailableReason(selected.Source) is { } reason)
-            return StatusCode(415, new { Code = "HlsDownloadUnsupported", Message = reason });
+            return StatusCode(415, new { Code = "HlsRequiresOfflinePreparation", Message = reason });
         return new DownloadTicketResponse(Request.PathBase.Value + "/Siphon/download/" + selected.Token, selected.DownloadExpiresAtUtc!.Value);
     }
 

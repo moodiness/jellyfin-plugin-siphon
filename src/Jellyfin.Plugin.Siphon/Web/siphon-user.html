@@ -49,6 +49,9 @@
         #signIn { max-width: 30rem; margin: 2rem 0; }
         #notificationsList [data-unread="true"] { border-inline-start: 3px solid var(--accent); padding-inline-start: 1rem; }
         .pager { margin: 1rem 0; }
+        progress { width: 100%; height: .6rem; accent-color: var(--accent); }
+        .download-state { font-weight: 600; }
+        #webhookForm { margin-top: 2rem; border-top: 1px solid var(--line); padding-top: 1.5rem; }
         @media (max-width: 700px) { main { padding: 1.25rem .8rem 2rem; } .grid { grid-template-columns: minmax(0, 1fr); } .tabs button { padding: .75rem .8rem; } .facts { grid-template-columns: minmax(6rem, 1fr) minmax(0, 2fr); } .actions { gap: .5rem; } }
     </style>
 </head>
@@ -74,6 +77,7 @@
             <button id="calendarTab" role="tab" type="button" aria-controls="calendarPanel" aria-selected="false" tabindex="-1">Release calendar</button>
             <button id="notificationsTab" role="tab" type="button" aria-controls="notificationsPanel" aria-selected="false" tabindex="-1">Notifications</button>
             <button id="sourcesTab" role="tab" type="button" aria-controls="sourcesPanel" aria-selected="false" tabindex="-1">My sources</button>
+            <button id="downloadsTab" role="tab" type="button" aria-controls="downloadsPanel" aria-selected="false" tabindex="-1">Downloads</button>
         </nav>
         <section id="preferencesPanel" role="tabpanel" aria-labelledby="preferencesTab">
             <h2>My search &amp; notifications</h2>
@@ -104,6 +108,18 @@
             <button id="notificationsLoad" type="button">Refresh inbox</button>
             <p id="notificationsStatus" class="message" role="status" aria-live="polite">Open this tab to load your inbox.</p>
             <ul id="notificationsList" class="list"></ul>
+            <form id="webhookForm">
+                <h3>External webhook</h3>
+                <p class="help">Optional signed JSON notifications to a destination you control. This reveals followed titles and dates to that service. Your private inbox remains here; no historical backlog is sent. Enable personal notifications in Preferences first.</p>
+                <fieldset id="webhookFields" disabled>
+                    <div class="checkboxContainer"><label><input id="webhookEnabled" type="checkbox"><span>Send my future notifications to this destination</span></label></div>
+                    <div class="inputContainer"><label class="inputLabel" for="webhookUrl">Webhook URL</label><input id="webhookUrl" type="url" maxlength="2048" autocomplete="off" spellcheck="false"><p class="help">HTTPS is required. HTTP is permitted only for an exact host explicitly trusted by the server administrator. Never use another person's destination or credentials.</p></div>
+                    <div class="actions"><button id="webhookSave" type="submit" class="primary" disabled>Save webhook</button><button id="webhookReload" type="button">Reload saved</button><button id="webhookTest" type="button" disabled>Send test</button><button id="webhookRotate" type="button" disabled>Rotate signing secret</button></div>
+                </fieldset>
+                <p id="webhookStatus" class="message" role="status" aria-live="polite"></p>
+                <p id="webhookDelivery" class="help"></p>
+                <div id="webhookSecretPanel" hidden><label class="inputLabel" for="webhookSecret">New signing secret, shown only in this tab</label><input id="webhookSecret" type="password" readonly autocomplete="off"><p class="help">Store this in your receiver now. Rotation invalidates the old secret. Verify X-Siphon-Signature against the exact request body and deduplicate X-Siphon-Event-Id; delivery may repeat after a server interruption.</p><button id="webhookCopy" type="button">Copy secret</button><button id="webhookHide" type="button">Clear secret</button></div>
+            </form>
         </section>
         <section id="sourcesPanel" role="tabpanel" aria-labelledby="sourcesTab" hidden>
             <h2>My playback sources</h2>
@@ -115,6 +131,14 @@
             <form id="sourcesForm"><div class="inputContainer"><label class="inputLabel" for="sourceItem">Jellyfin item ID or details-page URL</label><input id="sourceItem" autocomplete="off" spellcheck="false" required></div><div class="actions"><button id="sourcesLoad" type="submit">Diagnose my sources</button><button id="sourcesRefresh" type="button">Refresh my item sources</button><button id="sourcesCancel" type="button" hidden>Cancel view request</button></div></form>
             <p id="sourcesStatus" class="message" role="status" aria-live="polite"></p>
             <div id="sourceResults"></div>
+        </section>
+        <section id="downloadsPanel" role="tabpanel" aria-labelledby="downloadsTab" hidden>
+            <h2>My offline downloads</h2>
+            <p class="help">Choose Queue offline in My sources to retain the exact version on this server. Transfers continue when you close the portal. Finite HLS is remuxed into a video file; live streams and unsupported DRM cannot be exported. Files stay private and expire according to the administrator's retention policy.</p>
+            <div class="actions"><button id="downloadsLoad" type="button">Refresh downloads</button><label><input id="downloadsAuto" type="checkbox" checked> Update progress automatically</label><button id="downloadsSources" type="button">Choose a source</button></div>
+            <p id="downloadsStatus" class="message" role="status" aria-live="polite">Open this tab to load your jobs.</p>
+            <p id="downloadsQuota" class="help"></p>
+            <ul id="downloadsList" class="list"></ul>
         </section>
     </div>
 </main>
@@ -134,6 +158,10 @@
     var preferencesBusy = false;
     var itemOffset = 0;
     var itemQuery = '';
+    var downloadsTimer = null;
+    var webhookSettings = null;
+    var webhookDirty = false;
+    var webhookBusy = false;
     var tabs = Array.from(document.querySelectorAll('[role="tab"]'));
     function get(id) { return document.getElementById(id); }
     function node(tag, text, parent) { var element = document.createElement(tag); if (text !== undefined) element.textContent = text; if (parent) parent.appendChild(element); return element; }
@@ -144,9 +172,9 @@
     function size(value) { return Number.isFinite(value) && value >= 0 ? (value / 1048576).toLocaleString(undefined, { maximumFractionDigits: 1 }) + ' MiB' : 'Size unknown'; }
     function fact(parent, label, value) { node('dt', label, parent); node('dd', value, parent); }
     function errorText(error, fallback) {
-        return error.status === 401 ? 'Your portal session expired. Sign in again.' : error.status === 403 ? 'Access denied by your Jellyfin permissions.' : error.status === 404 ? 'This item is not accessible or is not managed by Siphon.' : error.status === 415 ? 'This source is an HLS playlist, not a downloadable video file. Choose a progressive or P2P version.' : error.status === 429 ? 'Too many requests. Wait briefly before retrying.' : error.status === 502 ? 'The upstream source is unavailable. Refresh sources and try another version.' : fallback;
+        return error.status === 401 ? 'Your portal session expired. Sign in again.' : error.status === 403 ? 'Access denied by your Jellyfin permissions or the administrator.' : error.status === 404 ? 'This item or job is no longer accessible.' : error.status === 409 ? 'The request conflicts with current limits or state. Refresh and check the available storage and job limit.' : error.status === 415 ? 'This source needs offline preparation. Use Queue offline when the administrator has enabled server downloads.' : error.status === 429 ? 'Too many requests. Wait briefly before retrying.' : error.status === 502 ? 'The upstream source is unavailable. Refresh sources and retry the selected version.' : fallback;
     }
-    function authorization() { return 'MediaBrowser Client="Siphon portal", Device="Browser", DeviceId="' + deviceId + '", Version="1.4.1.0"' + (token ? ', Token="' + token + '"' : ''); }
+    function authorization() { return 'MediaBrowser Client="Siphon portal", Device="Browser", DeviceId="' + deviceId + '", Version="1.6.0.0"' + (token ? ', Token="' + token + '"' : ''); }
     async function request(path, method, data, signal) {
         var requestToken = token;
         var response = await fetch(apiUrl(path), { method: method || 'GET', credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer', signal: signal, headers: { Authorization: authorization(), 'Content-Type': 'application/json', Accept: 'application/json' }, body: data === undefined ? undefined : JSON.stringify(data) });
@@ -164,27 +192,34 @@
     function cancel(key, status, text) { if (requests.has(key)) requests.get(key).abort(); requests.delete(key); if (status) message(status, text || 'Cancelled. You can retry.'); }
     function endSession(text) {
         generation++; token = null; currentUser = null; serverId = null;
+        clearTimeout(downloadsTimer); downloadsTimer = null;
+        webhookSettings = null; webhookDirty = false; webhookBusy = false; clearWebhookSecret();
+        get('webhookUrl').value = ''; get('webhookEnabled').checked = false; get('webhookDelivery').textContent = ''; get('downloadsQuota').textContent = ''; webhookState();
         requests.forEach(function (controller) { controller.abort(); }); requests.clear(); loaded.clear();
         preferences = null; preferencesDirty = false; preferencesBusy = false;
         get('authenticated').hidden = true; get('signIn').hidden = false; get('signOut').hidden = true;
         get('loginFields').disabled = false; get('password').value = '';
         get('account').textContent = 'Your search preferences, followed-series calendar and playback sources.';
-        ['calendarList', 'notificationsList', 'sourceResults', 'itemSearchList'].forEach(function (id) { get(id).replaceChildren(); });
-        ['preferencesStatus', 'calendarStatus', 'notificationsStatus', 'sourcesStatus', 'itemSearchStatus'].forEach(function (id) { message(id, ''); });
+        ['calendarList', 'notificationsList', 'sourceResults', 'itemSearchList', 'downloadsList'].forEach(function (id) { get(id).replaceChildren(); });
+        ['preferencesStatus', 'calendarStatus', 'notificationsStatus', 'sourcesStatus', 'itemSearchStatus', 'downloadsStatus', 'webhookStatus'].forEach(function (id) { message(id, ''); });
         get('sourceItem').value = ''; get('itemSearch').value = ''; itemOffset = 0; itemQuery = '';
         get('searchMode').value = 'Inherit'; get('hideUnreleased').value = 'inherit'; get('notificationsEnabled').checked = false;
         get('effectivePreferences').textContent = ''; get('notificationPermission').textContent = '';
         get('itemPrevious').hidden = true; get('itemNext').hidden = true;
         ['calendarCancel', 'sourcesCancel', 'itemSearchCancel'].forEach(function (id) { get(id).hidden = true; });
-        ['calendarLoad', 'notificationsLoad', 'sourcesLoad', 'sourcesRefresh', 'itemSearchSubmit'].forEach(function (id) { get(id).disabled = false; });
+        ['calendarLoad', 'notificationsLoad', 'sourcesLoad', 'sourcesRefresh', 'itemSearchSubmit', 'downloadsLoad'].forEach(function (id) { get(id).disabled = false; });
         preferenceState(); message('sessionStatus', text || 'Signed out of the portal.');
     }
     function selectPanel(id, focus) {
+        clearTimeout(downloadsTimer); downloadsTimer = null;
+        if (id !== 'notificationsPanel') clearWebhookSecret();
         tabs.forEach(function (tab) { var selected = tab.getAttribute('aria-controls') === id; tab.setAttribute('aria-selected', String(selected)); tab.tabIndex = selected ? 0 : -1; get(tab.getAttribute('aria-controls')).hidden = !selected; if (focus && selected) tab.focus(); });
         if (!token) return;
         if (id === 'preferencesPanel' && !loaded.has(id)) loadPreferences();
         if (id === 'calendarPanel' && !loaded.has(id)) loadCalendar();
         if (id === 'notificationsPanel' && !loaded.has(id)) loadNotifications();
+        if (id === 'notificationsPanel' && !webhookSettings && !webhookBusy) loadWebhook();
+        if (id === 'downloadsPanel') loadDownloads();
     }
     function preferenceState() {
         get('preferencesFields').disabled = !preferences || preferencesBusy;
@@ -225,7 +260,7 @@
             await request('Siphon/Preferences', 'PUT', draft, controller.signal);
             var value = await request('Siphon/Preferences', 'GET', undefined, controller.signal);
             if (!isCurrent('preferences', controller, expected)) return;
-            showPreferences(value); loaded.delete('notificationsPanel'); message('preferencesStatus', 'Your preferences were saved.');
+            showPreferences(value); loaded.delete('notificationsPanel'); if (!webhookDirty) webhookSettings = null; message('preferencesStatus', 'Your preferences were saved.');
         } catch (error) {
             if (isCurrent('preferences', controller, expected)) message('preferencesStatus', errorText(error, 'Save was not confirmed. Your draft is still here; reload saved preferences to check before retrying.'), true);
         } finally { if (expected === generation) { preferencesBusy = false; preferenceState(); } finish('preferences', controller); }
@@ -283,6 +318,96 @@
         } catch (error) { if (isCurrent('notifications', controller, expected)) message('notificationsStatus', errorText(error, 'Inbox unavailable. Refresh inbox to retry.'), true); }
         finally { if (requests.get('notifications') === controller) { get('notificationsLoad').disabled = false; get('notificationsList').setAttribute('aria-busy', 'false'); } finish('notifications', controller); }
     }
+    function clearWebhookSecret() { get('webhookSecret').value = ''; get('webhookSecretPanel').hidden = true; }
+    function webhookState() {
+        get('webhookFields').disabled = !webhookSettings || webhookBusy;
+        get('webhookSave').disabled = !webhookSettings || !webhookDirty || webhookBusy;
+        get('webhookUrl').required = get('webhookEnabled').checked;
+        get('webhookTest').disabled = !webhookSettings || !webhookSettings.Allowed || !webhookSettings.Enabled || !webhookSettings.HasSecret || webhookDirty || webhookBusy;
+        get('webhookRotate').disabled = !webhookSettings || !webhookSettings.Url || webhookDirty || webhookBusy;
+    }
+    function showWebhook(value) {
+        webhookSettings = value; webhookDirty = false;
+        get('webhookEnabled').checked = value.Enabled; get('webhookUrl').value = value.Url || '';
+        get('webhookDelivery').textContent = (value.Allowed ? 'External delivery is allowed for your account.' : 'External delivery is inactive. Server permission and your personal notification opt-in are both required.') + ' Pending: ' + (value.PendingCount || 0) + '. Last success: ' + stamp(value.LastSuccessUtc) + (value.LastError ? '. Last delivery: ' + value.LastError : '') + '.';
+        webhookState();
+    }
+    async function loadWebhook() {
+        if (!token || webhookBusy) return;
+        var controller = begin('webhook'); var expected = generation;
+        webhookBusy = true; webhookState(); clearWebhookSecret(); message('webhookStatus', 'Loading your saved destination…');
+        try {
+            var value = await request('Siphon/Notifications/Webhook', 'GET', undefined, controller.signal);
+            if (!isCurrent('webhook', controller, expected)) return;
+            showWebhook(value); message('webhookStatus', '');
+        } catch (error) { if (isCurrent('webhook', controller, expected)) message('webhookStatus', errorText(error, 'Webhook settings could not be loaded. Refresh the inbox to retry.'), true); }
+        finally { if (expected === generation) { webhookBusy = false; webhookState(); } finish('webhook', controller); }
+    }
+    async function webhookAction(kind, data) {
+        if (!token || webhookBusy || !webhookSettings) return;
+        var controller = begin('webhook'); var expected = generation;
+        webhookBusy = true; webhookState(); clearWebhookSecret(); message('webhookStatus', kind === 'Test' ? 'Sending a labeled test to your saved destination…' : 'Saving your webhook settings…');
+        try {
+            var result = await request('Siphon/Notifications/Webhook' + (kind ? '/' + kind : ''), kind ? 'POST' : 'PUT', data, controller.signal);
+            var saved = await request('Siphon/Notifications/Webhook', 'GET', undefined, controller.signal);
+            if (!isCurrent('webhook', controller, expected)) return;
+            showWebhook(saved);
+            if (kind === 'Secret' && result.Secret) { get('webhookSecret').value = result.Secret; get('webhookSecretPanel').hidden = false; }
+            message('webhookStatus', kind === 'Secret' ? 'Signing secret rotated. Copy it into your receiver now.' : kind === 'Test' ? (result.Success !== true ? 'The destination did not accept the test. Check delivery status and retry.' : 'The destination accepted the signed test event.') : 'Your webhook settings were saved.', kind === 'Test' && result.Success !== true);
+        } catch (error) { if (isCurrent('webhook', controller, expected)) message('webhookStatus', errorText(error, 'The operation was not confirmed. Check the URL, opt-ins and destination; reload saved settings before retrying.'), true); }
+        finally { if (expected === generation) { webhookBusy = false; webhookState(); } finish('webhook', controller); }
+    }
+    function scheduleDownloads() {
+        clearTimeout(downloadsTimer); downloadsTimer = null;
+        if (token && !get('downloadsPanel').hidden && get('downloadsAuto').checked && !document.hidden) downloadsTimer = setTimeout(function () { if (requests.has('downloadAction')) scheduleDownloads(); else loadDownloads(true); }, 4000);
+    }
+    async function loadDownloads(quiet) {
+        if (!token) return;
+        var controller = begin('downloads'); var expected = generation;
+        get('downloadsLoad').disabled = true; get('downloadsList').setAttribute('aria-busy', 'true');
+        if (!quiet) message('downloadsStatus', 'Loading your server downloads…');
+        try {
+            var result = await request('Siphon/Downloads', 'GET', undefined, controller.signal);
+            if (!isCurrent('downloads', controller, expected)) return;
+            var focused = document.activeElement && document.activeElement.id;
+            get('downloadsList').replaceChildren();
+            result.Jobs.forEach(function (job) {
+                var row = node('li', undefined, get('downloadsList'));
+                node('h3', job.Name, row); node('p', job.State, row).className = 'download-state';
+                node('p', size(job.BytesReceived) + (job.TotalBytes == null ? '' : ' of ' + size(job.TotalBytes)) + ' · Updated ' + stamp(job.UpdatedUtc), row).className = 'help';
+                if (job.State === 'Running') { var progress = node('progress', undefined, row); progress.setAttribute('aria-label', 'Transfer progress'); if (job.TotalBytes > 0) { progress.max = job.TotalBytes; progress.value = Math.min(job.TotalBytes, Math.max(0, job.BytesReceived)); } }
+                if (job.Error) node('p', job.Error, row).className = 'message';
+                var controls = node('div', undefined, row); controls.className = 'actions';
+                function jobAction(label, kind) { var button = action(controls, label, function () { downloadAction(job, kind); }); button.id = 'download-' + job.Id + '-' + kind; return button; }
+                if (job.State === 'Completed' && result.Allowed) jobAction('Save file', 'Ticket');
+                if (job.State === 'Queued' || job.State === 'Running') jobAction('Cancel', 'Cancel');
+                if (job.CanRetry && result.Enabled && result.Allowed) jobAction('Retry', 'Retry');
+                jobAction('Delete', 'Delete');
+            });
+            if (focused && get(focused)) get(focused).focus({ preventScroll: true });
+            message('downloadsStatus', !result.Enabled ? 'The administrator has disabled background downloads. Retained jobs are shown below.' : !result.Allowed ? 'Your account is not currently allowed to download. Retained jobs are shown below.' : result.Jobs.length ? result.Jobs.length + ' retained jobs. Closing the portal does not cancel them.' : 'No jobs yet. Open My sources and choose Queue offline for a specific version.');
+            get('downloadsQuota').textContent = 'Your retained files: ' + size(result.UsedBytes) + '. Shared server limit: ' + size(result.MaximumBytes) + '. Other users’ files also use this budget.';
+        } catch (error) { if (isCurrent('downloads', controller, expected)) message('downloadsStatus', errorText(error, 'Jobs could not be loaded. Refresh downloads to retry.'), true); }
+        finally { if (requests.get('downloads') === controller) { get('downloadsLoad').disabled = false; get('downloadsList').setAttribute('aria-busy', 'false'); } finish('downloads', controller); if (expected === generation) scheduleDownloads(); }
+    }
+    function openDownload(ticket) {
+        var url = new URL(ticket.Url, window.location.href);
+        if (url.origin !== window.location.origin || !url.pathname.startsWith(root + '/Siphon/')) throw new Error('Unexpected download destination');
+        var link = node('a', 'Download file', document.body); link.href = url.href; link.download = ''; link.referrerPolicy = 'no-referrer'; link.rel = 'noreferrer'; link.click(); link.remove();
+    }
+    async function downloadAction(job, kind) {
+        if (!token || requests.has('downloadAction')) return;
+        if ((kind === 'Delete' || kind === 'Cancel') && !window.confirm(kind === 'Delete' ? 'Delete this job and its private server files? This cannot be undone.' : 'Cancel this server download?')) return;
+        var controller = begin('downloadAction'); var expected = generation;
+        get('downloadsList').querySelectorAll('button').forEach(function (button) { button.disabled = true; });
+        try {
+            var result = await request('Siphon/Downloads/' + encodeURIComponent(job.Id) + (kind === 'Delete' ? '' : '/' + kind), kind === 'Delete' ? 'DELETE' : 'POST', undefined, controller.signal);
+            if (!isCurrent('downloadAction', controller, expected)) return;
+            if (kind === 'Ticket') openDownload(result);
+            finish('downloadAction', controller); await loadDownloads();
+        } catch (error) { if (isCurrent('downloadAction', controller, expected)) message('downloadsStatus', errorText(error, 'The operation was not confirmed. Refresh before retrying.'), true); }
+        finally { finish('downloadAction', controller); if (expected === generation) { get('downloadsList').querySelectorAll('button').forEach(function (button) { button.disabled = false; }); scheduleDownloads(); } }
+    }
     function parseItemId(value) { var text = value.trim(); if (/^[0-9a-f]{32}$/i.test(text) || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text)) return text; var match = /[?&]id=([0-9a-f-]{32,36})(?:[&#]|$)/i.exec(text); return match && /^[0-9a-f]{32}$/i.test(match[1].replace(/-/g, '')) ? match[1] : null; }
     async function searchItems(offset) {
         if (!token || !currentUser) return;
@@ -330,6 +455,20 @@
             var row = node('li', undefined, sources);
             node('strong', (index + 1) + '. ' + (source.Name || 'Stream version'), row);
             node('p', (source.Kind === 'P2p' ? 'P2P — server shares data, exposes its IP to peers and trackers, and does not use BitTorrent wire encryption' : 'HTTP source') + ' · ' + size(source.Size), row).className = 'help';
+            var sourceStatus = node('p', '', row); sourceStatus.className = 'help'; sourceStatus.setAttribute('role', 'status');
+            if (source.CanQueue) {
+                var queue = action(row, 'Queue offline', async function () {
+                    queue.disabled = true; sourceStatus.textContent = 'Queueing this exact version on the server…';
+                    var controller = begin('enqueue-' + source.MediaSourceId);
+                    try {
+                        await request('Siphon/Downloads', 'POST', { ItemId: result.ItemId, MediaSourceId: source.MediaSourceId }, controller.signal);
+                        if (!isCurrent('enqueue-' + source.MediaSourceId, controller, expected) || !row.isConnected) return;
+                        sourceStatus.textContent = 'Queued. Track progress in Downloads; closing the portal will not cancel it.';
+                        action(row, 'View downloads', function () { selectPanel('downloadsPanel', true); });
+                    } catch (error) { if (isCurrent('enqueue-' + source.MediaSourceId, controller, expected) && row.isConnected) sourceStatus.textContent = errorText(error, 'Queueing was not confirmed. Check Downloads before trying again.'); }
+                    finally { finish('enqueue-' + source.MediaSourceId, controller); queue.disabled = false; }
+                });
+            }
             if (result.CanDownload && source.CanDownload) {
                 var download = action(row, 'Download this version', async function () {
                     download.disabled = true;
@@ -345,8 +484,7 @@
                     } catch (error) { if (expected === generation && token && row.isConnected) status.textContent = errorText(error, 'Download could not start. Refresh sources and retry the chosen version.'); }
                     finally { download.disabled = false; }
                 });
-                var status = node('p', '', row); status.className = 'help'; status.setAttribute('role', 'status');
-            } else if (source.DownloadUnavailableReason) node('p', source.DownloadUnavailableReason === 'HlsDownloadUnsupported' ? 'HLS playlist — not a downloadable video file. Choose a progressive or P2P version.' : source.DownloadUnavailableReason, row).className = 'help';
+            } else if (source.DownloadUnavailableReason) node('p', source.DownloadUnavailableReason, row).className = 'help';
         });
         if (!result.CanDownload) node('p', 'Downloads are disabled by your Jellyfin permissions. Playback may still be available in the native client.', parent).className = 'help';
         node('h3', 'Addon outcomes', parent);
@@ -371,7 +509,7 @@
         finally { get('loginFields').disabled = false; }
     });
     get('signOut').addEventListener('click', async function () {
-        if (preferencesDirty && !window.confirm('Discard your unsaved personal preferences and sign out of this portal?')) return;
+        if ((preferencesDirty || webhookDirty) && !window.confirm('Discard your unsaved personal changes and sign out of this portal?')) return;
         var logout = request('Sessions/Logout', 'POST'); endSession('Signed out of the portal.');
         try { await logout; } catch (_) { message('sessionStatus', 'Local portal session cleared. The server could not confirm token revocation.'); }
     });
@@ -382,7 +520,18 @@
     get('preferencesRetry').addEventListener('click', loadPreferences);
     get('calendarForm').addEventListener('submit', function (event) { event.preventDefault(); loadCalendar(); });
     get('calendarCancel').addEventListener('click', function () { cancel('calendar', 'calendarStatus'); get('calendarLoad').disabled = false; get('calendarCancel').hidden = true; get('calendarList').setAttribute('aria-busy', 'false'); });
-    get('notificationsLoad').addEventListener('click', loadNotifications);
+    get('notificationsLoad').addEventListener('click', function () { loadNotifications(); if (!webhookDirty) loadWebhook(); });
+    get('webhookForm').addEventListener('input', function () { webhookDirty = true; webhookState(); });
+    get('webhookForm').addEventListener('submit', function (event) { event.preventDefault(); webhookAction('', { Enabled: get('webhookEnabled').checked, Url: get('webhookUrl').value.trim() }); });
+    get('webhookReload').addEventListener('click', function () { if (!webhookDirty || window.confirm('Discard your unsaved webhook settings?')) loadWebhook(); });
+    get('webhookTest').addEventListener('click', function () { webhookAction('Test'); });
+    get('webhookRotate').addEventListener('click', function () { if (window.confirm('Rotate the signing secret? Your receiver must be updated with the new secret.')) webhookAction('Secret'); });
+    get('webhookHide').addEventListener('click', clearWebhookSecret);
+    get('webhookCopy').addEventListener('click', async function () { try { await navigator.clipboard.writeText(get('webhookSecret').value); message('webhookStatus', 'Signing secret copied. Store it securely in your receiver.'); } catch (_) { get('webhookSecret').focus(); get('webhookSecret').select(); message('webhookStatus', 'Clipboard access was unavailable. Copy the selected secret manually.'); } });
+    get('downloadsLoad').addEventListener('click', function () { loadDownloads(); });
+    get('downloadsAuto').addEventListener('change', scheduleDownloads);
+    get('downloadsSources').addEventListener('click', function () { selectPanel('sourcesPanel', true); get('itemSearch').focus(); });
+    document.addEventListener('visibilitychange', scheduleDownloads);
     get('itemSearchForm').addEventListener('submit', function (event) { event.preventDefault(); searchItems(0); });
     get('itemSearch').addEventListener('input', function () {
         cancel('items', 'itemSearchStatus', 'Choose Search Jellyfin to submit this title.');
@@ -401,7 +550,7 @@
     });
     get('sourcesRefresh').addEventListener('click', function () { loadSources(true); });
     get('sourcesCancel').addEventListener('click', function () { cancel('sources', 'sourcesStatus', 'View request cancelled. A server-side refresh may still finish; late results are ignored.'); get('sourcesLoad').disabled = false; get('sourcesRefresh').disabled = false; get('sourcesCancel').hidden = true; get('sourceResults').setAttribute('aria-busy', 'false'); });
-    window.addEventListener('beforeunload', function (event) { if (preferencesDirty) { event.preventDefault(); event.returnValue = ''; } });
+    window.addEventListener('beforeunload', function (event) { if (preferencesDirty || webhookDirty) { event.preventDefault(); event.returnValue = ''; } });
     window.addEventListener('pagehide', function () { if (token) endSession('Portal session cleared. Sign in again to continue.'); });
 }());
 </script>

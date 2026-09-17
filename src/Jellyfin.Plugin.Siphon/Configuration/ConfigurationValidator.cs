@@ -84,6 +84,10 @@ internal static class ConfigurationValidator
             || config.P2pIdleMinutes is < 1 or > 120 || config.P2pMetadataTimeoutSeconds is < 10 or > 600
             || (config.P2pListenPort != 0 && (config.P2pListenPort < 1024 || config.P2pListenPort > 65535 - config.P2pMaxConcurrentStreams + 1)))
             throw new ArgumentException("P2P requires bounded concurrency (1-16), cache (128-1048576 MiB), positive rate limits, idle cleanup (1-120 minutes), metadata timeout (10-600 seconds), and an available listen-port range.");
+        if (config.DownloadMaxConcurrentJobs is < 1 or > 8 || config.DownloadMaxStorageMiB is < 128 or > 1048576
+            || config.DownloadMaxFileMiB is < 16 or > 1048576 || config.DownloadMaxFileMiB > config.DownloadMaxStorageMiB
+            || config.DownloadMaxJobsPerUser is < 1 or > 100 || config.DownloadRetentionDays is < 1 or > 365)
+            throw new ArgumentException("Downloads require concurrency 1-8, storage 128-1048576 MiB, a file budget of 16 MiB up to the storage limit, 1-100 jobs per user, and retention of 1-365 days.");
         if (config.UserProfiles is null || config.UserProfiles.Length > 256)
             throw new ArgumentException("At most 256 user playback profiles are supported.");
         var profileUsers = new HashSet<Guid>();
