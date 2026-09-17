@@ -6,4 +6,6 @@ namespace Jellyfin.Plugin.Siphon.Infrastructure;
 public sealed class SiphonPaths(IApplicationPaths paths)
 {
     public string DataDirectory { get; } = Path.Combine(paths.DataPath, "siphon");
+
+    public string LibraryDirectory { get; } = Path.Combine(paths.DataPath, "siphon", "library");
 }

@@ -42,17 +42,27 @@ public sealed class ServiceRegistrator : MediaBrowser.Controller.Plugins.IPlugin
         serviceCollection.AddSingleton<Infrastructure.MetadataResponseCache>();
         serviceCollection.AddSingleton<Metadata.MetadataProviderClient>();
         serviceCollection.AddSingleton<Metadata.MetadataEnrichmentService>();
+        serviceCollection.AddSingleton<Identity.ItemMetadataMapper>();
+        serviceCollection.AddSingleton<Identity.CatalogLibraryService>();
         serviceCollection.AddSingleton<Identity.LibraryMaterializer>();
+        serviceCollection.AddSingleton<Identity.FollowedSeriesSelector>();
+        serviceCollection.AddSingleton<Identity.CatalogCleanupService>();
         serviceCollection.AddSingleton<Infrastructure.SiphonItemLocator>();
         serviceCollection.AddSingleton<Microsoft.Extensions.Hosting.IHostedService>(services => services.GetRequiredService<Identity.LibraryMaterializer>());
         serviceCollection.AddSingleton<Playback.StreamResolver>();
         serviceCollection.AddSingleton<Playback.SourceBindingStore>();
         serviceCollection.AddSingleton<Playback.ProxySessionStore>();
+        serviceCollection.AddSingleton<Playback.NativeVersionService>();
         serviceCollection.AddSingleton<Playback.SiphonMediaSourceProvider>();
         serviceCollection.AddSingleton<MediaBrowser.Controller.Library.IMediaSourceProvider>(services => services.GetRequiredService<Playback.SiphonMediaSourceProvider>());
         serviceCollection.AddSingleton<Tasks.CatalogSyncTask>();
         serviceCollection.AddSingleton<MediaBrowser.Model.Tasks.IScheduledTask>(services => services.GetRequiredService<Tasks.CatalogSyncTask>());
+        serviceCollection.AddSingleton<Tasks.MetadataRefreshTask>();
+        serviceCollection.AddSingleton<MediaBrowser.Model.Tasks.IScheduledTask>(services => services.GetRequiredService<Tasks.MetadataRefreshTask>());
+        serviceCollection.AddSingleton<Tasks.FollowedSeriesSyncTask>();
+        serviceCollection.AddSingleton<MediaBrowser.Model.Tasks.IScheduledTask>(services => services.GetRequiredService<Tasks.FollowedSeriesSyncTask>());
         serviceCollection.AddSingleton<Subtitles.StremioSubtitleProvider>();
+        serviceCollection.AddSingleton<Subtitles.ManagedSubtitleStore>();
         serviceCollection.AddSingleton<MediaBrowser.Controller.Subtitles.ISubtitleProvider>(services => services.GetRequiredService<Subtitles.StremioSubtitleProvider>());
         serviceCollection.AddSingleton<Identity.CatalogSyncService>();
     }
