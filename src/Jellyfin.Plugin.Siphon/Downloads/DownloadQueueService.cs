@@ -13,9 +13,9 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.Siphon.Downloads;
 
 /// <summary>One worker owns scheduling, revocation and quota reservations; downloads never outlive their authority.</summary>
-public sealed class DownloadQueueService(DownloadQueueStore store, IDownloadTransfer transfer, ConfigurationAccessor configuration,
-    PlaybackAccess access, IUserManager users, ISiphonStateStore state, StreamResolver resolver,
-    IHostApplicationLifetime lifetime, ILogger<DownloadQueueService> logger) : BackgroundService
+public sealed partial class DownloadQueueService(DownloadQueueStore store, IDownloadTransfer transfer, ConfigurationAccessor configuration,
+    PlaybackAccess access, IUserManager users, ISiphonStateStore state, StreamResolver resolver, ILibraryManager library,
+    NativeVersionService versions, IHostApplicationLifetime lifetime, ILogger<DownloadQueueService> logger) : BackgroundService
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly Dictionary<Guid, ActiveJob> _active = [];
@@ -36,7 +36,33 @@ public sealed class DownloadQueueService(DownloadQueueStore store, IDownloadTran
     }
     private int ConcurrentLimit => Math.Clamp(configuration.Current.DownloadMaxConcurrentJobs, 1, 16);
     private long StorageLimit => Math.Clamp((long)configuration.Current.DownloadMaxStorageMiB, 1, 16 * 1024 * 1024) * 1024 * 1024;
-    private long FileLimit => Math.Clamp((long)configuration.Current.DownloadMaxFileMiB, 1, 16 * 1024 * 1024) * 1024 * 1024;
+    private long FileLimit => Math.Min(UserStorageLimit, Math.Clamp((long)configuration.Current.DownloadMaxFileMiB, 1, 16 * 1024 * 1024) * 1024 * 1024);
+    private long UserStorageLimit => Math.Min(StorageLimit, Math.Clamp((long)configuration.Current.DownloadMaxStoragePerUserMiB, 1, 16 * 1024 * 1024) * 1024 * 1024);
+    private bool WindowOpen => IsWindowOpen(DateTimeOffset.UtcNow, configuration.Current.DownloadWindowEnabled,
+        configuration.Current.DownloadWindowStartUtcHour, configuration.Current.DownloadWindowEndUtcHour);
+
+    internal static bool IsWindowOpen(DateTimeOffset now, bool enabled, int start, int end)
+        => !enabled || start is >= 0 and <= 23 && end is >= 0 and <= 23 && start != end
+            && (start < end ? now.UtcDateTime.Hour >= start && now.UtcDateTime.Hour < end : now.UtcDateTime.Hour >= start || now.UtcDateTime.Hour < end);
+
+    private DateTimeOffset? NextWindow()
+    {
+        var settings = configuration.Current;
+        if (WindowOpen || settings.DownloadWindowStartUtcHour is < 0 or > 23
+            || settings.DownloadWindowEndUtcHour is < 0 or > 23 || settings.DownloadWindowStartUtcHour == settings.DownloadWindowEndUtcHour) return null;
+        var now = DateTimeOffset.UtcNow;
+        var next = new DateTimeOffset(now.UtcDateTime.Date, TimeSpan.Zero).AddHours(settings.DownloadWindowStartUtcHour);
+        return next > now ? next : next.AddDays(1);
+    }
+
+    public DownloadQueueHealth GetHealth()
+    {
+        var jobs = store.Snapshot();
+        return new(Enabled, jobs.Count(job => job.State == DownloadJobState.Queued), jobs.Count(job => job.State == DownloadJobState.Running),
+            jobs.Count(job => job.State == DownloadJobState.Paused), jobs.Count(job => job.State == DownloadJobState.Failed),
+            jobs.Count(job => job.State == DownloadJobState.Completed), jobs.Sum(job => job.StoredBytes),
+            jobs.Sum(job => job.ReservedBytes), StorageLimit);
+    }
     private bool Enabled => configuration.Current.EnableDownloadQueue;
     private string TransportKey => AddonRegistry.Digest(configuration.Current.PublicBaseUrl + "\n"
         + string.Join('\n', configuration.Current.AllowedPrivateHosts.Order(StringComparer.OrdinalIgnoreCase)));
@@ -62,14 +88,18 @@ public sealed class DownloadQueueService(DownloadQueueStore store, IDownloadTran
     {
         var enabled = Enabled;
         var allowed = Allowed(userId);
-        var jobs = store.Snapshot().Where(job => job.UserId == userId && !job.DeleteRequested).OrderByDescending(job => job.CreatedUtc).ToArray();
+        var owned = store.Snapshot().Where(job => job.UserId == userId).ToArray();
+        var jobs = owned.Where(job => !job.DeleteRequested).OrderByDescending(job => job.CreatedUtc).ToArray();
         return new(enabled, allowed, jobs.Select(job => Summary(job, enabled && allowed && Authorized(job))).ToArray(),
-            jobs.Sum(job => job.StoredBytes), StorageLimit);
+            owned.Sum(job => job.StoredBytes), StorageLimit, UserStorageLimit, owned.Sum(job => job.ReservedBytes),
+            configuration.Current.DownloadWindowEnabled, configuration.Current.DownloadWindowStartUtcHour, configuration.Current.DownloadWindowEndUtcHour);
     }
 
-    internal async Task<DownloadJobSummary> EnqueueAsync(Guid userId, DownloadQueueRequest request, CancellationToken ct)
+    internal async Task<DownloadJobSummary> EnqueueAsync(Guid userId, DownloadQueueRequest request, CancellationToken ct,
+        string? expectedItemKey = null, string? expectedSourceId = null)
     {
         if (!Enabled || !Allowed(userId)) throw new DownloadQueueException(403, "Server downloads are not enabled for this account.");
+        ValidateRequest(request);
         if (!Guid.TryParse(request.MediaSourceId, out var selectedId) || selectedId == Guid.Empty
             || access.GetVideo(request.ItemId, userId, download: true) is not { } item || item.GetProviderId("Siphon") is not { } key
             || state.FindByKey(key) is not { } managed
@@ -78,11 +108,18 @@ public sealed class DownloadQueueService(DownloadQueueStore store, IDownloadTran
             || selected.GetProviderId(NativeVersionService.OwnerProvider) != userId.ToString("N")
             || selected.GetProviderId(NativeVersionService.SourceProvider) is not { } sourceId)
             throw new DownloadQueueException(404, "The selected version is unavailable.");
+        if (expectedItemKey is not null && expectedItemKey != key || expectedSourceId is not null && expectedSourceId != sourceId)
+            throw new DownloadQueueException(409, "The exact previewed version has changed. Preview the series or season again.", "DownloadSelectionUnavailable");
         var profile = AddonRegistry.PlaybackKey(configuration.Current, userId);
         var transport = TransportKey;
         var source = (await resolver.GetSourcesAsync(managed, userId, ct).ConfigureAwait(false))
             .FirstOrDefault(candidate => candidate.Id == sourceId && candidate.UserId == userId);
-        if (source is null) throw new DownloadQueueException(409, "The selected version is no longer available. Choose a version again.");
+        if (source is null) throw new DownloadQueueException(409, "The selected version is no longer available. Choose a version again.", "DownloadSourceUnavailable");
+        if (request.AudioLanguages is not null || request.SubtitleLanguages is not null)
+        {
+            var preparation = await PrepareSourceAsync(source, ct).ConfigureAwait(false);
+            ValidateSelection(new(request.AudioLanguages, request.SubtitleLanguages), preparation);
+        }
         var now = DateTimeOffset.UtcNow;
         var job = new DownloadJob
         {
@@ -97,6 +134,9 @@ public sealed class DownloadQueueService(DownloadQueueStore store, IDownloadTran
             StorageKey = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)),
             Name = new string(item.Name.Where(character => !char.IsControl(character)).Take(256).ToArray()),
             State = DownloadJobState.Queued,
+            Priority = request.Priority,
+            AudioLanguages = request.AudioLanguages?.ToArray(),
+            SubtitleLanguages = request.SubtitleLanguages?.ToArray(),
             CreatedUtc = now,
             UpdatedUtc = now,
             TotalBytes = source.Size is >= 0 ? source.Size : null
@@ -105,7 +145,7 @@ public sealed class DownloadQueueService(DownloadQueueStore store, IDownloadTran
         try
         {
             if (!Enabled || !Authorized(job)) throw new DownloadQueueException(403, "Download permission or the playback profile changed.");
-            if (job.TotalBytes > Math.Min(FileLimit, StorageLimit)) throw new DownloadQueueException(409, "This version exceeds the configured download storage limit.");
+            CheckAdmission(job);
             return Summary(store.Add(job, Math.Clamp(configuration.Current.DownloadMaxJobsPerUser, 1, 200)), true);
         }
         finally { _gate.Release(); }
@@ -117,12 +157,16 @@ public sealed class DownloadQueueService(DownloadQueueStore store, IDownloadTran
         try
         {
             var job = Require(userId, id);
+            if (!Enabled || !Authorized(job)) throw new DownloadQueueException(403, "Download permission or the playback profile changed.");
             if (!delete && job.State == DownloadJobState.Completed) throw new DownloadQueueException(409, "Delete a completed download to remove its file.");
             store.Update(id, current => current with
             {
                 State = DownloadJobState.Cancelled,
                 DeleteRequested = delete,
-                ReservedBytes = 0,
+                ReservedBytes = _active.ContainsKey(id) ? current.ReservedBytes : 0,
+                Phase = "Waiting",
+                BytesPerSecond = null,
+                EstimatedSecondsRemaining = null,
                 UpdatedUtc = DateTimeOffset.UtcNow,
                 Error = null
             });
@@ -142,7 +186,16 @@ public sealed class DownloadQueueService(DownloadQueueStore store, IDownloadTran
             if (!Enabled || !Authorized(job)) throw new DownloadQueueException(403, "Download permission or the playback profile changed. Select the version again.");
             if (job.State is not (DownloadJobState.Failed or DownloadJobState.Cancelled) || _active.ContainsKey(id))
                 throw new DownloadQueueException(409, "This download cannot be retried yet.");
-            var updated = store.Update(id, current => current with { State = DownloadJobState.Queued, Error = null, UpdatedUtc = DateTimeOffset.UtcNow });
+            CheckAdmission(job);
+            var updated = store.Update(id, current => current with
+            {
+                State = DownloadJobState.Queued,
+                Phase = "Waiting",
+                Error = null,
+                BytesPerSecond = null,
+                EstimatedSecondsRemaining = null,
+                UpdatedUtc = DateTimeOffset.UtcNow
+            });
             return Summary(updated!, true);
         }
         finally { _gate.Release(); }
@@ -192,9 +245,17 @@ public sealed class DownloadQueueService(DownloadQueueStore store, IDownloadTran
         return false;
     }
     private DownloadJob Require(Guid userId, Guid id) => store.Find(id, userId) ?? throw new DownloadQueueException(404, "Download not found.");
-    private static DownloadJobSummary Summary(DownloadJob job, bool allowed)
-        => new(job.Id, job.ItemId, job.MediaSourceId.ToString("N"), job.Name, job.State.ToString(), job.BytesReceived, job.TotalBytes,
-            job.CreatedUtc, job.UpdatedUtc, job.Error, allowed && job.State is DownloadJobState.Failed or DownloadJobState.Cancelled);
+    private DownloadJobSummary Summary(DownloadJob job, bool allowed)
+    {
+        var freshRate = job.State == DownloadJobState.Running && job.Phase == "Receiving"
+            && DateTimeOffset.UtcNow - job.UpdatedUtc <= TimeSpan.FromSeconds(10);
+        return new(job.Id, job.ItemId, job.MediaSourceId.ToString("N"), job.Name, job.State.ToString(), job.BytesReceived, job.TotalBytes,
+            job.CreatedUtc, job.UpdatedUtc, job.Error, allowed && job.State is DownloadJobState.Failed or DownloadJobState.Cancelled,
+            job.Priority, job.State == DownloadJobState.Completed ? "Ready" : job.State == DownloadJobState.Running ? job.Phase
+                : job.State == DownloadJobState.Queued && !WindowOpen ? "WaitingWindow" : "Waiting",
+            freshRate ? job.BytesPerSecond : null, freshRate ? job.EstimatedSecondsRemaining : null,
+            job.State == DownloadJobState.Queued ? NextWindow() : null, job.AudioLanguages?.ToArray(), job.SubtitleLanguages?.ToArray());
+    }
     private void RevokeTickets(Guid id)
     {
         foreach (var key in _tickets.Where(pair => pair.Value.JobId == id).Select(pair => pair.Key).ToArray())
@@ -251,6 +312,7 @@ public sealed class DownloadQueueService(DownloadQueueStore store, IDownloadTran
                 if (!Enabled) Interrupt(job, DownloadJobState.Queued, null);
                 else if (!Authorized(job)) Interrupt(job, DownloadJobState.Failed, "Download permission or the playback profile changed.");
                 else if (job.ReservedBytes > FileLimit) Interrupt(job, DownloadJobState.Failed, "The download storage limit was reduced.");
+                else if (!WindowOpen) Interrupt(job, DownloadJobState.Queued, null);
             }
             foreach (var key in _tickets.Where(pair => !ValidTicket(pair.Value)).Select(pair => pair.Key).ToArray()) _tickets.Remove(key);
             if (!Enabled) return;
@@ -266,14 +328,31 @@ public sealed class DownloadQueueService(DownloadQueueStore store, IDownloadTran
                 _reconciled = true;
             }
             if (!_reconciled) return;
-            foreach (var orphan in jobs.Where(job => job.State == DownloadJobState.Running && !_active.ContainsKey(job.Id)))
-                store.Update(orphan.Id, current => current with { State = DownloadJobState.Queued, ReservedBytes = 0, UpdatedUtc = DateTimeOffset.UtcNow });
+            foreach (var orphan in jobs.Where(job => (job.State == DownloadJobState.Running || job.ReservedBytes > 0) && !_active.ContainsKey(job.Id)))
+                store.Update(orphan.Id, current => current with
+                {
+                    State = current.State == DownloadJobState.Running ? DownloadJobState.Queued : current.State,
+                    ReservedBytes = 0,
+                    BytesPerSecond = null,
+                    EstimatedSecondsRemaining = null,
+                    UpdatedUtc = DateTimeOffset.UtcNow
+                });
             var running = store.Snapshot().Where(job => job.State == DownloadJobState.Running).OrderBy(job => job.CreatedUtc).ToArray();
-            var reserved = store.Snapshot().Sum(job => job.State == DownloadJobState.Running ? job.ReservedBytes : job.StoredBytes);
+            var reserved = store.Snapshot().Sum(DownloadQueueStore.CommittedBytes);
             for (var index = running.Length - 1; index >= 0 && (index >= ConcurrentLimit || reserved > StorageLimit); index--)
             {
                 Interrupt(running[index], DownloadJobState.Failed, "The download queue limits were reduced.");
                 reserved -= running[index].ReservedBytes - running[index].StoredBytes;
+            }
+            foreach (var group in store.Snapshot().Where(job => job.ReservedBytes > 0).GroupBy(job => job.UserId))
+            {
+                var committed = store.Snapshot().Where(job => job.UserId == group.Key).Sum(DownloadQueueStore.CommittedBytes);
+                foreach (var job in group.OrderByDescending(job => job.CreatedUtc))
+                {
+                    if (committed <= UserStorageLimit) break;
+                    Interrupt(job, DownloadJobState.Failed, "The per-user download storage limit was reduced.");
+                    committed -= Math.Max(0, job.ReservedBytes - job.StoredBytes);
+                }
             }
             // Cancel is durable before the writer stops. Keep its reservation unavailable until it has actually exited.
             if (_active.Values.Any(active => active.Cancellation.IsCancellationRequested)) return;
@@ -293,10 +372,8 @@ public sealed class DownloadQueueService(DownloadQueueStore store, IDownloadTran
                 }
                 foreach (var key in _tickets.Where(pair => pair.Value.ExpiresUtc <= DateTimeOffset.UtcNow).Select(pair => pair.Key).ToArray()) _tickets.Remove(key);
             }
-            // Round-robin users, FIFO within each user; one busy account cannot occupy every future slot.
-            var candidates = store.Snapshot().Where(job => !job.DeleteRequested && job.State == DownloadJobState.Queued)
-                .GroupBy(job => job.UserId).Select(group => group.OrderBy(job => job.CreatedUtc).ThenBy(job => job.Id).First())
-                .OrderBy(job => job.UserId.CompareTo(_lastUser) > 0 ? 0 : 1).ThenBy(job => job.UserId).ToArray();
+            if (!WindowOpen) return;
+            var candidates = ScheduleCandidates(store.Snapshot(), _lastUser);
             foreach (var job in candidates)
             {
                 if (_active.Count >= ConcurrentLimit) break;
@@ -309,12 +386,12 @@ public sealed class DownloadQueueService(DownloadQueueStore store, IDownloadTran
                 {
                     var measured = store.Files.Measure(job);
                     store.Update(job.Id, current => current with { StoredBytes = measured });
-                    if (measured > Math.Min(FileLimit, StorageLimit) || job.TotalBytes > Math.Min(FileLimit, StorageLimit))
+                    if (FileLimit > UserStorageLimit || measured > Math.Min(FileLimit, UserStorageLimit) || job.TotalBytes > Math.Min(FileLimit, UserStorageLimit))
                     {
                         FailQueued(job.Id, "This version exceeds the configured download storage limit.");
                         continue;
                     }
-                    var started = store.TryStart(job.Id, ConcurrentLimit, StorageLimit, FileLimit);
+                    var started = store.TryStart(job.Id, ConcurrentLimit, StorageLimit, FileLimit, UserStorageLimit);
                     if (started is null) continue;
                     _lastUser = job.UserId;
                     var active = new ActiveJob(CancellationTokenSource.CreateLinkedTokenSource(stoppingToken));
@@ -333,7 +410,15 @@ public sealed class DownloadQueueService(DownloadQueueStore store, IDownloadTran
     {
         if (job.State == DownloadJobState.Running)
             store.Update(job.Id, current => current.State == DownloadJobState.Running
-                ? current with { State = state, ReservedBytes = 0, Error = error, UpdatedUtc = DateTimeOffset.UtcNow } : null);
+                ? current with
+                {
+                    State = state,
+                    Error = error,
+                    Phase = "Waiting",
+                    BytesPerSecond = null,
+                    EstimatedSecondsRemaining = null,
+                    UpdatedUtc = DateTimeOffset.UtcNow
+                } : null);
         if (_active.TryGetValue(job.Id, out var active)) active.Cancellation.Cancel();
         RevokeTickets(job.Id);
     }
@@ -343,6 +428,7 @@ public sealed class DownloadQueueService(DownloadQueueStore store, IDownloadTran
         DownloadTransferResult? result = null;
         string? error = null;
         var lastProgress = DateTimeOffset.MinValue;
+        var rate = new DownloadRateEstimator();
         try
         {
             var ct = active.Cancellation.Token;
@@ -355,17 +441,34 @@ public sealed class DownloadQueueService(DownloadQueueStore store, IDownloadTran
             ct.ThrowIfCancellationRequested();
             if (!Enabled || !Authorized(job)) throw new DownloadQueueException(403, "Download permission or the playback profile changed.");
             var directory = store.Files.Prepare(job);
-            result = await transfer.TransferAsync(source, directory, job.ReservedBytes, progress =>
+            result = await transfer.TransferAsync(source, directory, job.ReservedBytes, new(job.AudioLanguages, job.SubtitleLanguages), progress =>
             {
                 ct.ThrowIfCancellationRequested();
                 if (progress.StoredBytes < 0 || progress.StoredBytes > job.ReservedBytes || progress.BytesReceived < 0 || progress.TotalBytes is < 0)
                     throw new DownloadQueueException(409, "The transfer exceeded its reserved storage.");
                 var now = DateTimeOffset.UtcNow;
-                if (now - lastProgress >= TimeSpan.FromSeconds(1))
+                var estimate = rate.Observe(progress, Environment.TickCount64);
+                if (now - lastProgress >= TimeSpan.FromSeconds(1) || rate.PhaseChanged)
                 {
                     if (!Enabled || !Authorized(job)) throw new DownloadQueueException(403, "Download permission or the playback profile changed.");
+                    if (!WindowOpen)
+                    {
+                        store.Update(job.Id, current => current.State == DownloadJobState.Running
+                            ? current with { State = DownloadJobState.Queued, Phase = "WaitingWindow", BytesPerSecond = null, EstimatedSecondsRemaining = null } : null);
+                        active.Cancellation.Cancel();
+                        ct.ThrowIfCancellationRequested();
+                    }
                     store.Update(job.Id, current => current.State == DownloadJobState.Running && !current.DeleteRequested
-                        ? current with { BytesReceived = progress.BytesReceived, TotalBytes = progress.TotalBytes, StoredBytes = progress.StoredBytes, UpdatedUtc = now } : null);
+                        ? current with
+                        {
+                            BytesReceived = progress.BytesReceived,
+                            TotalBytes = progress.TotalBytes,
+                            StoredBytes = progress.StoredBytes,
+                            Phase = progress.Phase,
+                            BytesPerSecond = estimate.Rate,
+                            EstimatedSecondsRemaining = estimate.Remaining,
+                            UpdatedUtc = now
+                        } : null);
                     lastProgress = now;
                 }
                 return Task.CompletedTask;
@@ -373,6 +476,8 @@ public sealed class DownloadQueueService(DownloadQueueStore store, IDownloadTran
         }
         catch (OperationCanceledException) when (active.Cancellation.IsCancellationRequested) { }
         catch (DownloadQueueException exception) { error = exception.Message; }
+        catch (DownloadSelectionException exception) { error = exception.Message; }
+        catch (InvalidDataException) { error = "The HLS source uses an unsupported format. Choose a finite, non-DRM version with compatible video and tracks."; }
         catch { error = "The download failed. The selected source may be unavailable, unsupported, or over its storage limit."; }
         finally
         {
@@ -387,7 +492,7 @@ public sealed class DownloadQueueService(DownloadQueueStore store, IDownloadTran
                     catch { _reconciled = false; error = "The private download storage is unavailable."; }
                     if (current.State == DownloadJobState.Running)
                     {
-                        if (stoppingToken.IsCancellationRequested || !Enabled)
+                        if (stoppingToken.IsCancellationRequested || !Enabled || !WindowOpen)
                             current = current with { State = DownloadJobState.Queued, Error = null };
                         else if (result is not null && error is null && !active.Cancellation.IsCancellationRequested && Authorized(current))
                         {
@@ -397,6 +502,7 @@ public sealed class DownloadQueueService(DownloadQueueStore store, IDownloadTran
                                 current = current with
                                 {
                                     State = DownloadJobState.Completed,
+                                    Phase = "Ready",
                                     BytesReceived = result.Bytes,
                                     TotalBytes = result.Bytes,
                                     FileName = result.FileName,
@@ -408,7 +514,14 @@ public sealed class DownloadQueueService(DownloadQueueStore store, IDownloadTran
                         }
                         else current = current with { State = DownloadJobState.Failed, Error = error ?? "Download permission or the playback profile changed." };
                     }
-                    current = store.Update(job.Id, _ => current with { ReservedBytes = 0, StoredBytes = stored, UpdatedUtc = DateTimeOffset.UtcNow })!;
+                    current = store.Update(job.Id, _ => current with
+                    {
+                        ReservedBytes = 0,
+                        StoredBytes = stored,
+                        BytesPerSecond = null,
+                        EstimatedSecondsRemaining = null,
+                        UpdatedUtc = DateTimeOffset.UtcNow
+                    })!;
                     if (current.DeleteRequested || current.State == DownloadJobState.Cancelled) Cleanup(current);
                     else if (current.State == DownloadJobState.Completed) CompactCompleted(current);
                 }

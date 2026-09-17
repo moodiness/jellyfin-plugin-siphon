@@ -21,7 +21,7 @@ public sealed class SiphonSyncController(ConfigurationAccessor configuration, IS
                 SyncDiagnostics.SafeName(addon.DisplayName + " / " + catalog.Id), catalog.Type is "movie" or "series" or "anime" ? catalog.Type : "other",
                 Guid.TryParse(addon.Id, out var installation) ? installation.ToString("N") : null,
                 Guid.TryParse(catalog.Key, out var subscription) ? subscription.ToString("N") : null))).ToArray();
-        var series = state.GetItems().Where(item => item.Type == "series" && !item.IsSearchPreview).GroupBy(item => item.ContentKey, StringComparer.Ordinal)
+        var series = state.GetReadSnapshot().Items.Where(item => item.Type == "series" && !item.IsSearchPreview).GroupBy(item => item.ContentKey, StringComparer.Ordinal)
             .Select(group => new SeriesTarget(group.Key, SyncDiagnostics.SafeName(group.First().SeriesName ?? group.First().Name)))
             .OrderBy(item => item.Name, StringComparer.Ordinal).ToArray();
         return new SyncTargets(catalogs, series);
@@ -31,7 +31,7 @@ public sealed class SiphonSyncController(ConfigurationAccessor configuration, IS
     [RequestSizeLimit(4096)]
     public ActionResult StartTarget([FromBody] SyncTarget target)
     {
-        try { target.Validate(configuration.Current, state.GetItems()); }
+        try { target.Validate(configuration.Current, state.GetReadSnapshot()); }
         catch (ArgumentException) { return BadRequest(new SyncError("InvalidTarget", "Select exactly one catalog or series from the target list.")); }
         catch (KeyNotFoundException exception) { return NotFound(new SyncError("TargetNotFound", exception.Message)); }
         var worker = tasks.ScheduledTasks.FirstOrDefault(task => task.ScheduledTask is TargetedSyncTask);

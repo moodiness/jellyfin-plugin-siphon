@@ -12,10 +12,17 @@ namespace Jellyfin.Plugin.Siphon.Downloads;
 /// <summary>Transfers the exact resolved source into a bounded private workspace.</summary>
 public sealed class DownloadTransferService(ISafeHttpClient http, P2pStreamService peers, IMediaEncoder encoder) : IDownloadTransfer
 {
-    public async Task<DownloadTransferResult> TransferAsync(ResolvedStream source, string directory, long maximumBytes,
+    public Task<DownloadPreparation> PrepareAsync(ResolvedStream source, CancellationToken cancellationToken)
+        => new DownloadPreparationService(http).PrepareAsync(source, cancellationToken);
+
+    public async Task<DownloadTransferResult> TransferAsync(ResolvedStream source, string directory, long maximumBytes, DownloadTransferOptions options,
         Func<DownloadTransferProgress, Task> progress, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (!DownloadTransferOptions.ValidLanguages(options.AudioLanguages) || !DownloadTransferOptions.ValidLanguages(options.SubtitleLanguages))
+            throw new DownloadSelectionException("Track selections must contain bounded advertised language identifiers.");
+        if (source.P2p is not null && options.HasSelection)
+            throw new DownloadSelectionException("Peer downloads retain all tracks. Choose all tracks or a finite HLS source for track filtering.");
         var workspace = new DownloadTransferWorkspace(directory, maximumBytes, progress);
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         lifetime.CancelAfter(TimeSpan.FromHours(24));
@@ -23,7 +30,7 @@ public sealed class DownloadTransferService(ISafeHttpClient http, P2pStreamServi
         {
             return source.P2p is not null
                 ? await TransferPeerAsync(source, workspace, lifetime.Token).ConfigureAwait(false)
-                : await TransferHttpAsync(source, workspace, lifetime.Token).ConfigureAwait(false);
+                : await TransferHttpAsync(source, workspace, options, lifetime.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -61,7 +68,7 @@ public sealed class DownloadTransferService(ISafeHttpClient http, P2pStreamServi
         return await FinalizeAsync(workspace, extension, lease.Length).ConfigureAwait(false);
     }
 
-    private async Task<DownloadTransferResult> TransferHttpAsync(ResolvedStream source, DownloadTransferWorkspace workspace, CancellationToken cancellationToken)
+    private async Task<DownloadTransferResult> TransferHttpAsync(ResolvedStream source, DownloadTransferWorkspace workspace, DownloadTransferOptions options, CancellationToken cancellationToken)
     {
         var fingerprint = DownloadTransferWorkspace.Fingerprint(source.Id + "\n" + source.Url.AbsoluteUri);
         var state = workspace.ReadResume();
@@ -81,14 +88,14 @@ public sealed class DownloadTransferService(ISafeHttpClient http, P2pStreamServi
             response.Dispose();
             workspace.Reset();
             using var fresh = await OpenHttpAsync(source, null, 0, cancellationToken).ConfigureAwait(false);
-            return await ReceiveHttpAsync(source, fresh, workspace, fingerprint, null, 0, cancellationToken).ConfigureAwait(false);
+            return await ReceiveHttpAsync(source, fresh, workspace, fingerprint, null, 0, options, cancellationToken).ConfigureAwait(false);
         }
         if (resume && response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
         {
             response.Dispose();
             workspace.Reset();
             using var fresh = await OpenHttpAsync(source, null, 0, cancellationToken).ConfigureAwait(false);
-            return await ReceiveHttpAsync(source, fresh, workspace, fingerprint, null, 0, cancellationToken).ConfigureAwait(false);
+            return await ReceiveHttpAsync(source, fresh, workspace, fingerprint, null, 0, options, cancellationToken).ConfigureAwait(false);
         }
         if (response.StatusCode == HttpStatusCode.OK)
         {
@@ -96,7 +103,7 @@ public sealed class DownloadTransferService(ISafeHttpClient http, P2pStreamServi
             offset = 0;
             state = null;
         }
-        return await ReceiveHttpAsync(source, response, workspace, fingerprint, state, offset, cancellationToken).ConfigureAwait(false);
+        return await ReceiveHttpAsync(source, response, workspace, fingerprint, state, offset, options, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<HttpResponseMessage> OpenHttpAsync(ResolvedStream source, DownloadResumeState? state, long offset, CancellationToken cancellationToken)
@@ -111,7 +118,7 @@ public sealed class DownloadTransferService(ISafeHttpClient http, P2pStreamServi
     }
 
     private async Task<DownloadTransferResult> ReceiveHttpAsync(ResolvedStream source, HttpResponseMessage response,
-        DownloadTransferWorkspace workspace, string fingerprint, DownloadResumeState? state, long offset, CancellationToken cancellationToken)
+        DownloadTransferWorkspace workspace, string fingerprint, DownloadResumeState? state, long offset, DownloadTransferOptions options, CancellationToken cancellationToken)
     {
         if (offset > 0 ? state is null || !CanAppend(response, state, offset) : response.StatusCode != HttpStatusCode.OK)
             throw new IOException("The upstream server did not return a valid download representation.");
@@ -135,10 +142,12 @@ public sealed class DownloadTransferService(ISafeHttpClient http, P2pStreamServi
                 || finalUrl.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase)
                 || Encoding.UTF8.GetString(prefix, 0, prefixLength).TrimStart('\uFEFF', ' ', '\r', '\n', '\t').StartsWith("#EXTM3U", StringComparison.Ordinal))
             {
-                var transfer = new HlsOfflineTransfer(http, encoder, source, workspace);
+                var transfer = new HlsOfflineTransfer(http, encoder, source, workspace, options);
                 return await transfer.TransferAsync(input, prefix.AsMemory(0, prefixLength), finalUrl, cancellationToken).ConfigureAwait(false);
             }
         }
+        if (options.HasSelection)
+            throw new DownloadSelectionException("Progressive downloads retain all tracks. Choose all tracks or a finite HLS source for track filtering.");
         var extension = offset > 0 ? state!.Extension : SafeExtension(source.FileName ?? source.Url.AbsolutePath);
         var etag = response.Headers.ETag is { IsWeak: false } value && IsStrongETag(value.ToString()) ? value.ToString() : null;
         await workspace.SaveResumeAsync(new DownloadResumeState("http", fingerprint, etag, total, extension), cancellationToken).ConfigureAwait(false);

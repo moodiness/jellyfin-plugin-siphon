@@ -48,9 +48,15 @@ public sealed class PluginConfiguration : BasePluginConfiguration
     public bool EnableDownloadQueue { get; set; }
     public int DownloadMaxConcurrentJobs { get; set; } = 2;
     public int DownloadMaxStorageMiB { get; set; } = 51200;
+    /// <summary>Per-user retained files, partial files and reservations share this budget, capped by the global budget.</summary>
+    public int DownloadMaxStoragePerUserMiB { get; set; } = 20480;
     public int DownloadMaxFileMiB { get; set; } = 10240;
     public int DownloadMaxJobsPerUser { get; set; } = 20;
     public int DownloadRetentionDays { get; set; } = 7;
+    /// <summary>Optional UTC hours for receiving and preparing queued downloads; completed files remain available.</summary>
+    public bool DownloadWindowEnabled { get; set; }
+    public int DownloadWindowStartUtcHour { get; set; }
+    public int DownloadWindowEndUtcHour { get; set; } = 6;
 
     /// <summary>Users must also opt in individually before release notifications are emitted.</summary>
     public bool EnableCalendarNotifications { get; set; }

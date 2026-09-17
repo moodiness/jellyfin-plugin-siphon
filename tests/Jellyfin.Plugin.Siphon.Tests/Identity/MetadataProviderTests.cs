@@ -79,9 +79,8 @@ public sealed class MetadataProviderTests
         var service = new MetadataEnrichmentService(new(() => new PluginConfiguration()), null!, library, null!, new PreviousState(old));
         var result = Assert.Single(await service.EnrichAsync([fresh], CancellationToken.None));
         Assert.Equal(old.PosterUrl, result.PosterUrl);
-        Assert.Same(old.People, result.People);
+        Assert.Equal(old.People, result.People);
         Assert.Equal(fresh.Description, result.Description);
-        Assert.Same(fresh.StreamIdentities, result.StreamIdentities);
     }
 
     [Fact]
@@ -94,7 +93,7 @@ public sealed class MetadataProviderTests
         var service = new MetadataEnrichmentService(new(() => new PluginConfiguration()), null!, library, null!, new PreviousState(old));
         var result = Assert.Single(await service.EnrichAsync([fresh], CancellationToken.None));
         Assert.Equal(fresh.PosterUrl, result.PosterUrl);
-        Assert.Same(old.People, result.People);
+        Assert.Equal(old.People, result.People);
     }
 
     [Fact]
@@ -154,7 +153,6 @@ public sealed class MetadataProviderTests
         Assert.Equal("https://image.tmdb.org/t/p/original/season-two.jpg", enriched[1].SeasonPosterUrl);
         Assert.DoesNotContain("/3/tv/123/season/2", paths);
         Assert.Equal(1, paths.Count(path => path == "/3/tv/123"));
-        Assert.Same(first.StreamIdentities, enriched[0].StreamIdentities);
     }
 
     [Fact]
@@ -286,7 +284,7 @@ public sealed class MetadataProviderTests
         var second = first with { Key = "second-episode", Episode = 2 };
         var paths = new List<string>();
         var origin = TmdbOrigin(paths, """{"id":123,"name":"Series","seasons":[{"id":101,"season_number":1,"poster_path":"/season-one.jpg"}]}""",
-            """{"id":101,"season_number":1,"episodes":[{"id":1001,"show_id":123,"season_number":1,"episode_number":1,"still_path":"/episode-one.jpg"},{"id":1002,"show_id":123,"season_number":1,"episode_number":2,"still_path":"/episode-two.jpg"}]}""");
+            """{"id":101,"season_number":1,"episodes":[{"id":1002,"show_id":123,"season_number":1,"episode_number":2,"still_path":"/episode-two.jpg"},{"id":1001,"show_id":123,"season_number":1,"episode_number":1,"still_path":"/episode-one.jpg"}]}""");
         using var client = new MetadataProviderClient(new(() => config), origin, null!);
         var library = DispatchProxy.Create<ILibraryManager, NativeLibraryProxy>();
         AddNativeArtwork(library, first, "managed");

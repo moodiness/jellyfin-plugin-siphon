@@ -94,15 +94,18 @@ public sealed class SecurityStateTests : IDisposable
         Assert.Equal("corrupt", File.ReadAllText(keyPath));
     }
 
-    [Fact]
-    public void CorruptStateCannotBeOverwrittenByEmptyFallback()
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"Version\":2,\"Items\":[")]
+    [InlineData("{\"Version\":3,\"Items\":[]}")]
+    public void CorruptStateCannotBeOverwrittenByEmptyFallback(string document)
     {
         var paths = Paths();
         Directory.CreateDirectory(paths.DataDirectory);
         var statePath = Path.Combine(paths.DataDirectory, "state.json");
-        File.WriteAllText(statePath, "{}");
+        File.WriteAllText(statePath, document);
         Assert.Throws<InvalidDataException>(() => new SiphonStateStore(paths));
-        Assert.Equal("{}", File.ReadAllText(statePath));
+        Assert.Equal(document, File.ReadAllText(statePath));
     }
 
     [Fact]
@@ -138,16 +141,21 @@ public sealed class SecurityStateTests : IDisposable
         Assert.Equal(item.Path, restarted.FindByKey(item.Key)?.Path);
     }
 
-    [Fact]
-    public async Task LegacyImdbStateMigratesWithoutChangingPathsOrKeys()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LegacyImdbStateMigratesWithoutChangingPathsOrKeys(bool itemsFirst)
     {
         var paths = Paths();
         Directory.CreateDirectory(paths.DataDirectory);
         var path = Path.Combine(_directory, "old", "episode.strm");
         var legacy = new { Version = 1, Items = new[] { new { Key = "series:tt1234567:1:2", Type = "series", ImdbId = "tt1234567", VideoId = "tt1234567:1:2", Name = "Episode", Path = path, Owners = new[] { "owner" } } } };
-        await File.WriteAllTextAsync(Path.Combine(paths.DataDirectory, "state.json"), System.Text.Json.JsonSerializer.Serialize(legacy));
+        var document = itemsFirst ? JsonSerializer.Serialize(new { legacy.Items, legacy.Version }) : JsonSerializer.Serialize(legacy);
+        var statePath = Path.Combine(paths.DataDirectory, "state.json");
+        await File.WriteAllTextAsync(statePath, document);
         using var state = new SiphonStateStore(paths);
-        var item = Assert.Single(state.GetItems());
+        var item = Assert.Single(state.GetReadSnapshot().Items);
+        Assert.Equal(document, await File.ReadAllTextAsync(statePath));
         Assert.Equal("series:tt1234567:1:2", item.Key);
         Assert.Equal(path, item.Path);
         Assert.Equal("tt1234567", item.ProviderIds["Imdb"]);

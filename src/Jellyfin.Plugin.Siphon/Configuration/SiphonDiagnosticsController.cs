@@ -1,7 +1,11 @@
 using System.Diagnostics;
 using System.Net;
 using System.Text.Json;
+using Jellyfin.Plugin.Siphon.Downloads;
 using Jellyfin.Plugin.Siphon.Infrastructure;
+using Jellyfin.Plugin.Siphon.Metadata;
+using Jellyfin.Plugin.Siphon.Notifications;
+using Jellyfin.Plugin.Siphon.P2p;
 using Jellyfin.Plugin.Siphon.Protocol;
 using MediaBrowser.Common.Api;
 using MediaBrowser.Controller;
@@ -16,6 +20,65 @@ namespace Jellyfin.Plugin.Siphon.Configuration;
 public sealed class SiphonDiagnosticsController(ConfigurationAccessor configuration, StremioClient client,
     SyncDiagnostics diagnostics, SelfConnectionProbe connection, IServerApplicationHost applicationHost) : ControllerBase
 {
+    private static readonly Lazy<string?> RepositoryVersion = new(ReadRepositoryVersion);
+
+    /// <summary>Aggregates existing in-memory observations; does not probe providers or enumerate media storage.</summary>
+    [HttpGet("Health")]
+    public ActionResult<HealthResponse> GetHealth(
+        [FromServices] MetadataProviderClient providers,
+        [FromServices] DownloadQueueService downloads,
+        [FromServices] P2pStreamService peers,
+        [FromServices] NotificationWebhookService notifications,
+        [FromServices] SiphonPaths paths)
+    {
+        Response.Headers.CacheControl = "no-store";
+        var local = GetDiagnostics().Value!;
+        P2pHealth? peerStatus = null;
+        string? peerCode = null;
+        try
+        {
+            var value = peers.GetStatus();
+            peerStatus = new(value.Enabled, value.ActiveStreams, value.MaximumStreams, value.ReservedBytes,
+                value.CacheBytes, value.MaximumCacheBytes, value.DownloadLimitBytesPerSecond, value.UploadLimitBytesPerSecond,
+                value.DhtEnabled, value.CacheMeasuredAtUtc);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            peerCode = "StorageUnavailable";
+        }
+        long? available = null;
+        string? storageCode = null;
+        try { available = new DriveInfo(paths.DataDirectory).AvailableFreeSpace; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            storageCode = "StorageUnavailable";
+        }
+        return new HealthResponse(local.GeneratedAtUtc, local.ServerVersion, local.PluginVersion, RepositoryVersion.Value,
+            local.StorageCode, local.Addons, diagnostics.GetRunStatus(), providers.GetStatus(),
+            downloads.GetHealth(), peerStatus, notifications.GetHealth(), new StorageHealth(available, storageCode), peerCode);
+    }
+
+    private static string? ReadRepositoryVersion()
+    {
+        using var stream = typeof(Plugin).Assembly.GetManifestResourceStream("Jellyfin.Plugin.Siphon.RepositoryManifest.json");
+        if (stream is null || stream.Length > 65536) return null;
+        using var document = JsonDocument.Parse(stream, new JsonDocumentOptions { MaxDepth = 12 });
+        Version? latest = null;
+        if (document.RootElement.ValueKind != JsonValueKind.Array) return null;
+        foreach (var plugin in document.RootElement.EnumerateArray())
+        {
+            if (!plugin.TryGetProperty("guid", out var guid) || guid.ValueKind != JsonValueKind.String
+                || !Guid.TryParse(guid.GetString(), out var id) || id != Plugin.PluginId
+                || !plugin.TryGetProperty("versions", out var versions) || versions.ValueKind != JsonValueKind.Array) continue;
+            foreach (var release in versions.EnumerateArray())
+            {
+                if (release.TryGetProperty("version", out var text) && text.ValueKind == JsonValueKind.String
+                    && Version.TryParse(text.GetString(), out var version) && (latest is null || version > latest)) latest = version;
+            }
+        }
+        return latest?.ToString();
+    }
+
     /// <summary>Reads local observations only. Saved names and upstream addresses never enter this report.</summary>
     [HttpGet]
     public ActionResult<DiagnosticsResponse> GetDiagnostics()
@@ -79,6 +142,14 @@ public sealed class SiphonDiagnosticsController(ConfigurationAccessor configurat
     public sealed record AddonDiagnosticResponse(string InstallationId, bool Enabled, int CatalogCount, int EnabledCatalogCount,
         DateTimeOffset? LastSuccessUtc, DateTimeOffset? LastFailureUtc, string? LastErrorCode, ManifestCheckDiagnostic? LastManifestCheck);
     public sealed record ManifestTestResponse(bool Success, string Code, long ElapsedMilliseconds, ManifestCheckDiagnostic? Check);
+    public sealed record HealthResponse(DateTimeOffset GeneratedAtUtc, string? ServerVersion, string? SourceVersion,
+        string? RepositoryVersionAtBuild, string? StorageCode, IReadOnlyList<AddonDiagnosticResponse> Addons,
+        SyncRunStatus Sync, IReadOnlyList<MetadataProviderStatus> Providers, DownloadQueueHealth Downloads,
+        P2pHealth? P2p, NotificationWebhookHealth Notifications, StorageHealth Storage, string? P2pCode);
+    public sealed record StorageHealth(long? AvailableBytes, string? Code);
+    public sealed record P2pHealth(bool Enabled, int ActiveStreams, int MaximumStreams, long ReservedBytes, long CacheBytes,
+        long MaximumCacheBytes, long DownloadLimitBytesPerSecond, long UploadLimitBytesPerSecond, bool DhtEnabled,
+        DateTimeOffset? CacheMeasuredAtUtc);
 }
 
 public sealed record ConnectionTestResponse(bool Success, string Code, long ElapsedMilliseconds);

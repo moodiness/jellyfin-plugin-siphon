@@ -224,9 +224,12 @@ public sealed class MetadataEnrichmentService(
                     foreach (var entry in season)
                         output[entry.Index] = WithSeasonPoster(output[entry.Index], poster ?? TmdbImage(imageBase, fetched.Value.PosterPath), config,
                             poster is null ? MetadataProvenance.Observation(fetched.Value) : posterSource);
+                    if (eligibleEpisodes.Length == 0) continue;
+                    // The response validator has already required unique episode numbers within this season.
+                    var episodesByNumber = fetched.Value.Episodes.ToDictionary(record => record.EpisodeNumber);
                     foreach (var entry in eligibleEpisodes)
                     {
-                        var episode = fetched.Value.Episodes.FirstOrDefault(record => record.SeasonNumber == entry.Item.Season && record.EpisodeNumber == entry.Item.Episode);
+                        var episode = episodesByNumber.GetValueOrDefault(entry.Item.Episode!.Value);
                         if (episode is null || (Id(entry.Item.EpisodeProviderIds, "Tmdb") is { } episodeId && episode.Id.ToString(CultureInfo.InvariantCulture) != episodeId)) continue;
                         MetadataProvenance.Observe(episode, MetadataProvenance.Observation(fetched.Value));
                         var metadata = TmdbValues(episode, imageBase, true);
@@ -330,8 +333,8 @@ public sealed class MetadataEnrichmentService(
                 ThumbnailUrl = episodePoster ? previous.ThumbnailUrl : item.ThumbnailUrl,
                 EpisodeBackdropUrl = episodeBackdrop ? previous.EpisodeBackdropUrl : item.EpisodeBackdropUrl,
                 EpisodeLogoUrl = episodeLogo ? previous.EpisodeLogoUrl : item.EpisodeLogoUrl,
-                People = parentPeople ? previous.People : item.People,
-                EpisodePeople = episodePeople ? previous.EpisodePeople : item.EpisodePeople
+                People = parentPeople ? previous.People.ToArray() : item.People,
+                EpisodePeople = episodePeople ? previous.EpisodePeople.ToArray() : item.EpisodePeople
             };
             var retainedFields = new List<string>(9);
             if (parentPoster) retainedFields.Add("PosterUrl");
@@ -360,9 +363,9 @@ public sealed class MetadataEnrichmentService(
     private BaseItem? NativeSeason(ManagedItem item)
         => library.GetItemById(library.GetNewItemId("siphon:season:" + item.ContentKey + ":season:" + item.Season.GetValueOrDefault().ToString(CultureInfo.InvariantCulture), typeof(Season)));
 
-    private ManagedItem? Previous(ManagedItem item)
+    private ManagedItemSnapshot? Previous(ManagedItem item)
     {
-        var previous = state.FindByKey(item.Key);
+        var previous = state.ReadByKey(item.Key);
         return previous is not null && previous.ContentKey == item.ContentKey && previous.Type == item.Type
             && previous.Season == item.Season && previous.Episode == item.Episode ? previous : null;
     }
@@ -377,9 +380,11 @@ public sealed class MetadataEnrichmentService(
     {
         var current = season ? item.SeasonPosterUrl : item.ThumbnailUrl;
         if (!MetadataPolicy.Wants(config, "Images", MissingChildImage(item, current))) return false;
-        var previous = Previous(item) ?? item;
+        var previous = Previous(item);
+        var previousImage = previous is null ? current : season ? previous.SeasonPosterUrl : previous.ThumbnailUrl;
+        var previousPoster = previous is null ? item.PosterUrl : previous.PosterUrl;
         return native is null || MetadataPolicy.CanUpdateImage(native, config, ImageType.Primary,
-            missingManagedValue: IsFallbackImage(season ? previous.SeasonPosterUrl : previous.ThumbnailUrl, previous.PosterUrl), inheritedFrom: Native(item, true));
+            missingManagedValue: IsFallbackImage(previousImage, previousPoster), inheritedFrom: Native(item, true));
     }
 
     private bool NeedsSeasonPoster(ManagedItem item, PluginConfiguration config)
@@ -390,9 +395,11 @@ public sealed class MetadataEnrichmentService(
         {
             // A selected source owns every field except genuinely absent season artwork, even on full refresh.
             if (!MissingChildImage(item, item.SeasonPosterUrl)) return false;
-            var previous = Previous(item) ?? item;
+            var previous = Previous(item);
+            var previousSeasonPoster = previous is null ? item.SeasonPosterUrl : previous.SeasonPosterUrl;
+            var previousPoster = previous is null ? item.PosterUrl : previous.PosterUrl;
             if (native?.HasImage(ImageType.Primary) == true
-                && (!IsFallbackImage(previous.SeasonPosterUrl, previous.PosterUrl)
+                && (!IsFallbackImage(previousSeasonPoster, previousPoster)
                     || !MetadataPolicy.IsManagedImage(native, ImageType.Primary, Native(item, true)))) return false;
         }
         return CanUpdateChildImage(item, native, config, true);

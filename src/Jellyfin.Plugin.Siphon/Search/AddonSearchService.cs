@@ -29,7 +29,7 @@ public sealed class AddonSearchService(
     private readonly object _cacheLock = new();
     private readonly Dictionary<string, CachedQuery> _cache = new(StringComparer.OrdinalIgnoreCase);
     private sealed record CachedQuery(DateTimeOffset Expires, Task<IReadOnlyList<Discovery>> Task);
-    private sealed record Discovery(RegisteredAddon Addon, StremioMeta Meta);
+    private sealed record Discovery(RegisteredAddon Addon, StremioMeta Meta, StremioMeta? Details = null);
 
     public async Task<IReadOnlyList<SearchItem>> SearchAsync(SearchProviderQuery query, CancellationToken ct)
     {
@@ -82,8 +82,9 @@ public sealed class AddonSearchService(
                 }
                 if (previewCount >= MaximumPreviews || current.Count >= SiphonStateStore.MaximumItems) continue;
                 var candidates = new Dictionary<string, ManagedItem>(StringComparer.Ordinal);
-                CatalogSyncService.ConvertMetadata(meta, meta, discovery.Addon.Configuration.Id,
-                    [CatalogLibraryService.PreviewPrefix + meta.Type], prior, candidates, current, 0, allowSeriesPreview: true);
+                CatalogSyncService.ConvertMetadata(meta, discovery.Details ?? meta, discovery.Addon.Configuration.Id,
+                    [CatalogLibraryService.PreviewPrefix + meta.Type], prior, candidates, current, 0, allowSeriesPreview: true,
+                    authoritativeMetadata: discovery.Details is not null && !string.IsNullOrEmpty(configuration.Current.MetadataAddonId));
                 if (hideUnreleased && candidates.Values.Any(candidate => !AddonSearchPolicy.IsReleased(
                     ItemMetadataMapper.ParseDate(candidate.Type == "series" ? candidate.SeriesReleased : candidate.Released),
                     candidate.Year, now, configuration.Current.UnreleasedBufferDays))) continue;
@@ -179,8 +180,35 @@ public sealed class AddonSearchService(
             {
                 // A slow/unavailable installation must not discard completed sibling results.
             }
-            return output.SelectMany(items => items ?? []).DistinctBy(item => ContentIdentity.Key(item.Meta.Type, item.Meta.Id, item.Addon.Configuration.Id,
+            var discoveries = output.SelectMany(items => items ?? []).DistinctBy(item => ContentIdentity.Key(item.Meta.Type, item.Meta.Id, item.Addon.Configuration.Id,
                 ContentIdentity.ProviderIds(item.Meta.Id, item.Meta.ProviderIds))).Take(60).ToArray();
+            try
+            {
+                // Catalogs may omit artwork that exists in title metadata. Reuse the
+                // search deadline and admission slot, outside the publication gate.
+                // Converting with allowSeriesPreview never publishes these episodes.
+                await Parallel.ForEachAsync(Enumerable.Range(0, discoveries.Length), new ParallelOptions
+                {
+                    CancellationToken = ct,
+                    MaxDegreeOfParallelism = Math.Clamp(configuration.Current.MaxConcurrentRequests, 1, 8)
+                }, async (index, token) =>
+                {
+                    var discovery = discoveries[index];
+                    if (Uri.TryCreate(discovery.Meta.Poster, UriKind.Absolute, out var poster) && poster.Scheme is "http" or "https") return;
+                    try
+                    {
+                        var details = await sync.GetMetadataAsync(discovery.Meta, discovery.Addon, addons, [], false, token).ConfigureAwait(false);
+                        discoveries[index] = discovery with { Details = details };
+                    }
+                    catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+                    catch (Exception) { logger.LogDebug("Siphon search artwork unavailable for installation {InstallationId}", discovery.Addon.Configuration.Id); }
+                }).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // Optional artwork must not discard successful catalog discoveries.
+            }
+            return discoveries;
         }
         finally { _queries.Release(); }
     }
@@ -198,7 +226,7 @@ public sealed class AddonSearchService(
         if (!IsAccessible(id, user)) return;
         var native = library.GetItemById(id);
         var key = native?.GetProviderId("Siphon");
-        var initial = key is null ? null : state.FindByContentKey(key) ?? state.FindByKey(key);
+        var initial = key is null ? null : state.ReadByContentKey(key) ?? state.ReadByKey(key);
         if (initial is null) return; // Personal media is never adopted.
         var metadataAddonId = configuration.Current.MetadataAddonId;
         var needsMetadata = initial.Type == "series" && initial.Season is null
@@ -267,9 +295,42 @@ public sealed class AddonSearchService(
         finally { configuration.SynchronizationGate.Release(); }
     }
 
+    public async Task<SearchRemoval?> RemoveAsync(Guid id, User user, CancellationToken ct)
+    {
+        if (!IsAccessible(id, user)) return null;
+        if (!await configuration.SynchronizationGate.WaitAsync(0, ct).ConfigureAwait(false))
+            throw new SearchAdmissionException("Busy", "Siphon is synchronizing. Retry this title when synchronization completes.");
+        try
+        {
+            if (!IsAccessible(id, user)) return null;
+            var key = library.GetItemById(id)?.GetProviderId("Siphon");
+            var initial = key is null ? null : state.ReadByContentKey(key) ?? state.ReadByKey(key);
+            if (initial is null) return null;
+            var previous = state.GetItems();
+            if (!previous.Any(item => item.ContentKey == initial.ContentKey
+                && item.Owners.Any(owner => owner.StartsWith(CatalogLibraryService.ManualPrefix, StringComparison.Ordinal)))) return null;
+
+            var retained = new List<ManagedItem>(previous.Count);
+            foreach (var item in previous)
+            {
+                if (item.ContentKey != initial.ContentKey)
+                {
+                    retained.Add(item);
+                    continue;
+                }
+                var owners = item.Owners.Where(owner => !owner.StartsWith(CatalogLibraryService.ManualPrefix, StringComparison.Ordinal)).ToArray();
+                if (owners.Length > 0) retained.Add(item with { Owners = owners });
+            }
+            await PublishAsync(retained, new HashSet<string>(StringComparer.Ordinal) { initial.ContentKey }, ct, previous).ConfigureAwait(false);
+            var remaining = library.GetItemById(id);
+            return new(id, remaining is null ? null : ToResponse(remaining));
+        }
+        finally { configuration.SynchronizationGate.Release(); }
+    }
+
     public IReadOnlyList<SearchItem> GetAdded(User user)
     {
-        var keys = state.GetItems().Where(item => item.Owners.Any(owner => owner.StartsWith(CatalogLibraryService.ManualPrefix, StringComparison.Ordinal)))
+        var keys = state.GetReadSnapshot().Items.Where(item => item.Owners.Any(owner => owner.StartsWith(CatalogLibraryService.ManualPrefix, StringComparison.Ordinal)))
             .Select(item => item.ContentKey).Distinct(StringComparer.Ordinal).ToArray();
         if (keys.Length == 0) return [];
         var query = new InternalItemsQuery(user) { IncludeItemTypes = [BaseItemKind.Movie, BaseItemKind.Series], HasAnyProviderIds = new() { ["Siphon"] = keys }, Recursive = true };
@@ -319,20 +380,22 @@ public sealed class AddonSearchService(
     private SearchItem ToResponse(BaseItem item)
     {
         var key = item.GetProviderId("Siphon");
-        var managed = key is null ? null : state.FindByContentKey(key) ?? state.FindByKey(key);
+        var managed = key is null ? null : state.ReadByContentKey(key) ?? state.ReadByKey(key);
         var added = managed?.Owners.Any(owner => owner.StartsWith(CatalogLibraryService.ManualPrefix, StringComparison.Ordinal)) == true;
         return new(item.Id, item.Name, item is Series ? "Series" : "Movie", item.ProductionYear, managed is not null && !added, added);
     }
     private static bool IsTemporary(ManagedItem item) => item.Owners.Length > 0 && item.Owners.All(owner => owner.StartsWith(CatalogLibraryService.PreviewPrefix, StringComparison.Ordinal));
+    private static bool IsTemporary(ManagedItemSnapshot item) => item.Owners.Count > 0 && item.Owners.All(owner => owner.StartsWith(CatalogLibraryService.PreviewPrefix, StringComparison.Ordinal));
 
-    private async Task PublishAsync(IReadOnlyList<ManagedItem> retained, IReadOnlySet<string>? scope, CancellationToken ct)
+    private async Task PublishAsync(IReadOnlyList<ManagedItem> retained, IReadOnlySet<string>? scope, CancellationToken ct,
+        IReadOnlyList<ManagedItem>? previousItems = null)
     {
         if (retained.Count > SiphonStateStore.MaximumItems)
             throw new SearchAdmissionException("LibraryLimit", "Siphon has reached its 100,000-item limit. Reduce catalog or episode limits before adding this title.");
         await configuration.MutationGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var previous = state.GetItems();
+            var previous = previousItems ?? state.GetItems();
             await state.SaveAsync(retained, ct).ConfigureAwait(false);
             await materializer.ApplyAsync(retained, ct, catalogNames: new Dictionary<string, string>(),
                 scope: scope is null ? null : new LibraryMaterializer.PublicationScope(scope, previous),
@@ -358,7 +421,7 @@ public sealed class AddonSearchService(
         await configuration.SynchronizationGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var current = state.GetItems();
+            var current = state.GetReadSnapshot().Items;
             var previews = current.Where(IsTemporary).ToArray();
             if (previews.Length == 0) return;
             var protectedKeys = new HashSet<string>(StringComparer.Ordinal);
@@ -378,13 +441,14 @@ public sealed class AddonSearchService(
             protectedContent.UnionWith(collections.GetProtectedContentKeys());
             protectedContent.IntersectWith(previews.Select(item => item.ContentKey));
             var now = DateTimeOffset.UtcNow;
+            if (protectedContent.Count == 0 && previews.All(item => item.PreviewExpiresUtc > now)) return;
             var retained = current.Where(item => !IsTemporary(item) || protectedContent.Contains(item.ContentKey) || item.PreviewExpiresUtc > now)
-                .Select(item => IsTemporary(item) && protectedContent.Contains(item.ContentKey) ? item with
+                .Select(item => IsTemporary(item) && protectedContent.Contains(item.ContentKey) ? item.ToMutable() with
                 {
                     Owners = [CatalogLibraryService.ManualPrefix + item.Type],
                     PreviewExpiresUtc = null,
                     IsSearchPreview = item.Type == "series" && item.Season is null
-                } : item).ToArray();
+                } : item.ToMutable()).ToArray();
             if (retained.Length != current.Count || protectedContent.Count > 0) await PublishAsync(retained, null, ct).ConfigureAwait(false);
         }
         finally { configuration.SynchronizationGate.Release(); }
@@ -393,6 +457,7 @@ public sealed class AddonSearchService(
 
 public sealed record SearchItem(Guid Id, string Name, string Type, int? Year, bool CanAdd, bool IsAdded);
 public sealed record SearchItems(IReadOnlyList<SearchItem> Items, int TotalRecordCount);
+public sealed record SearchRemoval(Guid Id, SearchItem? RemainingItem);
 
 internal sealed class SearchAdmissionException(string code, string message) : InvalidOperationException(message)
 {

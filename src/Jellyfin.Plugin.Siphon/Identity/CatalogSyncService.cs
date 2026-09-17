@@ -68,7 +68,7 @@ public sealed class CatalogSyncService(
                 ? allSubscriptions.Where(s => SyncTarget.CatalogIdentity(s.Addon.Id, s.Catalog.Key) == catalogKey).ToArray()
                 : allSubscriptions;
             diagnosticAddons = configuredSubscriptions.Select(subscription => subscription.Addon.Id).Distinct(StringComparer.Ordinal).ToArray();
-            if (configuredSubscriptions.Length == 0 && state.GetItems().Count == 0)
+            if (configuredSubscriptions.Length == 0 && previous.Count == 0)
             {
                 progress.Report(100);
                 diagnostics.SetSummary(0, 0, 0, 0, 0, 0);

@@ -24,13 +24,42 @@ namespace Jellyfin.Plugin.Siphon.Tests.Playback;
 public sealed class ProxyBehaviorTests : IDisposable
 {
     private readonly string _directory = Path.Combine(Path.GetTempPath(), "siphon-proxy-" + Guid.NewGuid().ToString("N"));
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InvalidCapabilityBurstsDoNotConsumeValidPlaybackOrArtworkAdmission(bool artwork)
+    {
+        var content = artwork ? new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 } : BinaryFixture();
+        using var fixture = CreateFixture(content, "https://upstream.example/opaque", artwork ? "image/png" : "video/mp4");
+        await fixture.Store.SaveAsync([Item() with { PosterUrl = "https://upstream.example/poster.png" }], CancellationToken.None);
+        var imageToken = new CapabilityTokenService(new SiphonSecretStore(Paths())).SignItem(Item().Key);
+        for (var attempt = 0; attempt < 192; attempt++)
+        {
+            var invalid = NewContext("GET", "");
+            invalid.Connection.RemoteIpAddress = IPAddress.Parse("192.0.2.100");
+            fixture.Controller.ControllerContext = new ControllerContext { HttpContext = invalid };
+            if (artwork) await fixture.Controller.Image("invalid-reference");
+            else await fixture.Controller.Media("invalid-reference");
+            Assert.Contains(invalid.Response.StatusCode, new[] { 404, 429 });
+            Assert.Empty(((MemoryStream)invalid.Response.Body).ToArray());
+        }
+
+        var valid = NewContext("GET", "");
+        valid.Connection.RemoteIpAddress = IPAddress.Parse("192.0.2.100");
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = valid };
+        if (artwork) await fixture.Controller.Image(imageToken);
+        else await fixture.Controller.Media(fixture.Session.Token);
+        Assert.Equal(200, valid.Response.StatusCode);
+        Assert.Equal(content, ((MemoryStream)valid.Response.Body).ToArray());
+    }
     [Theory]
     [InlineData("Disabled")]
     [InlineData("PlaybackDisabled")]
     [InlineData("ScheduleClosed")]
     public async Task AnonymousCapabilityStopsWhenItsOwnersNativePolicyIsRevoked(string policy)
     {
-        using var fixture = CreateFixture(new byte[1024], "https://upstream.example/movie.mp4");
+        using var fixture = CreateFixture(BinaryFixture(), "https://upstream.example/movie.mp4");
         var allowed = NewContext("GET", "bytes=0-9");
         fixture.Controller.ControllerContext = new ControllerContext { HttpContext = allowed };
         await fixture.Controller.Media(fixture.Session.Token);
@@ -49,7 +78,7 @@ public sealed class ProxyBehaviorTests : IDisposable
     [Fact]
     public async Task ProgressiveRangeAndHeadPreserveRepresentation()
     {
-        var content = Enumerable.Range(0, 1024).Select(n => (byte)n).ToArray();
+        var content = BinaryFixture();
         using var fixture = CreateFixture(content, "https://upstream.example/private.mp4?secret=token");
         var context = NewContext("GET", "bytes=100-199");
         fixture.Controller.ControllerContext = new ControllerContext { HttpContext = context };
@@ -85,7 +114,7 @@ public sealed class ProxyBehaviorTests : IDisposable
     [Fact]
     public async Task UnrecognizedMediaTypePreservesBytesWithoutDocumentRenderingAuthority()
     {
-        var content = Enumerable.Range(0, 1024).Select(n => (byte)n).ToArray();
+        var content = BinaryFixture();
         using var fixture = CreateFixture(content, "https://upstream.example/opaque", "application/x-provider-media");
         var context = NewContext("GET", "bytes=100-199");
         fixture.Controller.ControllerContext = new ControllerContext { HttpContext = context };
@@ -219,6 +248,48 @@ public sealed class ProxyBehaviorTests : IDisposable
     }
 
     [Theory]
+    [InlineData(true, true, false)]
+    [InlineData(false, true, false)]
+    [InlineData(false, false, true)]
+    [InlineData(false, false, false)]
+    public async Task PrimaryArtworkUsesTheCapabilityIdentityRatherThanTheSeriesStorageRow(
+        bool shell, bool parentCapability, bool episodeThumbnail)
+    {
+        var bytes = new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 };
+        using var fixture = CreateFixture(bytes, "https://upstream.example/artwork.png", "image/png");
+        var item = Item() with
+        {
+            Key = shell ? "series:tt1234567" : "series:tt1234567:1:2",
+            ContentKey = "series:tt1234567",
+            Type = "series",
+            Season = shell ? null : 1,
+            Episode = shell ? null : 2,
+            IsSearchPreview = shell,
+            PosterUrl = episodeThumbnail ? null : "https://upstream.example/poster.png",
+            ThumbnailUrl = episodeThumbnail ? "https://upstream.example/episode.png" : null
+        };
+        await fixture.Store.SaveAsync([item], CancellationToken.None);
+        var token = new CapabilityTokenService(new SiphonSecretStore(Paths())).SignItem(
+            parentCapability ? item.ContentKey : item.Key);
+        var context = NewContext("GET", "");
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = context };
+
+        await fixture.Controller.Image(token, "primary");
+
+        if (parentCapability || episodeThumbnail)
+        {
+            Assert.Equal(200, context.Response.StatusCode);
+            Assert.Equal(bytes, ((MemoryStream)context.Response.Body).ToArray());
+        }
+        else
+        {
+            // An episode without a still must not inherit its parent's poster.
+            Assert.Equal(404, context.Response.StatusCode);
+            Assert.Empty(((MemoryStream)context.Response.Body).ToArray());
+        }
+    }
+
+    [Theory]
     [InlineData("video/mp4", 0)]
     [InlineData("video/mp4", 512)]
     [InlineData("application/vnd.apple.mpegurl", 512)]
@@ -252,7 +323,83 @@ public sealed class ProxyBehaviorTests : IDisposable
         Assert.Empty(((MemoryStream)context.Response.Body).ToArray());
     }
 
-    private Fixture CreateFixture(byte[] content, string url, string type = "video/mp4", Stream? body = null, int timeoutSeconds = 30, HttpStatusCode? classificationStatus = null)
+    [Theory]
+    [InlineData("GET", "", "<?xml version=\"1.0\"?><MPD><BaseURL>https://owned.example/child</BaseURL></MPD>")]
+    [InlineData("GET", "bytes=20-60", "<MPD><BaseURL>https://owned.example/child</BaseURL></MPD>")]
+    [InlineData("HEAD", "bytes=0-1", "<MPD><BaseURL>https://owned.example/child</BaseURL></MPD>")]
+    [InlineData("GET", "", "ffconcat version 1.0\nfile 'https://owned.example/child'\n")]
+    [InlineData("GET", "", "<smil><body><video src=\"https://owned.example/child\"/></body></smil>")]
+    public async Task UnsupportedRootManifestsNeverReachNativeReadersDespiteMediaLabels(string method, string range, string document)
+    {
+        using var fixture = CreateFixture(Encoding.UTF8.GetBytes(document), "https://upstream.example/misleading.mp4", "application/octet-stream");
+        var context = NewContext(method, range);
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = context };
+        await fixture.Controller.Media(fixture.Session.Token);
+        Assert.Equal(502, context.Response.StatusCode);
+        Assert.Empty(((MemoryStream)context.Response.Body).ToArray());
+    }
+
+    [Fact]
+    public async Task ShortRootRangeUsesByteZeroClassificationWithoutChangingRequestedBytes()
+    {
+        var content = BinaryFixture();
+        using var fixture = CreateFixture(content, "https://upstream.example/opaque");
+        var context = NewContext("GET", "bytes=0-1");
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = context };
+        await fixture.Controller.Media(fixture.Session.Token);
+        Assert.Equal(206, context.Response.StatusCode);
+        Assert.Equal(content[..2], ((MemoryStream)context.Response.Body).ToArray());
+        Assert.Equal("bytes 0-1/1024", context.Response.Headers.ContentRange);
+    }
+
+    [Fact]
+    public async Task HlsChildKeysAndEncryptedBytesRemainOpaque()
+    {
+        var content = new byte[16];
+        using var fixture = CreateFixture(content, "https://upstream.example/key", "application/octet-stream", child: true);
+        var context = NewContext("GET", "");
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = context };
+        await fixture.Controller.Media(fixture.Session.Token);
+        Assert.Equal(200, context.Response.StatusCode);
+        Assert.Equal(content, ((MemoryStream)context.Response.Body).ToArray());
+    }
+
+    [Theory]
+    [MemberData(nameof(SupportedContainerPrefixes))]
+    public async Task SupportedBinaryRootsDoNotDependOnDeclaredMime(byte[] content)
+    {
+        using var fixture = CreateFixture(content, "https://upstream.example/opaque", "application/octet-stream");
+        var context = NewContext("GET", "");
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = context };
+        await fixture.Controller.Media(fixture.Session.Token);
+        Assert.Equal(200, context.Response.StatusCode);
+        Assert.Equal(content, ((MemoryStream)context.Response.Body).ToArray());
+    }
+
+    public static IEnumerable<object[]> SupportedContainerPrefixes()
+    {
+        yield return [BinaryFixture()];
+        yield return [new byte[] { 0x1a, 0x45, 0xdf, 0xa3, 0x80 }];
+        var transport = new byte[512];
+        transport[0] = transport[188] = transport[376] = 0x47;
+        yield return [transport];
+        var ogg = new byte[27];
+        "OggS"u8.CopyTo(ogg);
+        yield return [ogg];
+        yield return ["fLaC"u8.ToArray()];
+        yield return [new byte[] { 0xff, 0xfb, 0x90, 0 }];
+        yield return [new byte[] { 0xff, 0xf1, 0x50, 0x80, 0, 0, 0 }];
+        yield return ["RIFF0000WAVE"u8.ToArray()];
+    }
+
+    private static byte[] BinaryFixture()
+    {
+        var content = Enumerable.Range(0, 1024).Select(n => (byte)n).ToArray();
+        new byte[] { 0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d }.CopyTo(content, 0);
+        return content;
+    }
+
+    private Fixture CreateFixture(byte[] content, string url, string type = "video/mp4", Stream? body = null, int timeoutSeconds = 30, HttpStatusCode? classificationStatus = null, bool child = false)
     {
         var config = new ConfigurationAccessor(() => new PluginConfiguration { PublicBaseUrl = "https://jellyfin.example", AddonTimeoutSeconds = timeoutSeconds });
         var tokens = new CapabilityTokenService(new SiphonSecretStore(Paths()));
@@ -267,6 +414,7 @@ public sealed class ProxyBehaviorTests : IDisposable
         user.SetPermission(PermissionKind.EnableMediaPlayback, true);
         var source = new ResolvedStream(new string('A', 64), "Film", new Uri(url), new Dictionary<string, string>(), null, null) { UserId = user.Id };
         var session = sessions.Create(Item(), source);
+        if (child) session = sessions.CreateChild(session, new Uri("https://upstream.example/child"));
         var video = new Movie { Id = Guid.NewGuid() };
         video.SetProviderId("Siphon", Item().Key);
         video.SetProviderId(NativeVersionService.SourceProvider, source.Id);

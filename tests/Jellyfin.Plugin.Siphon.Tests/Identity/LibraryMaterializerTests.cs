@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
+using Jellyfin.Database.Implementations;
 using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Plugin.Siphon.Collections;
 using Jellyfin.Plugin.Siphon.Configuration;
@@ -20,6 +21,8 @@ using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
 using MediaBrowser.Model.Serialization;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -31,6 +34,70 @@ public sealed class NativePublicationCollection { }
 [Collection("Native publication")]
 public sealed class LibraryMaterializerTests
 {
+    [Fact]
+    public async Task StartupDoesNotWaitForPublicationGate()
+    {
+        using var fixture = new NativeLibrary("movie");
+        using var cancellation = new CancellationTokenSource();
+        await fixture.PublicationGate.WaitAsync();
+        var startup = fixture.Hosted.StartAsync(cancellation.Token);
+        try
+        {
+            await startup.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            cancellation.Cancel();
+            try { await startup; }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+            await fixture.Hosted.StopAsync(CancellationToken.None);
+            fixture.PublicationGate.Release();
+        }
+    }
+
+    [Fact]
+    public async Task ShutdownCancelsPublicationAndReleasesSynchronization()
+    {
+        using var fixture = new NativeLibrary("movie") { UseNativeDatabase = false };
+        fixture.ApplicationStarted.Cancel();
+        await fixture.Hosted.StartAsync(CancellationToken.None);
+        try
+        {
+            await fixture.DatabaseRequested.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            await fixture.Hosted.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2));
+        }
+
+        Assert.Equal("Cancelled", fixture.RunStatus.LastRun?.State);
+        Assert.Null(fixture.RunStatus.CurrentRun);
+        Assert.True(await fixture.PublicationGate.WaitAsync(0));
+        fixture.PublicationGate.Release();
+    }
+
+    [Fact]
+    public async Task StartupPublicationFailureRemainsVisibleWithoutFaultingTheHost()
+    {
+        using var fixture = new NativeLibrary("movie") { UseNativeDatabase = false };
+        fixture.DatabaseResult.SetException(new IOException("Native database unavailable"));
+        fixture.ApplicationStarted.Cancel();
+        await fixture.Hosted.StartAsync(CancellationToken.None);
+        try
+        {
+            await fixture.Hosted.ExecuteTask!.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            await fixture.Hosted.StopAsync(CancellationToken.None);
+        }
+
+        Assert.Equal("Startup", fixture.RunStatus.LastRun?.Kind);
+        Assert.Equal("Failed", fixture.RunStatus.LastRun?.State);
+        Assert.True(await fixture.PublicationGate.WaitAsync(0));
+        fixture.PublicationGate.Release();
+    }
+
     [Fact]
     public async Task ScopedMovieRemovalRetiresVersionsAndUnlinksFinalMembershipWithoutRemovingPersonalMedia()
     {
@@ -147,6 +214,28 @@ public sealed class LibraryMaterializerTests
         Assert.Contains(shell.ParentId, fixture.View("installation:selected").PhysicalFolderIds);
     }
 
+    [Fact]
+    public async Task ScopedPublicationLoadsOnlyTheSelectedSeriesAndItsRetiredEpisodes()
+    {
+        using var fixture = new NativeLibrary("series") { UseNativeDatabase = true };
+        var selected = FollowedSeriesSelectorTests.Episode("selected") with { Owners = ["installation:selected"] };
+        var retired = selected with { Key = selected.ContentKey + ":1:2", VideoId = "second", Episode = 2 };
+        var unrelated = FollowedSeriesSelectorTests.Episode("unrelated") with { Owners = ["installation:other"] };
+        ManagedItem[] previous = [selected, retired, unrelated];
+        await fixture.PublishAsync(previous);
+        var retiredId = fixture.Media(retired.Key).Id;
+        var unrelatedIds = fixture.Items.Values.Where(item => item.GetProviderId("Siphon")?.StartsWith(unrelated.ContentKey, StringComparison.Ordinal) == true)
+            .Select(item => item.Id).ToHashSet();
+        await fixture.SeedNativeDatabaseAsync();
+
+        await fixture.ApplyAsync([selected, unrelated], new(new HashSet<string> { selected.ContentKey }, previous));
+
+        Assert.Contains(retiredId, fixture.HydratedIds);
+        Assert.DoesNotContain(retiredId, fixture.Items.Keys);
+        Assert.Empty(unrelatedIds.Intersect(fixture.HydratedIds));
+        Assert.All(unrelatedIds, id => Assert.Contains(id, fixture.Items.Keys));
+    }
+
     private static ManagedItem MovieItem(string id, string owner) => new()
     {
         Key = "movie:" + id,
@@ -190,6 +279,14 @@ public sealed class LibraryMaterializerTests
         private readonly List<CollectionFolder> _views = [];
         public Dictionary<Guid, BaseItem> Items { get; } = [];
         public List<(BaseItem Item, DeleteOptions Options)> Deletions { get; } = [];
+        public BackgroundService Hosted => _materializer;
+        public SemaphoreSlim PublicationGate { get; }
+        public CancellationTokenSource ApplicationStarted { get; } = new();
+        public TaskCompletionSource DatabaseRequested { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<JellyfinDbContext> DatabaseResult { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public SyncRunStatus RunStatus => _diagnostics.GetRunStatus();
+        public bool UseNativeDatabase { get; init; } = true;
+        public HashSet<Guid> HydratedIds { get; } = [];
 
         public NativeLibrary(string type)
         {
@@ -204,6 +301,7 @@ public sealed class LibraryMaterializerTests
                 }]
             };
             var configuration = new ConfigurationAccessor(() => config);
+            PublicationGate = configuration.SynchronizationGate;
             var paths = new SiphonPaths(Proxy<IApplicationPaths>((method, _) => method.Name == "get_DataPath"
                 ? _directory : throw new NotSupportedException(method.Name)));
             var library = Proxy<ILibraryManager>(InvokeLibrary);
@@ -242,14 +340,38 @@ public sealed class LibraryMaterializerTests
             var metadata = new ItemMetadataMapper(configuration, tokens, library, null!, persistence);
             var catalogs = new CatalogLibraryService(configuration, paths, null!, library, persistence,
                 Proxy<IUserManager>((method, _) => method.Name == "GetUsers" ? Array.Empty<User>() : throw new NotSupportedException(method.Name)), fileSystem);
-            _materializer = new LibraryMaterializer(configuration, tokens, null!, library, persistence, null!, metadata, catalogs, null!,
+            var startupDatabase = Proxy<IDbContextFactory<JellyfinDbContext>>((method, args) =>
+            {
+                if (method.Name != "CreateDbContextAsync") throw new NotSupportedException(method.Name);
+                DatabaseRequested.TrySetResult();
+                return UseNativeDatabase ? Task.FromResult(_database.CreateDbContext())
+                    : DatabaseResult.Task.WaitAsync((CancellationToken)args![0]!);
+            });
+            _materializer = new LibraryMaterializer(configuration, tokens, null!, library, persistence, startupDatabase, metadata, catalogs, null!,
                 NullLogger<LibraryMaterializer>.Instance, paths, _diagnostics,
-                new CatalogCollectionService(configuration, paths, library, null!, persistence), new RecoveryLedger(paths, _database));
+                new CatalogCollectionService(configuration, paths, library, null!, persistence), new RecoveryLedger(paths, _database),
+                Proxy<IHostApplicationLifetime>((method, _) => method.Name == "get_ApplicationStarted"
+                    ? ApplicationStarted.Token : throw new NotSupportedException(method.Name)));
         }
 
         public BaseItem Media(string key) => Items.Values.Single(item => item.GetProviderId("Siphon") == key);
         public CollectionFolder View(string owner) => _views.Single(view => view.GetProviderId(CatalogLibraryService.CatalogProvider) == owner);
         public string[] Locations(CollectionFolder view) => view.GetLibraryOptions().PathInfos.Select(info => info.Path).Order(StringComparer.Ordinal).ToArray();
+
+        public Task ApplyAsync(IReadOnlyList<ManagedItem> retained, LibraryMaterializer.PublicationScope scope)
+            => _materializer.ApplyAsync(retained, CancellationToken.None, new Dictionary<string, string>(), scope: scope);
+
+        public async Task SeedNativeDatabaseAsync()
+        {
+            await using var context = _database.CreateDbContext();
+            foreach (var native in Items.Values.Where(item => item.GetProviderId("Siphon") is not null))
+            {
+                var entity = new BaseItemEntity { Id = native.Id, Name = native.Name, Type = native.GetType().FullName!, TopParentId = TopParent(native) };
+                entity.Provider = [new BaseItemProvider { Item = entity, ItemId = entity.Id, ProviderId = "Siphon", ProviderValue = native.GetProviderId("Siphon")! }];
+                context.BaseItems.Add(entity);
+            }
+            await context.SaveChangesAsync();
+        }
 
         public Task PublishAsync(IReadOnlyList<ManagedItem> retained, LibraryMaterializer.PublicationScope? scope = null)
         {
@@ -318,7 +440,9 @@ public sealed class LibraryMaterializerTests
                     return null;
                 case "GetItemList":
                     var query = (InternalItemsQuery)args![0]!;
+                    HydratedIds.UnionWith(query.ItemIds);
                     return Items.Values.Where(item => (query.ParentId == Guid.Empty || item.ParentId == query.ParentId)
+                        && (query.ItemIds.Length == 0 || query.ItemIds.Contains(item.Id))
                         && (query.IncludeItemTypes.Length == 0 || query.IncludeItemTypes.Any(kind => kind.ToString() == item.GetType().Name))
                         && (query.HasAnyProviderId is not { Count: > 0 } providers || providers.Any(pair => item.GetProviderId(pair.Key) == pair.Value)))
                         .Skip(query.StartIndex ?? 0).Take(query.Limit ?? int.MaxValue).ToArray();
@@ -346,6 +470,8 @@ public sealed class LibraryMaterializerTests
 
         public void Dispose()
         {
+            _materializer.Dispose();
+            ApplicationStarted.Dispose();
             _diagnostics.Dispose();
             _database.Dispose();
             BaseItem.LibraryManager = _originalLibrary;

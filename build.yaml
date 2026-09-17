@@ -1,31 +1,30 @@
-name: "Siphon"
-guid: "b2df1c14-4b7e-4e7b-9a95-8f9ad8d2b0c1"
-imageUrl: "https://raw.githubusercontent.com/moodiness/jellyfin-plugin-siphon/main/assets/siphon.png"
-version: "1.6.0.0"
-targetAbi: "12.1.0.0"
-framework: "net10.0"
-owner: "moodiness"
-overview: "Stremio addons in Jellyfin"
-description: "Bring Stremio addon catalogs, metadata, subtitles and playback to a native Jellyfin media library."
-category: "General"
-artifacts:
-  - "Jellyfin.Plugin.Siphon.dll"
-  - "siphon.png"
-  - "Mono.Nat.dll"
-  - "MonoTorrent.BEncoding.dll"
-  - "MonoTorrent.Client.dll"
-  - "MonoTorrent.Connections.dll"
-  - "MonoTorrent.Dht.dll"
-  - "MonoTorrent.dll"
-  - "MonoTorrent.Factories.dll"
-  - "MonoTorrent.Messages.dll"
-  - "MonoTorrent.PiecePicking.dll"
-  - "MonoTorrent.PieceWriter.dll"
-  - "MonoTorrent.PortForwarding.dll"
-  - "MonoTorrent.Trackers.dll"
-  - "ReusableTasks.dll"
-changelog: |-
-  - Prepare Siphon 1.6.0.0 with private persistent server downloads and opt-in signed notification webhooks.
-  - Resume the selected HTTP/P2P file safely after restart; bound concurrency, storage and retention, with live access and profile revocation.
-  - Export finite HLS to an offline Matroska file through bounded local staging and Jellyfin FFmpeg. Live streams and unsupported DRM are rejected.
-  - Package with scripts/package.py for the complete runtime dependency closure, required licenses and unchanged supplied icon.
+{
+  "name": "Siphon",
+  "guid": "b2df1c14-4b7e-4e7b-9a95-8f9ad8d2b0c1",
+  "imageUrl": "https://raw.githubusercontent.com/moodiness/jellyfin-plugin-siphon/main/assets/siphon-jellyfin.png",
+  "version": "1.6.0.0",
+  "targetAbi": "12.1.0.0",
+  "framework": "net10.0",
+  "owner": "moodiness",
+  "overview": "Stremio addons in Jellyfin",
+  "description": "Bring Stremio addon catalogs, metadata, subtitles and playback to a native Jellyfin media library.",
+  "category": "General",
+  "artifacts": [
+    "Jellyfin.Plugin.Siphon.dll",
+    "siphon-jellyfin.png",
+    "Mono.Nat.dll",
+    "MonoTorrent.BEncoding.dll",
+    "MonoTorrent.Client.dll",
+    "MonoTorrent.Connections.dll",
+    "MonoTorrent.Dht.dll",
+    "MonoTorrent.dll",
+    "MonoTorrent.Factories.dll",
+    "MonoTorrent.Messages.dll",
+    "MonoTorrent.PiecePicking.dll",
+    "MonoTorrent.PieceWriter.dll",
+    "MonoTorrent.PortForwarding.dll",
+    "MonoTorrent.Trackers.dll",
+    "ReusableTasks.dll"
+  ],
+  "changelog": "Persistent private downloads with pause, priority, per-user quotas, UTC scheduling, batch preparation and explicit track selection; bounded playback admission and read snapshots; opt-in notification adapters and digests; translated administration and personal controls, aggregate local health, offline backup and restore, and verified assets-first publication. Saved-library restoration no longer blocks host startup. Search additions/removals publish only affected titles, recover missing preview artwork, preserve retained history and expose confirmed removal controls. A padded catalog image preserves the original logo. Finite HLS exports support validated video formats; audio-only/live HLS and unsupported DRM are rejected, and resumed HLS jobs restage rather than append."
+}

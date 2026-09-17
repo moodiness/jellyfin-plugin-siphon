@@ -21,7 +21,7 @@ public sealed class CollectionRetentionService(
     {
         var item = library.GetItemById(id);
         if (item is not Movie and not Episode || item.GetProviderId("Siphon") is not { Length: > 0 } key
-            || state.FindByKey(key) is null) return item;
+            || state.ReadByKey(key) is null) return item;
         var video = (Video)item;
         var primaryId = Guid.TryParse(item.GetProviderId(NativeVersionService.VersionProvider), out var marked)
             ? marked : video.PrimaryVersionId;
@@ -44,15 +44,15 @@ public sealed class CollectionRetentionService(
     public string? ContentKey(BaseItem? item)
     {
         if (item?.GetProviderId("Siphon") is not { Length: > 0 } key) return null;
-        var managed = state.FindByKey(key) ?? state.FindByContentKey(key);
+        var managed = state.ReadByKey(key) ?? state.ReadByContentKey(key);
         if (managed is not null) return managed.ContentKey;
         if (item is Season season)
         {
             var series = library.GetItemById(season.SeriesId);
             if (series?.GetProviderId("Siphon") is { Length: > 0 } seriesKey)
-                return state.FindByContentKey(seriesKey)?.ContentKey;
+                return state.ReadByContentKey(seriesKey)?.ContentKey;
             var separator = key.LastIndexOf(":season:", StringComparison.Ordinal);
-            if (separator > 0) return state.FindByContentKey(key[..separator])?.ContentKey;
+            if (separator > 0) return state.ReadByContentKey(key[..separator])?.ContentKey;
         }
         return null;
     }

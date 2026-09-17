@@ -88,6 +88,11 @@ internal static class ConfigurationValidator
             || config.DownloadMaxFileMiB is < 16 or > 1048576 || config.DownloadMaxFileMiB > config.DownloadMaxStorageMiB
             || config.DownloadMaxJobsPerUser is < 1 or > 100 || config.DownloadRetentionDays is < 1 or > 365)
             throw new ArgumentException("Downloads require concurrency 1-8, storage 128-1048576 MiB, a file budget of 16 MiB up to the storage limit, 1-100 jobs per user, and retention of 1-365 days.");
+        if (config.DownloadMaxStoragePerUserMiB is < 16 or > 1048576)
+            throw new ArgumentException("The per-user download budget must be between 16 and 1048576 MiB; the global budget remains the upper limit.");
+        if (config.DownloadWindowStartUtcHour is < 0 or > 23 || config.DownloadWindowEndUtcHour is < 0 or > 23
+            || (config.DownloadWindowEnabled && config.DownloadWindowStartUtcHour == config.DownloadWindowEndUtcHour))
+            throw new ArgumentException("Choose distinct download window start and end hours in UTC (0-23), or disable the window for unrestricted hours.");
         if (config.UserProfiles is null || config.UserProfiles.Length > 256)
             throw new ArgumentException("At most 256 user playback profiles are supported.");
         var profileUsers = new HashSet<Guid>();

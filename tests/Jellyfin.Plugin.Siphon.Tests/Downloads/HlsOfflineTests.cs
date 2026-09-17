@@ -52,7 +52,7 @@ public sealed class HlsOfflineTests
             throw new IOException("Stop before remuxing.");
         });
         var service = new DownloadTransferService(http, null!, Encoder());
-        await Assert.ThrowsAsync<IOException>(() => service.TransferAsync(source, directory.Path, 16384, _ => Task.CompletedTask, default));
+        await Assert.ThrowsAsync<IOException>(() => service.TransferAsync(source, directory.Path, 16384, new DownloadTransferOptions(), _ => Task.CompletedTask, default));
         Assert.Equal(2, calls);
     }
 
@@ -68,8 +68,7 @@ public sealed class HlsOfflineTests
             return DownloadTransferTests.Response(new MemoryStream(bytes), bytes.Length, null);
         });
         var service = new DownloadTransferService(http, null!, Encoder());
-        await Assert.ThrowsAsync<InvalidDataException>(() => service.TransferAsync(DownloadTransferTests.Source("https://source.example/video.m3u8"),
-            directory.Path, 16384, _ => Task.CompletedTask, default));
+        await Assert.ThrowsAsync<InvalidDataException>(() => service.TransferAsync(DownloadTransferTests.Source("https://source.example/video.m3u8"), directory.Path, 16384, new DownloadTransferOptions(), _ => Task.CompletedTask, default));
         Assert.False(File.Exists(Path.Combine(directory.Path, "media.mkv")));
     }
 
@@ -84,8 +83,7 @@ public sealed class HlsOfflineTests
             return DownloadTransferTests.Response(new MemoryStream(bytes), bytes.Length, null);
         });
         var service = new DownloadTransferService(http, null!, Encoder());
-        await Assert.ThrowsAsync<IOException>(() => service.TransferAsync(DownloadTransferTests.Source("https://source.example/video.m3u8"),
-            directory.Path, 1024, _ => Task.CompletedTask, default));
+        await Assert.ThrowsAsync<IOException>(() => service.TransferAsync(DownloadTransferTests.Source("https://source.example/video.m3u8"), directory.Path, 1024, new DownloadTransferOptions(), _ => Task.CompletedTask, default));
         Assert.True(Directory.EnumerateFiles(directory.Path).Sum(path => new FileInfo(path).Length) <= 1024);
     }
 
@@ -118,7 +116,7 @@ public sealed class HlsOfflineTests
         var workspace = new DownloadTransferWorkspace(Path.Combine(directory.Path, "job"), 1024, _ => Task.CompletedTask);
         await workspace.WriteAsync("h00001.m3u8", "#EXTM3U\n"u8.ToArray(), default);
         using var cancellation = new CancellationTokenSource();
-        var task = new HlsRemuxer(encoder).RemuxAsync(workspace, "h00001.m3u8", [], [], 0, cancellation.Token);
+        var task = new HlsRemuxer(encoder).RemuxAsync(workspace, "h00001.m3u8", [], [], 0, true, cancellation.Token);
         for (var attempt = 0; attempt < 100 && !File.Exists(pidFile); attempt++) await Task.Delay(25);
         Assert.True(File.Exists(pidFile));
         if (exhaustBudget) await Assert.ThrowsAsync<IOException>(() => task);
@@ -130,6 +128,39 @@ public sealed class HlsOfflineTests
         var pid = int.Parse(await File.ReadAllTextAsync(pidFile), System.Globalization.CultureInfo.InvariantCulture);
         Assert.Throws<ArgumentException>(() => Process.GetProcessById(pid));
         Assert.True(Directory.EnumerateFiles(workspace.DirectoryPath).Sum(path => new FileInfo(path).Length) <= 1024);
+    }
+
+    [Fact]
+    public async Task AudioOnlyHlsIsRefusedRatherThanProducingAnIncompleteVideoExport()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        using var directory = new TransferDirectory();
+        Directory.CreateDirectory(directory.Path);
+        var probe = Path.Combine(directory.Path, "probe");
+        await File.WriteAllTextAsync(probe, "#!/bin/sh\nprintf '%s' '{\"streams\":[{\"index\":0,\"codec_type\":\"audio\",\"codec_name\":\"aac\",\"extradata_size\":2}]}'\n");
+        File.SetUnixFileMode(probe, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        var workspace = new DownloadTransferWorkspace(Path.Combine(directory.Path, "job"), 4096, _ => Task.CompletedTask);
+        await workspace.WriteAsync("h00001.m3u8", "#EXTM3U\n"u8.ToArray(), default);
+        await Assert.ThrowsAsync<DownloadSelectionException>(() => new HlsRemuxer(probe)
+            .PrepareAudioAsync(workspace, "h00001.m3u8", probe, 0, null, default));
+        Assert.False(File.Exists(workspace.PathFor("remux.part")));
+    }
+
+    [Fact]
+    public async Task StagedAudioMustIdentifyEveryRequestedLanguageOrFailExplicitly()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        using var directory = new TransferDirectory();
+        Directory.CreateDirectory(directory.Path);
+        var probe = Path.Combine(directory.Path, "probe");
+        await File.WriteAllTextAsync(probe, "#!/bin/sh\nprintf '%s' '{\"streams\":[{\"index\":0,\"codec_type\":\"video\"},{\"index\":1,\"codec_type\":\"audio\",\"codec_name\":\"aac\",\"extradata_size\":2,\"tags\":{\"language\":\"fr\"}}]}'\n");
+        File.SetUnixFileMode(probe, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        var workspace = new DownloadTransferWorkspace(Path.Combine(directory.Path, "job"), 4096, _ => Task.CompletedTask);
+        await workspace.WriteAsync("h00001.m3u8", "#EXTM3U\n"u8.ToArray(), default);
+        var remuxer = new HlsRemuxer(probe);
+        await Assert.ThrowsAsync<DownloadSelectionException>(() => remuxer.PrepareAudioAsync(workspace, "h00001.m3u8", probe, 0, ["en"], default));
+        Assert.Empty(await remuxer.PrepareAudioAsync(workspace, "h00001.m3u8", probe, 0, [], default));
+        Assert.Equal(1, Assert.Single(await remuxer.PrepareAudioAsync(workspace, "h00001.m3u8", probe, 0, ["fr"], default)).SourceIndex);
     }
 
     private static IMediaEncoder Encoder() => DispatchProxy.Create<IMediaEncoder, EncoderPathProxy>();

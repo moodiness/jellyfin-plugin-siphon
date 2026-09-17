@@ -33,7 +33,7 @@ public sealed class CatalogCleanupService(
     internal async Task<IReadOnlyList<ManagedItem>> RetainAsync(IReadOnlyList<ManagedItem> items, CancellationToken ct)
     {
         if (!configuration.Current.RemoveMissingItems) return items;
-        var assessment = await AssessAsync(items, _clock.GetUtcNow(), ct).ConfigureAwait(false);
+        var assessment = await AssessAsync(items.Select(CleanupCandidate.From), _clock.GetUtcNow(), ct).ConfigureAwait(false);
         var remove = assessment.Where(item => item.Reason == "Eligible").Select(item => item.Key).ToHashSet(StringComparer.Ordinal);
         return items.Where(item => !remove.Contains(item.Key)).ToArray();
     }
@@ -44,8 +44,8 @@ public sealed class CatalogCleanupService(
         try
         {
             var generated = _clock.GetUtcNow();
-            var items = state.GetItems();
-            var assessment = await AssessAsync(items, generated, ct).ConfigureAwait(false);
+            var items = state.GetReadSnapshot().Items;
+            var assessment = await AssessAsync(items.Select(CleanupCandidate.From), generated, ct).ConfigureAwait(false);
             if (_uncertainSynchronization)
                 assessment = assessment.Select(item => item with { Reason = "SynchronizationUnconfirmed" }).ToArray();
             var snapshotFingerprint = Fingerprint(items);
@@ -87,20 +87,21 @@ public sealed class CatalogCleanupService(
             if (grant is null || grant.ExpiresAtUtc <= now || _uncertainSynchronization
                 || !string.Equals(grant.Token, previewToken, StringComparison.Ordinal))
                 throw new InvalidOperationException("The cleanup preview expired or changed. Preview again before confirming.");
-            var items = state.GetItems();
+            var items = state.GetReadSnapshot().Items;
             if (Fingerprint(items) != grant.SnapshotFingerprint)
                 throw new InvalidOperationException("The saved settings or library snapshot changed. Preview again before confirming.");
-            var assessment = await AssessAsync(items, now, ct).ConfigureAwait(false);
+            var assessment = await AssessAsync(items.Select(CleanupCandidate.From), now, ct).ConfigureAwait(false);
             if (AssessmentFingerprint(assessment) != grant.AssessmentFingerprint)
                 throw new InvalidOperationException("Cleanup eligibility or user protection changed. Preview again before confirming.");
             var remove = assessment.Where(item => item.Reason == "Eligible").Select(item => item.Key).ToHashSet(StringComparer.Ordinal);
             if (remove.Count == 0) return new CleanupExecution(0);
-            var retained = items.Where(item => !remove.Contains(item.Key)).ToArray();
+            var previous = items.Select(item => item.ToMutable()).ToArray();
+            var retained = previous.Where(item => !remove.Contains(item.Key)).ToArray();
             await configuration.MutationGate.WaitAsync(ct).ConfigureAwait(false);
             try
             {
                 await state.SaveAsync(retained, ct).ConfigureAwait(false);
-                await materializer.ApplyAsync(retained, ct, previousItems: items).ConfigureAwait(false);
+                await materializer.ApplyAsync(retained, ct, previousItems: previous).ConfigureAwait(false);
             }
             finally
             {
@@ -114,7 +115,7 @@ public sealed class CatalogCleanupService(
         }
     }
 
-    private async Task<IReadOnlyList<CleanupItem>> AssessAsync(IReadOnlyList<ManagedItem> items, DateTimeOffset now, CancellationToken ct)
+    private async Task<IReadOnlyList<CleanupItem>> AssessAsync(IEnumerable<CleanupCandidate> items, DateTimeOffset now, CancellationToken ct)
     {
         var config = configuration.Current;
         var missing = items.Where(item => item.MissingSinceUtc.HasValue).OrderBy(item => item.Key, StringComparer.Ordinal).ToArray();
@@ -127,16 +128,20 @@ public sealed class CatalogCleanupService(
 
     internal static CleanupItem Evaluate(ManagedItem item, PluginConfiguration config, IReadOnlySet<string> activeOwners,
         DateTimeOffset now, string? protection)
+        => Evaluate(CleanupCandidate.From(item), config, activeOwners, now, protection);
+
+    private static CleanupItem Evaluate(CleanupCandidate item, PluginConfiguration config, IReadOnlySet<string> activeOwners,
+        DateTimeOffset now, string? protection)
     {
         var eligibleAfter = item.MissingSinceUtc?.AddDays(Math.Clamp(config.MissingItemRetentionDays, 0, 365));
-        var reason = !item.MissingSinceUtc.HasValue || item.Owners.Length == 0
+        var reason = !item.MissingSinceUtc.HasValue || item.Owners.Count == 0
             || item.Owners.Any(owner => !activeOwners.Contains(owner) || !item.MissingOwners.Contains(owner, StringComparer.Ordinal))
             ? "OwnershipUnconfirmed"
             : protection ?? (eligibleAfter > now ? "GracePeriod" : "Eligible");
         return new CleanupItem(item.Key, item.Name, item.Type, item.MissingSinceUtc, eligibleAfter, reason);
     }
 
-    private async Task<Dictionary<string, string>> GetProtectionsAsync(ManagedItem[] missing, PluginConfiguration config, CancellationToken ct)
+    private async Task<Dictionary<string, string>> GetProtectionsAsync(CleanupCandidate[] missing, PluginConfiguration config, CancellationToken ct)
     {
         var result = new Dictionary<string, string>(StringComparer.Ordinal);
         if (missing.Length == 0) return result;
@@ -187,6 +192,10 @@ public sealed class CatalogCleanupService(
 
     internal static string? ProtectionReason(ManagedItem item, PluginConfiguration config,
         IReadOnlySet<string> favorites, IReadOnlySet<string> resume)
+        => ProtectionReason(CleanupCandidate.From(item), config, favorites, resume);
+
+    private static string? ProtectionReason(CleanupCandidate item, PluginConfiguration config,
+        IReadOnlySet<string> favorites, IReadOnlySet<string> resume)
     {
         if (config.ProtectFavorites && (favorites.Contains(item.Key)
             || (item.Type == "series" && (favorites.Contains(item.ContentKey) || favorites.Contains(SeasonKey(item))))))
@@ -194,10 +203,10 @@ public sealed class CatalogCleanupService(
         return config.ProtectResumePositions && resume.Contains(item.Key) ? "ResumePosition" : null;
     }
 
-    private static string SeasonKey(ManagedItem item) => item.ContentKey + ":season:" + (item.Season ?? 0).ToString(CultureInfo.InvariantCulture);
+    private static string SeasonKey(CleanupCandidate item) => item.ContentKey + ":season:" + (item.Season ?? 0).ToString(CultureInfo.InvariantCulture);
     private static bool IsProtectionReason(string reason) => reason is "Favorite" or "ResumePosition" or "CollectionOrPlaylist" or "ProtectionUnavailable" or "SynchronizationUnconfirmed";
 
-    private string Fingerprint(IReadOnlyList<ManagedItem> items)
+    private string Fingerprint(IReadOnlyList<ManagedItemSnapshot> items)
     {
         using var hash = SHA256.Create();
         using var stream = new CryptoStream(Stream.Null, hash, CryptoStreamMode.Write);
@@ -214,6 +223,16 @@ public sealed class CatalogCleanupService(
         JsonSerializer.Serialize(stream, items);
         stream.FlushFinalBlock();
         return Convert.ToHexString(hash.Hash!);
+    }
+
+    // Only policy inputs are projected; mutable synchronization copies never become shared snapshots.
+    private readonly record struct CleanupCandidate(string Key, string ContentKey, string Name, string Type,
+        int? Season, DateTimeOffset? MissingSinceUtc, IReadOnlyList<string> Owners, IReadOnlyList<string> MissingOwners)
+    {
+        public static CleanupCandidate From(ManagedItem item)
+            => new(item.Key, item.ContentKey, item.Name, item.Type, item.Season, item.MissingSinceUtc, item.Owners, item.MissingOwners);
+        public static CleanupCandidate From(ManagedItemSnapshot item)
+            => new(item.Key, item.ContentKey, item.Name, item.Type, item.Season, item.MissingSinceUtc, item.Owners, item.MissingOwners);
     }
 
     private sealed record PreviewGrant(string Token, DateTimeOffset GeneratedAtUtc, DateTimeOffset ExpiresAtUtc,

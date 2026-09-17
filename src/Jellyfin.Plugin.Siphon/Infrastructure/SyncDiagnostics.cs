@@ -16,7 +16,7 @@ public sealed partial class SyncDiagnostics : IDisposable
         "ManifestUnavailable", "CatalogUnavailable", "InvalidCatalog", "IncompleteCatalog", "MetadataUnavailable", "RequestFailed", "SyncFailed", "Cancelled"
     };
     private static readonly HashSet<string> ManifestCodes = new(StringComparer.Ordinal) { "Ok", "ManifestUnavailable", "Timeout", "Cancelled" };
-    private static readonly HashSet<string> RunKinds = new(StringComparer.Ordinal) { "Catalogs", "FullRefresh", "FollowedSeries", "Targeted" };
+    private static readonly HashSet<string> RunKinds = new(StringComparer.Ordinal) { "Catalogs", "FullRefresh", "FollowedSeries", "Targeted", "Startup" };
     private static readonly HashSet<string> RunStages = new(StringComparer.Ordinal) { "Preparing", "Catalogs", "Metadata", "Saving", "Publishing", "Credits", "Finalizing" };
     private static readonly HashSet<string> RunUnits = new(StringComparer.Ordinal) { "Catalogs", "Titles", "Series", "Items", "Percent" };
     private static readonly HashSet<string> Providers = new(StringComparer.Ordinal) { "Tmdb", "Tvdb", "Fanart", "MdbList" };
