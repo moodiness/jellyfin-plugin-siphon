@@ -20,7 +20,7 @@ def package(output, release_url, timestamp):
         raise FileNotFoundError("Build the Release plugin before packaging")
     output.mkdir(parents=True, exist_ok=True)
     archive = output / f"siphon-{version}.zip"
-    description = "Bring Stremio addon catalogs, metadata, subtitles and playback to a native Jellyfin media library."
+    description = "Bring Stremio catalogs, metadata, subtitles and stream versions to native Jellyfin libraries."
     metadata = {
         "guid": "b2df1c14-4b7e-4e7b-9a95-8f9ad8d2b0c1", "name": "Siphon",
         "description": description, "overview": "Stremio addons in Jellyfin", "owner": "moodiness",
@@ -39,7 +39,7 @@ def package(output, release_url, timestamp):
         "sourceUrl": release_url.rstrip("/") + "/" + archive.name,
         "checksum": hashlib.md5(content).hexdigest(),
         "timestamp": timestamp,
-        "changelog": "Register a real Siphon media library in Dashboard Libraries and My Media; migrate v1.3 catalog roots, deduplicate media, and preserve native browsing across scans and restarts without manual paths."
+        "changelog": "Add per-catalog native libraries, cached metadata enrichment, incremental and followed-series synchronization, protected cleanup, stable native stream versions, accurate audio and subtitle handling, tabbed administration, diagnostics, and HTTP/proxy security fixes."
     }
     manifest = [{k: v for k, v in metadata.items() if k not in ("version", "targetAbi", "timestamp")} | {"versions": [release]}]
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
@@ -51,7 +51,7 @@ def package(output, release_url, timestamp):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("artifacts"))
-    parser.add_argument("--release-url", default="https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.3.1")
-    parser.add_argument("--timestamp", default="2026-09-16T00:00:00Z")
+    parser.add_argument("--release-url", default="https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.4.0")
+    parser.add_argument("--timestamp", default="2026-09-17T00:00:00Z")
     args = parser.parse_args()
     package(args.output, args.release_url, args.timestamp)

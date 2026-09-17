@@ -4,7 +4,7 @@ Siphon brings **Stremio addons into Jellyfin**: catalogs, metadata, subtitles, a
 
 Siphon targets **Jellyfin 12.1** and .NET 10. It does not include a torrent engine, debrid client, or external-player integration.
 
-The per-catalog libraries, incremental metadata, followed-series refresh, native stream versions, redesigned settings, and audit fixes described below are **unreleased source changes**. They are not included in the published v1.3.1 archive.
+The per-catalog libraries, incremental metadata, followed-series refresh, native stream versions, redesigned settings, and audit fixes described below target **1.4.0.0 (unreleased)**. They are not included in the published v1.3.1 archive.
 
 ## Features
 
@@ -174,7 +174,7 @@ dotnet test Jellyfin.Plugin.Siphon.sln -c Release
 python3 scripts/package.py
 ```
 
-The build targets `net10.0` and Jellyfin ABI `12.1.0.0`. Release packaging produces the plugin archive, repository manifest, and SHA-256 checksum file in `artifacts/`.
+The build targets `net10.0` and Jellyfin ABI `12.1.0.0`. Release packaging produces `artifacts/siphon-1.4.0.0.zip`, a repository manifest, and `SHA256SUMS`. The matching release tag is `v1.4.0`; generating these files does not create a tag or publish a release. The root `manifest.json` continues to advertise the latest published release until the release workflow updates it.
 
 ## License
 
