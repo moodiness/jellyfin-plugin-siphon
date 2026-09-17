@@ -68,6 +68,12 @@ internal static class ConfigurationValidator
             throw new ArgumentException("Item limits must be 1-10000, timeout 1-120 seconds, and concurrency 1-16.");
         }
 
+        if (config.P2pMaxConcurrentStreams is < 1 or > 16 || config.P2pMaxCacheMiB is < 128 or > 1048576
+            || config.P2pDownloadLimitKiB is < 1 or > 1048576 || config.P2pUploadLimitKiB is < 1 or > 262144
+            || config.P2pIdleMinutes is < 1 or > 120 || config.P2pMetadataTimeoutSeconds is < 10 or > 600
+            || (config.P2pListenPort != 0 && (config.P2pListenPort < 1024 || config.P2pListenPort > 65535 - config.P2pMaxConcurrentStreams + 1)))
+            throw new ArgumentException("P2P requires bounded concurrency (1-16), cache (128-1048576 MiB), positive rate limits, idle cleanup (1-120 minutes), metadata timeout (10-600 seconds), and an available listen-port range.");
+
         if (config.Addons is null || config.Addons.Length > 64 || config.AllowedPrivateHosts is null || config.AllowedPrivateHosts.Count > 64)
         {
             throw new ArgumentException("At most 64 addons and 64 private host exceptions are supported.");
