@@ -9,12 +9,12 @@
     "imageUrl": "https://raw.githubusercontent.com/moodiness/jellyfin-plugin-siphon/main/assets/siphon.png",
     "versions": [
       {
-        "version": "1.4.1.0",
+        "version": "1.5.0.0",
         "targetAbi": "12.1.0.0",
-        "sourceUrl": "https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.4.1/siphon-1.4.1.0.zip",
-        "checksum": "e101f313b6be10534423544a13d25ac2",
+        "sourceUrl": "https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.5.0/siphon-1.5.0.0.zip",
+        "checksum": "adb498ddfe2b7119f3272b073527a397",
         "timestamp": "2026-09-17T00:00:00Z",
-        "changelog": "Fix media-detail loading during catalog and metadata synchronization by separating synchronization from native library writes. Clarify addon-defined catalog filters without changing their parameter names or values."
+        "changelog": "Siphon 1.5.0.0: private user addon profiles, native collections and saved additions, selected-version HTTP/P2P downloads, source and metadata diagnostics, selective history recovery, followed-series calendar and opt-in notifications, targeted synchronization, provider quotas and shared caching, IntroDB timings, and bounded opt-in P2P playback. Includes media-response validation and the unchanged supplied icon. Persistent offline queues, offline HLS exports and external webhooks remain unreleased 1.6 features."
       }
     ]
   }
