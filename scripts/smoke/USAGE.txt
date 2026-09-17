@@ -38,8 +38,9 @@ Each command creates a fresh runtime. Without --package it first builds Release
 and runs the repository's real packaging script into its owned temp directory.
 To reuse a previously verified package:
   python3 scripts/smoke/run.py full --package artifacts/siphon-1.6.0.0.zip
-Use --image to supply another image tag or immutable digest. The actual server
-must report 12.1.x; an incompatible server is not silently accepted.
+The default image is jellyfin/jellyfin:12.1. Use --image for another tag or
+immutable digest. The actual server must report 12.1.x; an incompatible server
+is not silently accepted.
 
 Scenario contracts
 Every scenario installs the actual ZIP into a stopped, private /config/plugins

@@ -832,7 +832,7 @@ def main():
     parser.add_argument("scenario", choices=SCENARIOS)
     parser.add_argument("--package", type=Path, help="Current package ZIP; omitted builds Release and packages in an owned temporary directory")
     parser.add_argument("--previous-package", type=Path, help="Real 1.4.1.0 package for upgrade; otherwise fetch the published v1.4.1 ZIP")
-    parser.add_argument("--image", default="jellyfin/jellyfin:12.1.0", help="Jellyfin 12.1 image/tag or digest; actual server version is checked")
+    parser.add_argument("--image", default="jellyfin/jellyfin:12.1", help="Jellyfin 12.1 image/tag or digest; actual server version is checked")
     parser.add_argument("--evidence", type=Path, help="Credential-free JSON output (default artifacts/smoke-<unique>.json)")
     parser.add_argument("--screenshots", type=Path, help="Retain credential-free successful admin/personal screenshots at two viewport widths")
     parser.add_argument("--chromium-executable", type=Path, help="Explicit Chromium/Chrome binary for ui/full; default is pinned Playwright Chromium. Uses a fresh isolated browser profile.")
