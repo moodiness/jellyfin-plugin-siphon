@@ -208,8 +208,16 @@ public sealed class SecurityStateTests : IDisposable
         var locator = new SiphonItemLocator(state, tokens);
         var url = "https://jellyfin.example/base/Siphon/s/" + tokens.SignItem(item.Key);
 
-        Assert.Equal(item.Key, locator.Find(url)?.Key);
-        Assert.Null(locator.Find(url + "invalid"));
+        Assert.Equal(item.Key, locator.Find(url, out var sourceId)?.Key);
+        Assert.Null(sourceId);
+        Assert.Null(locator.Find(url + "invalid", out _));
+
+        var selectedId = new string('a', 64);
+        var versionUrl = "https://jellyfin.example/base/Siphon/source/" + tokens.SignSource(item.Key, selectedId);
+        Assert.Equal(item.Key, locator.Find(versionUrl, out sourceId)?.Key);
+        Assert.Equal(selectedId, sourceId);
+        Assert.Null(locator.Find(versionUrl + "invalid", out sourceId));
+        Assert.Null(sourceId);
     }
 
     private SiphonPaths Paths()

@@ -19,8 +19,9 @@ public sealed class SiphonItemLocator
         _state = state;
     }
 
-    public ManagedItem? Find(string? path)
+    public ManagedItem? Find(string? path, out string? sourceId)
     {
+        sourceId = null;
         if (string.IsNullOrWhiteSpace(path)) return null;
         if (!Uri.TryCreate(path, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
         {
@@ -29,9 +30,19 @@ public sealed class SiphonItemLocator
         if (_tokens is null) return null;
 
         var segments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
-        var tokenIndex = Array.FindIndex(segments, segment => segment.Equals("siphon", StringComparison.OrdinalIgnoreCase));
-        if (tokenIndex < 0 || tokenIndex + 2 >= segments.Length || !segments[tokenIndex + 1].Equals("s", StringComparison.OrdinalIgnoreCase)) return null;
-
-        return _tokens.TryReadItem(segments[tokenIndex + 2], out var key) ? _state.FindByKey(key) : null;
+        // Match the endpoint suffix: a reverse-proxy base path may itself contain
+        // a "Siphon" segment and must not shadow the actual native playback route.
+        var tokenIndex = segments.Length - 3;
+        if (tokenIndex < 0 || !segments[tokenIndex].Equals("siphon", StringComparison.OrdinalIgnoreCase)) return null;
+        var resource = segments[tokenIndex + 1];
+        var token = segments[tokenIndex + 2];
+        if (resource.Equals("s", StringComparison.OrdinalIgnoreCase) && _tokens.TryReadItem(token, out var key))
+            return _state.FindByKey(key);
+        if (resource.Equals("source", StringComparison.OrdinalIgnoreCase) && _tokens.TryReadSource(token, out key, out var selected))
+        {
+            sourceId = selected;
+            return _state.FindByKey(key);
+        }
+        return null;
     }
 }

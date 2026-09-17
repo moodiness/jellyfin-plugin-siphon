@@ -5,6 +5,7 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.Dto;
+using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.MediaInfo;
 
 namespace Jellyfin.Plugin.Siphon.Playback;
@@ -12,7 +13,7 @@ namespace Jellyfin.Plugin.Siphon.Playback;
 /// <summary>Exposes opaque proxy sources for native Siphon library items.</summary>
 public sealed class SiphonMediaSourceProvider(
     ISiphonStateStore state,
-    SiphonItemLocator locator,
+    NativeVersionService versions,
     StreamResolver resolver,
     ProxySessionStore sessions,
     CapabilityTokenService tokens,
@@ -21,33 +22,41 @@ public sealed class SiphonMediaSourceProvider(
 {
     public async Task<IEnumerable<MediaSourceInfo>> GetMediaSources(BaseItem item, CancellationToken cancellationToken)
     {
-        if (item is not Video || string.IsNullOrEmpty(item.Path) || locator.Find(item.Path) is not { } managed)
+        if (item is not Video video || !NativeVersionService.IsManaged(video)
+            || video.GetProviderId("Siphon") is not { } itemKey || state.FindByKey(itemKey) is not { } managed)
         {
             return [];
         }
 
-        var streams = await resolver.GetSourcesAsync(managed, cancellationToken).ConfigureAwait(false);
-        return streams.Select(stream =>
+        var available = await versions.GetVersionsAsync(video, cancellationToken).ConfigureAwait(false);
+        if (available.Count == 0) return [];
+        // Remuxing resolves this provider again without opening another live stream. Preserve
+        // the selected version's probed tracks so Jellyfin can map its actual audio/subtitle indices.
+        var nativeSources = available[0].Item.GetMediaSources(false)
+            .ToDictionary(source => source.Id, StringComparer.OrdinalIgnoreCase);
+        var selectedVersions = string.IsNullOrEmpty(video.GetProviderId(NativeVersionService.VersionProvider))
+            ? available
+            : available.Where(version => version.Item.Id == video.Id);
+        return selectedVersions.Select(version =>
         {
+            var stream = version.Stream;
             var token = tokens.SignSource(managed.Key, stream.Id);
-            return new MediaSourceInfo
-            {
-                Id = stream.Id,
-                Name = stream.Name,
-                Path = configuration.Current.PublicBaseUrl.TrimEnd('/') + "/Siphon/source/" + token,
-                Protocol = MediaProtocol.Http,
-                IsRemote = true,
-                Size = stream.Size,
-                Type = MediaSourceType.Default,
-                VideoType = MediaBrowser.Model.Entities.VideoType.VideoFile,
-                RequiresOpening = true,
-                OpenToken = token,
-                RequiresClosing = true,
-                SupportsProbing = true,
-                SupportsDirectPlay = false,
-                SupportsDirectStream = false,
-                SupportsTranscoding = true
-            };
+            var source = nativeSources[version.Item.Id.ToString("N", CultureInfo.InvariantCulture)];
+            source.Name = stream.Name;
+            source.Path = configuration.Current.PublicBaseUrl.TrimEnd('/') + "/Siphon/source/" + token;
+            source.Protocol = MediaProtocol.Http;
+            source.IsRemote = true;
+            source.Size ??= stream.Size;
+            source.Type = MediaSourceType.Default;
+            source.VideoType = VideoType.VideoFile;
+            source.RequiresOpening = true;
+            source.OpenToken = token;
+            source.RequiresClosing = true;
+            source.SupportsProbing = true;
+            source.SupportsDirectPlay = false;
+            source.SupportsDirectStream = false;
+            source.SupportsTranscoding = true;
+            return source;
         }).ToArray();
     }
 
@@ -61,11 +70,13 @@ public sealed class SiphonMediaSourceProvider(
         var streams = await resolver.GetSourcesAsync(item, cancellationToken).ConfigureAwait(false);
         var selected = streams.FirstOrDefault(stream => stream.Id == sourceId)
             ?? throw new InvalidOperationException("The selected source is no longer available. Reload the item.");
+        var versionId = versions.FindVersionId(item, sourceId);
+        if (versionId == Guid.Empty) throw new InvalidOperationException("The selected version is no longer available. Reload the item.");
         var session = sessions.Create(item, selected);
 
         var source = new MediaSourceInfo
         {
-            Id = session.Source.Id,
+            Id = versionId.ToString("N", CultureInfo.InvariantCulture),
             Name = session.Source.Name,
             Path = sessions.GetUrl(session),
             Protocol = MediaProtocol.Http,
@@ -97,6 +108,7 @@ public sealed class SiphonMediaSourceProvider(
         source.MediaStreams = info.MediaStreams;
         source.MediaAttachments = info.MediaAttachments;
         source.SupportsProbing = false;
+        await versions.SaveMediaInfoAsync(versionId, source, cancellationToken).ConfigureAwait(false);
         return new ProxyLiveStream(source);
     }
 

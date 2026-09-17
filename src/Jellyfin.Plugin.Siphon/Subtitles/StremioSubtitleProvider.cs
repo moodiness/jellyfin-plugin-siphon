@@ -85,7 +85,7 @@ public sealed class StremioSubtitleProvider : ISubtitleProvider, IDisposable
         if (request.IsAutomated || request.IsPerfectMatch)
             return [];
 
-        var item = _locator.Find(request.MediaPath);
+        var item = _locator.Find(request.MediaPath, out var sourceId);
         if (item is null || item.Type is not ("movie" or "series"))
             return [];
 
@@ -112,7 +112,7 @@ public sealed class StremioSubtitleProvider : ISubtitleProvider, IDisposable
         if (requests.Length == 0)
             return [];
 
-        var extras = await ResolveExtrasAsync(item, cancellationToken).ConfigureAwait(false);
+        var extras = await ResolveExtrasAsync(item, sourceId, cancellationToken).ConfigureAwait(false);
         var output = new List<RemoteSubtitleInfo>[requests.Length];
         await Parallel.ForEachAsync(
             Enumerable.Range(0, requests.Length),
@@ -191,13 +191,13 @@ public sealed class StremioSubtitleProvider : ISubtitleProvider, IDisposable
         {
             var format = SubtitleFormat(candidate.Url, content.MediaType);
             if (format is null) throw new InvalidDataException();
-            SubtitleText.Validate(content.Bytes, format, content.Charset);
+            var bytes = SubtitleText.Normalize(content.Bytes, format, content.Charset);
             if (_tickets.Get(id) is null || !IsCandidateCurrent(candidate)) throw new InvalidDataException();
             return new SubtitleResponse
             {
                 Language = candidate.Language,
                 Format = format,
-                Stream = new MemoryStream(content.Bytes, writable: false)
+                Stream = new MemoryStream(bytes, writable: false)
             };
         }
         catch (Exception)
@@ -206,12 +206,14 @@ public sealed class StremioSubtitleProvider : ISubtitleProvider, IDisposable
         }
     }
 
-    private async Task<IReadOnlyDictionary<string, string>?> ResolveExtrasAsync(ManagedItem item, CancellationToken cancellationToken)
+    private async Task<IReadOnlyDictionary<string, string>?> ResolveExtrasAsync(ManagedItem item, string? sourceId, CancellationToken cancellationToken)
     {
         try
         {
             var streams = await _resolver.GetSourcesAsync(item, cancellationToken).ConfigureAwait(false);
-            var source = streams.FirstOrDefault(stream => stream.FileName is not null || stream.Size is not null);
+            var source = sourceId is null
+                ? streams.FirstOrDefault()
+                : streams.FirstOrDefault(stream => stream.Id == sourceId);
             if (source is null)
                 return null;
 
@@ -303,7 +305,7 @@ public sealed class StremioSubtitleProvider : ISubtitleProvider, IDisposable
         if (!IsInstallationCurrent(candidate.InstallationId, candidate.ManifestDigest))
             return false;
 
-        var item = _locator.Find(candidate.ItemPath);
+        var item = _locator.Find(candidate.ItemPath, out _);
         return item is not null && string.Equals(item.Key, candidate.ItemKey, StringComparison.Ordinal);
     }
 

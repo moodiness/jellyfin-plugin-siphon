@@ -140,6 +140,20 @@ public sealed class StremioSubtitleProviderTests
         Assert.DoesNotContain(fixture.Http.Requests, uri => uri.Host == "video.example");
     }
 
+    [Fact]
+    public async Task MissingDefaultSourceMetadataNeverBorrowsAnotherVersionsSubtitleMatch()
+    {
+        using var fixture = new Fixture();
+        fixture.Http.Manifest = """{"id":"captions","resources":["subtitles","stream"],"types":["movie"]}""";
+        fixture.Http.Streams = """{"streams":[{"url":"https://video.example/theatrical.mkv"},{"url":"https://video.example/extended.mkv","behaviorHints":{"filename":"Extended cut.mkv","videoSize":987654321}}]}""";
+
+        Assert.Single(await fixture.Search());
+
+        var request = Assert.Single(fixture.Http.Requests, uri => uri.AbsolutePath.Contains("/subtitles/", StringComparison.Ordinal));
+        Assert.EndsWith("/subtitles/movie/tt1234567.json", request.OriginalString);
+        Assert.DoesNotContain(fixture.Http.Requests, uri => uri.Host == "video.example");
+    }
+
     [Theory]
     [InlineData("not json")]
     [InlineData("{\"subtitles\":{\"url\":\"https://captions.example/file.srt\"}}")]
@@ -223,6 +237,21 @@ public sealed class StremioSubtitleProviderTests
         var response = await fixture.Provider.GetSubtitles(result.Id, CancellationToken.None);
         Assert.Equal(format, response.Format);
         using var reader = new StreamReader(response.Stream);
+        Assert.Equal(text, await reader.ReadToEndAsync());
+    }
+
+    [Fact]
+    public async Task DownloadNormalizesHttpCharsetBeforeReturningSubtitleBytes()
+    {
+        using var fixture = new Fixture();
+        var text = Srt.Replace("A caption", "Un été à côté", StringComparison.Ordinal);
+        fixture.Http.Download = Encoding.Latin1.GetBytes(text);
+        fixture.Http.DownloadCharset = "iso-8859-1";
+        var result = Assert.Single(await fixture.Search());
+
+        var response = await fixture.Provider.GetSubtitles(result.Id, CancellationToken.None);
+
+        using var reader = new StreamReader(response.Stream, new UTF8Encoding(false, true));
         Assert.Equal(text, await reader.ReadToEndAsync());
     }
 
