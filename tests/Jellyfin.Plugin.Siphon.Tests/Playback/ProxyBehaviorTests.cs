@@ -106,6 +106,23 @@ public sealed class ProxyBehaviorTests : IDisposable
         Assert.False(capabilities.TryReadSource(source[..^4] + "abcd", out _, out _));
     }
 
+    [Theory]
+    [InlineData("s")]
+    [InlineData("source")]
+    public void SignedPlaybackIdentityResolvesWhenBasePathContainsThePluginName(string resource)
+    {
+        using var fixture = CreateFixture([], "https://upstream.example/film.mp4");
+        var tokens = new CapabilityTokenService(new SiphonSecretStore(Paths()));
+        var selected = new string('A', 64);
+        var token = resource == "s" ? tokens.SignItem(Item().Key) : tokens.SignSource(Item().Key, selected);
+        var locator = new SiphonItemLocator(fixture.Store, tokens);
+        var url = "https://jellyfin.example/Siphon/proxy/Siphon/" + resource + "/" + token;
+
+        Assert.Equal(Item().Key, locator.Find(url, out var sourceId)?.Key);
+        Assert.Equal(resource == "s" ? null : selected, sourceId);
+        Assert.Null(locator.Find(url + "/unrouted-suffix", out _));
+    }
+
     [Fact]
     public async Task StalledImageBodyTimesOutWithoutWaitingForTheClientToDisconnect()
     {

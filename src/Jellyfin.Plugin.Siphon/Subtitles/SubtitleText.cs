@@ -5,7 +5,7 @@ namespace Jellyfin.Plugin.Siphon.Subtitles;
 
 internal static partial class SubtitleText
 {
-    internal static void Validate(byte[] bytes, string format, string? charset)
+    internal static byte[] Normalize(byte[] bytes, string format, string? charset)
     {
         if (bytes.Length == 0) throw new InvalidDataException("Subtitle is empty.");
         try
@@ -29,6 +29,9 @@ internal static partial class SubtitleText
                 _ => false
             };
             if (!valid) throw new InvalidDataException("Subtitle format is invalid.");
+            // SubtitleResponse carries no charset; Jellyfin must receive self-describing
+            // bytes rather than losing an upstream HTTP encoding declaration.
+            return reader.CurrentEncoding.CodePage == Encoding.UTF8.CodePage ? bytes : Encoding.UTF8.GetBytes(text);
         }
         catch (ArgumentException)
         {

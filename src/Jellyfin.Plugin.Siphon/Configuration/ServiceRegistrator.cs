@@ -1,3 +1,5 @@
+using MediaBrowser.Controller.Library;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Jellyfin.Plugin.Siphon.Configuration;
@@ -53,6 +55,8 @@ public sealed class ServiceRegistrator : MediaBrowser.Controller.Plugins.IPlugin
         serviceCollection.AddSingleton<Playback.SourceBindingStore>();
         serviceCollection.AddSingleton<Playback.ProxySessionStore>();
         serviceCollection.AddSingleton<Playback.NativeVersionService>();
+        serviceCollection.AddScoped<Playback.NativeVersionResultFilter>();
+        serviceCollection.Configure<MvcOptions>(options => options.Filters.AddService<Playback.NativeVersionResultFilter>());
         serviceCollection.AddSingleton<Playback.SiphonMediaSourceProvider>();
         serviceCollection.AddSingleton<MediaBrowser.Controller.Library.IMediaSourceProvider>(services => services.GetRequiredService<Playback.SiphonMediaSourceProvider>());
         serviceCollection.AddSingleton<Tasks.CatalogSyncTask>();
@@ -65,5 +69,31 @@ public sealed class ServiceRegistrator : MediaBrowser.Controller.Plugins.IPlugin
         serviceCollection.AddSingleton<Subtitles.ManagedSubtitleStore>();
         serviceCollection.AddSingleton<MediaBrowser.Controller.Subtitles.ISubtitleProvider>(services => services.GetRequiredService<Subtitles.StremioSubtitleProvider>());
         serviceCollection.AddSingleton<Identity.CatalogSyncService>();
+
+        // Keep Jellyfin's source manager (and its lifetime/disposal) behind the Siphon-specific adapter.
+        const string nativeManagerKey = "Siphon.OriginalMediaSourceManager";
+        var nativeManager = serviceCollection.Last(service => !service.IsKeyedService && service.ServiceType == typeof(IMediaSourceManager));
+        serviceCollection.Remove(nativeManager);
+        serviceCollection.Add(ServiceDescriptor.DescribeKeyed(typeof(IMediaSourceManager), nativeManagerKey, (services, _) =>
+            nativeManager.ImplementationInstance
+            ?? nativeManager.ImplementationFactory?.Invoke(services)
+            ?? ActivatorUtilities.CreateInstance(services, nativeManager.ImplementationType!), nativeManager.Lifetime));
+        serviceCollection.Add(ServiceDescriptor.Describe(typeof(IMediaSourceManager), services =>
+            new Playback.NativeMediaSourceManager(
+                services.GetRequiredKeyedService<IMediaSourceManager>(nativeManagerKey),
+                services.GetRequiredService<ILibraryManager>()), nativeManager.Lifetime));
+
+        const string nativeSubtitleKey = "Siphon.OriginalSubtitleManager";
+        var subtitleType = typeof(MediaBrowser.Controller.Subtitles.ISubtitleManager);
+        var nativeSubtitles = serviceCollection.Last(service => !service.IsKeyedService && service.ServiceType == subtitleType);
+        serviceCollection.Remove(nativeSubtitles);
+        serviceCollection.Add(ServiceDescriptor.DescribeKeyed(subtitleType, nativeSubtitleKey, (services, _) =>
+            nativeSubtitles.ImplementationInstance
+            ?? nativeSubtitles.ImplementationFactory?.Invoke(services)
+            ?? ActivatorUtilities.CreateInstance(services, nativeSubtitles.ImplementationType!), nativeSubtitles.Lifetime));
+        serviceCollection.Add(ServiceDescriptor.Describe(subtitleType, services =>
+            new Subtitles.NativeSubtitleManager(
+                services.GetRequiredKeyedService<MediaBrowser.Controller.Subtitles.ISubtitleManager>(nativeSubtitleKey),
+                services.GetRequiredService<Subtitles.ManagedSubtitleStore>()), nativeSubtitles.Lifetime));
     }
 }
