@@ -405,7 +405,7 @@ public sealed class SiphonProxyController(
         }
 
         Response.StatusCode = (int)upstream.StatusCode;
-        Response.ContentType = mediaType;
+        Response.ContentType = GetMediaContentType(mediaType);
         Response.ContentLength = upstream.Content.Headers.ContentLength;
         ProtectBytes();
         if (upstream.Content.Headers.ContentRange is { } contentRange)
@@ -478,12 +478,31 @@ public sealed class SiphonProxyController(
         return length;
     }
 
+    private static string GetMediaContentType(string mediaType)
+    {
+        if (mediaType.Equals("text/html", StringComparison.OrdinalIgnoreCase)
+            || mediaType.Equals("text/xml", StringComparison.OrdinalIgnoreCase)
+            || mediaType.Equals("application/xml", StringComparison.OrdinalIgnoreCase)
+            || mediaType.EndsWith("+xml", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException("The source returned a document instead of a supported media response.");
+        }
+
+        return mediaType.StartsWith("video/", StringComparison.OrdinalIgnoreCase)
+            || mediaType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase)
+            || mediaType.Equals("application/mp4", StringComparison.OrdinalIgnoreCase)
+            || mediaType.Equals("application/ogg", StringComparison.OrdinalIgnoreCase)
+            || mediaType.Equals("text/vtt", StringComparison.OrdinalIgnoreCase)
+                ? mediaType : "application/octet-stream";
+    }
+
 
     private void ProtectBytes()
     {
         Response.Headers.ContentEncoding = "identity";
         Response.Headers.CacheControl = "private, no-store, no-transform";
         Response.Headers["X-Content-Type-Options"] = "nosniff";
+        Response.Headers.ContentSecurityPolicy = "sandbox; default-src 'none'; base-uri 'none'; frame-ancestors 'none'";
     }
 
     private void Reject()
