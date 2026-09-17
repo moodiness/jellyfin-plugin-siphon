@@ -5,6 +5,7 @@
 | Version | Supported |
 | --- | --- |
 | 1.0.x, 1.1.x, 1.2.x, 1.3.x and 1.4.x / Jellyfin 12.1.x | Yes |
+| 1.5.0.0 / Jellyfin 12.1.x | Prepared source; not yet published |
 | Other Jellyfin major versions | No |
 
 Siphon is a Jellyfin plugin and must be installed only on a compatible Jellyfin server. Upgrade to the latest Siphon release compatible with your Jellyfin version before reporting an issue.
@@ -25,11 +26,11 @@ If GitHub private reporting is unavailable, contact the repository owner through
 
 ## Security boundaries
 
-Siphon 1.4.0.0 implements the following boundaries:
+The current source, including unreleased changes described in the README, implements the following boundaries:
 
 - upstream media and subtitle requests are made by the server, not directly by clients;
 - clients receive opaque, expiring capability tokens rather than upstream URLs or addon headers;
-- HTTP(S) only; torrent engines, debrid services, and external-player handoffs are not implemented;
+- HTTP(S) media and HLS are supported; a separately opt-in, bounded MonoTorrent engine handles supported P2P sources. Debrid clients and external-player handoffs are not implemented;
 - DNS resolution and redirects are checked against SSRF policy, including HTTPS downgrade and cross-origin credential handling;
 - private destinations require exact hostname exceptions configured by an administrator; exception-approved connections are not pooled, so later requests cannot reuse them after an exception is removed;
 - catalog media are native Jellyfin items, while Siphon keeps catalog state and backing directories in its private plugin data directory; personal library paths are preserved;
@@ -37,11 +38,33 @@ Siphon 1.4.0.0 implements the following boundaries:
 - media ranges retain their original byte representation; unexpectedly encoded responses are rejected, and HLS resources remain capability-proxied even behind misleading filenames;
 - TMDB, TVDB, Fanart, and MDBList integrations are individually opt-in and use fixed HTTPS provider origins; storing a credential alone does not enable outbound enrichment, while testing saved credentials makes an explicit provider request;
 - provider authentication POST bodies are bounded, and redirects cannot replay their credentials; provider failures are exposed as safe status codes rather than raw upstream responses;
-- diagnostics and cleanup endpoints require administrator elevation; exported diagnostics omit credentials, private URLs, hosts, and headers;
+- administrative diagnostics, field provenance, recovery, cleanup, targeted synchronization, run history, and explicit search additions require administrator elevation; exported diagnostics omit credentials, private URLs, hosts, and headers;
+- native addon Search preserves Jellyfin library visibility; detail expansion checks the effective user's access and impersonation rules before addon I/O, and image/card requests never trigger full metadata expansion;
+- discoveries are bounded to 300 temporary titles with a 24-hour lifetime, and managed state is capped at 100,000 items before publication; explicit additions, deliberate collection/playlist membership and user-protected discoveries are retained, while unreadable protection data prevents preview removal;
+- the latest twenty synchronization runs and their bounded title/action/reason records are stored privately rather than retaining upstream request or response payloads;
+- selecting an authoritative metadata addon disables fallback to other addons; optional direct TMDB enrichment is then limited to missing numbered season posters, with native locks and existing images protected;
+- provider quota observations come only from usable response headers, remain isolated by credential fingerprints, and are not refreshed by status reads; forced refreshes and credential tests do not bypass durable quota pauses;
 - the self-connection diagnostic probes only the saved Jellyfin address, without credentials, cookies, redirects, or a proxy, and checks the returned server identity; its local-address access does not relax addon or media SSRF policy;
-- missing-item cleanup requires confirmed complete catalog absence, applies a configurable grace period, and protects favorites and resume positions across users and native versions by default; deletion rechecks state and protections and refuses stale previews or unavailable protection data;
-- optional provider credentials and potentially sensitive addon URLs are stored in Jellyfin's plugin configuration;
-- administrator settings mask credentials in the interface, but this is not encryption of the configuration or its backups.
+- missing-item cleanup requires confirmed complete catalog absence, applies a configurable grace period, and protects favorites and resume positions across users and native versions by default; deliberate collection/playlist membership remains protected. Deletion rechecks state and protections and refuses stale previews or unavailable protection data;
+- optional provider credentials and potentially sensitive shared/per-user addon URLs are stored in Jellyfin's plugin configuration;
+- administrator settings mask credentials in the interface, but this is not encryption of the configuration or its backups;
+- the unauthenticated icon endpoint serves only the fixed embedded PNG with cache validators and does not expose configuration or fetch an upstream image;
+- per-user overrides replace, rather than merge with, shared playback/subtitle addons; an empty override cannot fall back to global credentials. Catalogs and metadata remain shared, and the selected metadata addon stays authoritative;
+- source caches, native version identities, subtitle tickets and download/playback capabilities are user-scoped. Current account/access/playback/download permissions and applicable profile changes are checked before protected upstream requests; a user's targeted refresh does not invalidate another user's source cache;
+- download links are short-lived, purpose-scoped capabilities, not Jellyfin session tokens. Progressive and P2P downloads preserve byte ranges and validators; unsupported offline HLS downloads are rejected explicitly;
+- the personal portal exposes only authenticated personal preferences, permitted calendar/inbox entries and safe source diagnostics. Its token is kept in memory; manifest credentials and administrative settings are not returned;
+- recovery previews do not change native user history. Execution revalidates selected row fingerprints, ownership, configuration and live-history collisions; original orphans and unselected users remain untouched. An IMDb key alone is not proof that an old orphan belonged to Siphon;
+- metadata provenance reports recorded contributors and preservation decisions, not inferred provider success; unknown evidence and native/manual differences remain explicit;
+- IntroDB is an independent, optional timing source. Invalid or out-of-runtime timings are withheld, post-credit scenes are never marked skippable, and other providers' segments/native chapters remain intact;
+- calendar notifications require server enablement and individual opt-in. Durable, bounded observation/inbox state prevents restart backlogs; unavailable visibility data does not become an empty snapshot that would replay old events.
+
+### P2P-specific risks
+
+P2P is disabled by default. Enabling it makes the **Jellyfin server** a BitTorrent participant: peers and trackers can observe its IP and torrent participation, transfers may upload data, and BitTorrent wire encryption is not enabled. It is not a VPN or anonymity layer. Use only content you have the right to obtain and share.
+
+The engine bounds concurrent sessions, torrent metadata, reserved cache storage, transfer rates and waiting/idle lifetimes. It rejects unsafe filesystem paths and symlinks, unsupported or ambiguous file selections, and disallowed network destinations. Tracker/peer access is subject to destination checks; private-network allowlist entries deliberately widen that boundary. Explicit-tracker sources do not use DHT or peer exchange; trackerless public DHT is separately configurable.
+
+Torrent/private-tracker credentials, metadata and caches remain server-side and are isolated per user. Session cancellation, disablement and disposal release reservations and stop owned transfers; inactive-cache cleanup does not delete unrelated server files. Resource limits and endpoint validation reduce abuse, but do not make untrusted swarm data or private-network exceptions harmless.
 
 These controls do not make an untrusted Jellyfin administrator trustworthy. Limit administrator access, protect Jellyfin configuration backups, and review private-host exceptions.
 

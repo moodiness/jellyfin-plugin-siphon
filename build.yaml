@@ -1,7 +1,7 @@
 name: "Siphon"
 guid: "b2df1c14-4b7e-4e7b-9a95-8f9ad8d2b0c1"
 imageUrl: "https://raw.githubusercontent.com/moodiness/jellyfin-plugin-siphon/main/assets/siphon.png"
-version: "1.4.1.0"
+version: "1.5.0.0"
 targetAbi: "12.1.0.0"
 framework: "net10.0"
 owner: "moodiness"
@@ -25,4 +25,6 @@ artifacts:
   - "MonoTorrent.Trackers.dll"
   - "ReusableTasks.dll"
 changelog: |-
-  - Register a real Siphon media library in Dashboard Libraries and My Media; migrate v1.3 catalog roots, deduplicate media, and preserve native browsing across scans and restarts without manual paths.
+  - Prepare Siphon 1.5.0.0. Package with scripts/package.py to include the runtime dependency closure and required licenses.
+  - Add isolated user addon/search preferences, durable collections/playlists, catalog collections, selected-version resumable downloads, selective history recovery, provenance and source diagnostics, a personal calendar, and durable opt-in notifications.
+  - Add all IntroDB timing types and bounded opt-in MonoTorrent playback. Protect post-credit scenes and retain authoritative addon metadata. Offline HLS downloads are explicitly unsupported.
