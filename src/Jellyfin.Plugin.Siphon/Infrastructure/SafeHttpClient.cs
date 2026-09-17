@@ -145,6 +145,8 @@ public sealed class SafeHttpClient : ISafeHttpClient, IDisposable
                 foreach (var name in forwarded.Keys.ToArray())
                 {
                     if (!name.Equals("Range", StringComparison.OrdinalIgnoreCase)
+                        && !name.Equals("If-Range", StringComparison.OrdinalIgnoreCase)
+                        && !name.Equals("Accept-Encoding", StringComparison.OrdinalIgnoreCase)
                         && !name.Equals("Accept", StringComparison.OrdinalIgnoreCase)
                         && !name.Equals("User-Agent", StringComparison.OrdinalIgnoreCase))
                     {

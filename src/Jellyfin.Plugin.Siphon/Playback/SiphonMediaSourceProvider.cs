@@ -3,6 +3,7 @@ using Jellyfin.Plugin.Siphon.Infrastructure;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Controller.MediaSegments;
 using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
@@ -18,7 +19,9 @@ public sealed class SiphonMediaSourceProvider(
     ProxySessionStore sessions,
     CapabilityTokenService tokens,
     Configuration.ConfigurationAccessor configuration,
-    IMediaEncoder encoder) : IMediaSourceProvider
+    IMediaEncoder encoder,
+    PlaybackAccess access,
+    IMediaSegmentManager segmentManager) : IMediaSourceProvider
 {
     public async Task<IEnumerable<MediaSourceInfo>> GetMediaSources(BaseItem item, CancellationToken cancellationToken)
     {
@@ -28,7 +31,9 @@ public sealed class SiphonMediaSourceProvider(
             return [];
         }
 
-        var available = await versions.GetVersionsAsync(video, cancellationToken).ConfigureAwait(false);
+        var user = access.CurrentUser();
+        if (user is null || access.GetVideo(video.Id, user.Id) is null) return [];
+        var available = await versions.GetVersionsAsync(video, user.Id, cancellationToken).ConfigureAwait(false);
         if (available.Count == 0) return [];
         // Remuxing resolves this provider again without opening another live stream. Preserve
         // the selected version's probed tracks so Jellyfin can map its actual audio/subtitle indices.
@@ -67,7 +72,10 @@ public sealed class SiphonMediaSourceProvider(
             throw new InvalidOperationException("The Siphon item is no longer available.");
         }
 
-        var streams = await resolver.GetSourcesAsync(item, cancellationToken).ConfigureAwait(false);
+        var user = access.CurrentUser();
+        if (user is null || !access.CanPlay(user.Id) || access.FindVideo(itemKey, user.Id, sourceId) is null)
+            throw new UnauthorizedAccessException("The selected source is unavailable.");
+        var streams = await resolver.GetSourcesAsync(item, user.Id, cancellationToken).ConfigureAwait(false);
         var selected = streams.FirstOrDefault(stream => stream.Id == sourceId)
             ?? throw new InvalidOperationException("The selected source is no longer available. Reload the item.");
         var versionId = versions.FindVersionId(item, sourceId);
@@ -109,10 +117,11 @@ public sealed class SiphonMediaSourceProvider(
         source.MediaAttachments = info.MediaAttachments;
         source.SupportsProbing = false;
         await versions.SaveMediaInfoAsync(versionId, source, cancellationToken).ConfigureAwait(false);
+        source.HasSegments = segmentManager.HasSegments(versionId);
         return new ProxyLiveStream(source);
     }
 
-    /// <summary>Jellyfin owns playback; the proxy lease is shared safely across users and probes.</summary>
+    /// <summary>Jellyfin owns playback; each proxy lease belongs to one user and selected source.</summary>
     private sealed class ProxyLiveStream(MediaSourceInfo source) : ILiveStream
     {
         public int ConsumerCount { get; set; } = 1;

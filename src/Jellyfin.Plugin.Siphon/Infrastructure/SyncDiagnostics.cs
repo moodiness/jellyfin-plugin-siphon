@@ -5,7 +5,7 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.Siphon.Infrastructure;
 
 /// <summary>Credential-free observational state, separate from library ownership. Writes are coalesced and atomic.</summary>
-public sealed class SyncDiagnostics : IDisposable
+public sealed partial class SyncDiagnostics : IDisposable
 {
     private const int MaximumRecords = 256;
     private const int MaximumFileBytes = 4 * 1024 * 1024;
@@ -16,7 +16,7 @@ public sealed class SyncDiagnostics : IDisposable
         "ManifestUnavailable", "CatalogUnavailable", "InvalidCatalog", "IncompleteCatalog", "MetadataUnavailable", "RequestFailed", "SyncFailed", "Cancelled"
     };
     private static readonly HashSet<string> ManifestCodes = new(StringComparer.Ordinal) { "Ok", "ManifestUnavailable", "Timeout", "Cancelled" };
-    private static readonly HashSet<string> RunKinds = new(StringComparer.Ordinal) { "Catalogs", "FullRefresh", "FollowedSeries" };
+    private static readonly HashSet<string> RunKinds = new(StringComparer.Ordinal) { "Catalogs", "FullRefresh", "FollowedSeries", "Targeted" };
     private static readonly HashSet<string> RunStages = new(StringComparer.Ordinal) { "Preparing", "Catalogs", "Metadata", "Saving", "Publishing", "Credits", "Finalizing" };
     private static readonly HashSet<string> RunUnits = new(StringComparer.Ordinal) { "Catalogs", "Titles", "Series", "Items", "Percent" };
     private static readonly HashSet<string> Providers = new(StringComparer.Ordinal) { "Tmdb", "Tvdb", "Fanart", "MdbList" };
@@ -42,6 +42,11 @@ public sealed class SyncDiagnostics : IDisposable
         _logger = logger;
         Load();
         _writer = new Timer(_ => Flush(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        if (_history.Count > 0)
+        {
+            _pendingWrite = true;
+            Flush();
+        }
     }
 
     public DiagnosticSnapshot GetSnapshot()
@@ -57,13 +62,14 @@ public sealed class SyncDiagnostics : IDisposable
         lock (_gate) return new(_currentRun?.Snapshot(), _lastRun);
     }
 
-    public void BeginRun(string kind)
+    public void BeginRun(string kind, string scope = "All", string? targetKey = null)
     {
         lock (_gate)
         {
             if (_disposed) return;
-            _currentRun = new RunState(SafeCode(kind, RunKinds, "Catalogs"));
+            _currentRun = new RunState(SafeCode(kind, RunKinds, "Catalogs"), SafeScope(scope), SafeTarget(targetKey));
             ScheduleWrite();
+            Flush();
         }
     }
 
@@ -113,6 +119,8 @@ public sealed class SyncDiagnostics : IDisposable
             var counters = run.Provider(provider);
             if (cached) counters.CacheHits++;
             else counters.Requests++;
+            if (cached && _title.Value is { } title)
+                RecordDecision(title.Key, title.Name, "Pending", "CacheHit");
             ScheduleWrite();
         }
     }
@@ -125,6 +133,9 @@ public sealed class SyncDiagnostics : IDisposable
             var counters = run.Provider(provider);
             var safe = SafeCode(code, ProviderCodes, "ProviderError");
             counters.Errors[safe] = counters.Errors.GetValueOrDefault(safe) + 1;
+            if (_title.Value is { } title)
+                RecordDecision(title.Key, title.Name, safe is "ProviderPaused" or "CircuitOpen" or "RateLimited" ? "ProviderPaused" : "Pending",
+                    safe is "ProviderPaused" or "CircuitOpen" or "RateLimited" ? "ProviderPaused" : "ProviderError");
             ScheduleWrite();
         }
     }
@@ -134,13 +145,23 @@ public sealed class SyncDiagnostics : IDisposable
         lock (_gate)
         {
             if (_disposed || _currentRun is not { } run) return;
+            foreach (var key in run.Decisions.Keys.ToArray())
+            {
+                var decision = run.Decisions[key];
+                if (decision.Action == "Pending")
+                    run.Decisions[key] = decision with { Action = "Error", Reasons = decision.Reasons.Append(state == "Cancelled" ? "Cancelled" : "NotPublished").Distinct(StringComparer.Ordinal).ToArray() };
+            }
+            run.DecisionsDirty = true;
             _lastRun = run.Snapshot() with
             {
                 State = state is "Completed" or "Cancelled" ? state : "Failed",
                 FinishedAtUtc = DateTimeOffset.UtcNow
             };
+            AddHistory(_lastRun);
+            _finishedDecisions = run;
             _currentRun = null;
             ScheduleWrite();
+            Flush();
         }
     }
 
@@ -212,22 +233,29 @@ public sealed class SyncDiagnostics : IDisposable
             using var stream = File.OpenRead(_path);
             if (stream.Length > MaximumFileBytes) throw new InvalidDataException();
             var document = JsonSerializer.Deserialize<DiagnosticDocument>(stream, new JsonSerializerOptions { MaxDepth = 16 });
-            if (document is null || document.Version is not (1 or 2) || document.Addons is null || document.Addons.Length > MaximumRecords) throw new InvalidDataException();
+            if (document is null || document.Version is not (1 or 2 or 3) || document.Addons is null || document.Addons.Length > MaximumRecords) throw new InvalidDataException();
             foreach (var record in document.Addons)
             {
                 if (record is null || !Guid.TryParse(record.InstallationId, out var id)) throw new InvalidDataException();
                 var safe = Sanitize(record) with { InstallationId = id.ToString("N") };
                 _records[safe.InstallationId] = safe;
             }
+            foreach (var saved in (document.History ?? []).Take(20).Reverse())
+                if (SanitizeRun(saved) is { } historical) AddHistory(historical);
             _lastRun = SanitizeRun(document.LastRun);
-            // A process exit cannot leave a live task. Keep the interrupted observation, not a fictitious completion.
+            if (_lastRun is not null) AddHistory(_lastRun);
+            // A process exit cannot leave a live task. Preserve both the prior last run and the interruption.
             if (SanitizeRun(document.CurrentRun) is { } interrupted)
-                _lastRun = interrupted with { State = "Failed", FinishedAtUtc = null };
+            {
+                _lastRun = interrupted with { State = "Interrupted", FinishedAtUtc = null };
+                AddHistory(_lastRun);
+            }
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or InvalidDataException or NotSupportedException)
         {
             _records.Clear();
             _lastRun = null;
+            _history.Clear();
             _storageCode = exception is JsonException or InvalidDataException or NotSupportedException ? "DiagnosticsCorrupt" : "DiagnosticsUnavailable";
             _logger.LogWarning("Siphon diagnostic history could not be loaded; library ownership is unaffected.");
         }
@@ -243,16 +271,20 @@ public sealed class SyncDiagnostics : IDisposable
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
+                if (_finishedDecisions is { } finished) WriteDecisions(finished);
+                if (_currentRun is { } running) WriteDecisions(running);
                 temporary = _path + "." + Guid.NewGuid().ToString("N") + ".tmp";
                 var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None, Options = FileOptions.WriteThrough };
                 if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
                 using (var stream = new FileStream(temporary, options))
                 {
-                    JsonSerializer.Serialize(stream, new DiagnosticDocument(2, _records.Values.ToArray(), _currentRun?.Snapshot(), _lastRun));
+                    JsonSerializer.Serialize(stream, new DiagnosticDocument(3, _records.Values.ToArray(), _currentRun?.Snapshot(), _lastRun, _history.ToArray()));
                     stream.Flush(flushToDisk: true);
                 }
 
                 File.Move(temporary, _path, overwrite: true);
+                _finishedDecisions = null;
+                PruneDecisionFiles();
                 _storageCode = null;
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or NotSupportedException)
@@ -299,8 +331,12 @@ public sealed class SyncDiagnostics : IDisposable
         return run with
         {
             Kind = SafeCode(run.Kind, RunKinds, "Catalogs"),
-            State = run.State is "Running" or "Completed" or "Cancelled" ? run.State : "Failed",
+            State = run.State is "Running" or "Completed" or "Cancelled" or "Interrupted" ? run.State : "Failed",
             Stage = SafeCode(run.Stage, RunStages, "Preparing"),
+            Id = Guid.TryParse(run.Id, out var id) ? id.ToString("N") : Guid.NewGuid().ToString("N"),
+            Scope = SafeScope(run.Scope),
+            TargetKey = SafeTarget(run.TargetKey),
+            DecisionCount = Math.Clamp(run.DecisionCount, 0, MaximumDecisions),
             Unit = SafeCode(run.Unit, RunUnits, "Items"),
             Completed = Math.Clamp(run.Completed, 0, total),
             Total = total,
@@ -319,10 +355,13 @@ public sealed class SyncDiagnostics : IDisposable
         };
     }
 
-    private sealed class RunState(string kind)
+    private sealed class RunState(string kind, string scope, string? targetKey)
     {
         private readonly DateTimeOffset _startedAtUtc = DateTimeOffset.UtcNow;
         private readonly Dictionary<string, ProviderCounters> _providers = new(StringComparer.Ordinal);
+        public string Id { get; } = Guid.NewGuid().ToString("N");
+        public Dictionary<string, SyncDecision> Decisions { get; } = new(StringComparer.Ordinal);
+        public bool DecisionsDirty { get; set; }
         public string Stage { get; set; } = "Preparing";
         public string Unit { get; set; } = "Items";
         public int Completed { get; set; }
@@ -344,7 +383,7 @@ public sealed class SyncDiagnostics : IDisposable
         public SyncRunSnapshot Snapshot() => new(kind, "Running", _startedAtUtc, null, Stage, Unit, Completed, Total,
             PrioritySeries, Added, Updated, Unchanged, Removed, Preserved, FailedSubscriptions,
             _providers.Select(provider => new SyncProviderSnapshot(provider.Key, provider.Value.Requests, provider.Value.CacheHits,
-                new Dictionary<string, int>(provider.Value.Errors, StringComparer.Ordinal))).ToArray());
+                new Dictionary<string, int>(provider.Value.Errors, StringComparer.Ordinal))).ToArray(), Id, scope, targetKey, Decisions.Count);
     }
 
     private sealed class ProviderCounters
@@ -365,7 +404,8 @@ public sealed class SyncDiagnostics : IDisposable
         }
     }
 
-    private sealed record DiagnosticDocument(int Version, InstallationDiagnostic[] Addons, SyncRunSnapshot? CurrentRun = null, SyncRunSnapshot? LastRun = null);
+    private sealed record DiagnosticDocument(int Version, InstallationDiagnostic[] Addons, SyncRunSnapshot? CurrentRun = null,
+        SyncRunSnapshot? LastRun = null, SyncRunSnapshot[]? History = null);
 }
 
 public sealed record DiagnosticSnapshot(string? StorageCode, IReadOnlyList<InstallationDiagnostic> Addons,
@@ -373,7 +413,8 @@ public sealed record DiagnosticSnapshot(string? StorageCode, IReadOnlyList<Insta
 public sealed record SyncRunStatus(SyncRunSnapshot? CurrentRun, SyncRunSnapshot? LastRun);
 public sealed record SyncRunSnapshot(string Kind, string State, DateTimeOffset StartedAtUtc, DateTimeOffset? FinishedAtUtc,
     string Stage, string Unit, int Completed, int Total, int PrioritySeries, int Added, int Updated, int Unchanged,
-    int Removed, int Preserved, int FailedSubscriptions, IReadOnlyList<SyncProviderSnapshot> Providers);
+    int Removed, int Preserved, int FailedSubscriptions, IReadOnlyList<SyncProviderSnapshot> Providers,
+    string Id = "", string Scope = "All", string? TargetKey = null, int DecisionCount = 0);
 public sealed record SyncProviderSnapshot(string Provider, int Requests, int CacheHits, IReadOnlyDictionary<string, int> Errors);
 public sealed record InstallationDiagnostic(string InstallationId, DateTimeOffset? LastSuccessUtc, DateTimeOffset? LastFailureUtc,
     string? LastErrorCode, ManifestCheckDiagnostic? LastManifestCheck);

@@ -14,6 +14,7 @@ public static class ManagedItemComparison
         {
             ProviderIds = CanonicalIds(item.ProviderIds),
             EpisodeProviderIds = CanonicalIds(item.EpisodeProviderIds),
+            MetadataProvenance = [],
             MissingSinceUtc = null,
             MissingOwners = []
         });

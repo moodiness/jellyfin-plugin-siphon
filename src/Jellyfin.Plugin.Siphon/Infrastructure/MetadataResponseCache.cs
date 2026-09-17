@@ -16,6 +16,9 @@ public sealed class MetadataResponseCache(SiphonPaths paths) : IDisposable
     private long _bytes;
 
     internal async Task<T?> ReadAsync<T>(string key, DateTimeOffset now, TimeSpan lifetime, CancellationToken ct) where T : class
+        => (await ReadObservedAsync<T>(key, now, lifetime, ct).ConfigureAwait(false))?.Value;
+
+    internal async Task<(T Value, DateTimeOffset CreatedAt)?> ReadObservedAsync<T>(string key, DateTimeOffset now, TimeSpan lifetime, CancellationToken ct) where T : class
     {
         try
         {
@@ -24,17 +27,18 @@ public sealed class MetadataResponseCache(SiphonPaths paths) : IDisposable
             if (!info.Exists || info.Length > MaxEntryBytes) return null;
             await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 16384, true);
             var entry = await JsonSerializer.DeserializeAsync<Entry<T>>(stream, Json, ct).ConfigureAwait(false);
-            return entry is not null && entry.Key == key && entry.CreatedAt <= now && now - entry.CreatedAt < lifetime ? entry.Value : null;
+            return entry is not null && entry.Key == key && entry.CreatedAt <= now && now - entry.CreatedAt < lifetime
+                ? (entry.Value, entry.CreatedAt) : null;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or NotSupportedException) { return null; }
     }
 
-    internal async Task WriteAsync<T>(string key, T value, DateTimeOffset now, CancellationToken ct) where T : class
+    internal async Task<bool> WriteAsync<T>(string key, T value, DateTimeOffset now, CancellationToken ct) where T : class
     {
         byte[] bytes;
         try { bytes = JsonSerializer.SerializeToUtf8Bytes(new Entry<T>(key, now, value), Json); }
-        catch (Exception ex) when (ex is JsonException or NotSupportedException) { return; }
-        if (bytes.Length > MaxEntryBytes) return;
+        catch (Exception ex) when (ex is JsonException or NotSupportedException) { return false; }
+        if (bytes.Length > MaxEntryBytes) return false;
         await _writer.WaitAsync(ct).ConfigureAwait(false);
         var temporary = Path.Combine(_directory, "pending.tmp");
         try
@@ -59,7 +63,7 @@ public sealed class MetadataResponseCache(SiphonPaths paths) : IDisposable
             while (_entries.Count >= MaxEntries || _bytes + bytes.Length > MaxBytes)
             {
                 var oldest = _entries.MinBy(entry => entry.Value.Written);
-                if (oldest.Key is null) return;
+                if (oldest.Key is null) return false;
                 File.Delete(FilePath(oldest.Key));
                 _entries.Remove(oldest.Key);
                 _bytes -= oldest.Value.Bytes;
@@ -69,8 +73,9 @@ public sealed class MetadataResponseCache(SiphonPaths paths) : IDisposable
             File.Move(temporary, FilePath(key), true);
             _bytes += bytes.Length - existing;
             _entries[key] = (bytes.Length, now.UtcDateTime);
+            return true;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { _indexed = false; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { _indexed = false; return false; }
         finally
         {
             try { File.Delete(temporary); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }

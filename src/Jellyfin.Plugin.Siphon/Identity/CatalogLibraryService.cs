@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Jellyfin.Data;
 using Jellyfin.Data.Enums;
 using Jellyfin.Database.Implementations.Enums;
@@ -25,9 +26,13 @@ public sealed class CatalogLibraryService(
     IUserManager users,
     IFileSystem fileSystem)
 {
-    private const string CatalogProvider = "SiphonCatalog";
+    internal const string CatalogProvider = "SiphonCatalog";
+    public const string PresentationProvider = "SiphonCatalogPresentation";
     private const string StorageProvider = "SiphonStorage";
+    internal const string ManualPrefix = "siphon:manual:";
+    internal const string PreviewPrefix = "siphon:preview:";
     private readonly string _catalogPath = Path.Combine(paths.DataDirectory, "catalogs");
+    private Dictionary<Guid, Dictionary<Guid, HashSet<PreferenceKind>>>? _presentationExclusions;
 
     public Layout Prepare(IReadOnlyList<ManagedItem> retained, CancellationToken cancellationToken)
     {
@@ -79,8 +84,13 @@ public sealed class CatalogLibraryService(
         var configured = configuration.Current.Addons.SelectMany(addon => addon.Catalogs.Select(catalog =>
             (Owner: addon.Id + ":" + catalog.Key, Catalog: catalog, Enabled: addon.Enabled && catalog.Enabled)))
             .ToDictionary(entry => entry.Owner, StringComparer.Ordinal);
+        foreach (var type in new[] { "movie", "series" })
+        {
+            configured[ManualPrefix + type] = (ManualPrefix + type, new CatalogSubscription { Type = type, Id = "Siphon saved" }, true);
+            configured[PreviewPrefix + type] = (PreviewPrefix + type, new CatalogSubscription { Type = type, Id = "Siphon search" }, true);
+        }
         if (catalogNames is null && layout.Locations.Count > 0
-            && configured.Values.Any(entry => entry.Enabled && !existing.ContainsKey(entry.Owner)))
+            && configured.Values.Any(entry => entry.Enabled && !entry.Owner.StartsWith("siphon:", StringComparison.Ordinal) && !existing.ContainsKey(entry.Owner)))
         {
             // Resolve labels once when upgrading the old single library. Later starts
             // reuse persisted native names without requiring the addons to be online.
@@ -105,6 +115,7 @@ public sealed class CatalogLibraryService(
             existing.TryGetValue(owner, out var view);
             layout.Locations.TryGetValue(owner, out var members);
             if (view is null && !enabled && members is null) continue;
+            if (owner.StartsWith("siphon:", StringComparison.Ordinal) && view is null && members is null) continue;
 
             // A permanent empty location identifies an empty library and lets an
             // interrupted registration recover before its provider marker was saved.
@@ -167,8 +178,25 @@ public sealed class CatalogLibraryService(
             view.Name = name;
             view.IsLocked = true;
             view.SetProviderId(CatalogProvider, owner);
+            view.SetProviderId(PresentationProvider, hasConfiguration ? subscription.Catalog.Presentation : "Library");
             Save(view, false, cancellationToken);
             layout.Views.Add(new(view, folders, enabled));
+            await ApplyPresentationAsync(view, hasConfiguration && subscription.Catalog.Presentation == "Collection", cancellationToken).ConfigureAwait(false);
+            if (owner.StartsWith(PreviewPrefix, StringComparison.Ordinal))
+            {
+                foreach (var user in users.GetUsers())
+                {
+                    var changed = false;
+                    foreach (var preference in new[] { PreferenceKind.MyMediaExcludes, PreferenceKind.LatestItemExcludes })
+                    {
+                        var values = user.GetPreference(preference);
+                        if (values.Any(value => Guid.TryParse(value, out var id) && id == view.Id)) continue;
+                        user.SetPreference(preference, values.Append(view.Id.ToString("N")).ToArray());
+                        changed = true;
+                    }
+                    if (changed) await users.UpdateUserAsync(user).ConfigureAwait(false);
+                }
+            }
         }
 
         // Install restrictions while replacement views are still empty/disabled.
@@ -314,11 +342,80 @@ public sealed class CatalogLibraryService(
     private void Save(BaseItem item, bool isNew, CancellationToken cancellationToken)
     {
         item.DateLastSaved = DateTime.UtcNow;
-        if (isNew) library.CreateItems([item], item.GetParent(), cancellationToken);
+        if (isNew) library.CreateItems([item], null, cancellationToken);
         else
         {
             persistence.SaveItems([item], cancellationToken);
             library.RegisterItem(item);
+        }
+    }
+
+    private async Task ApplyPresentationAsync(CollectionFolder view, bool collectionOnly, CancellationToken ct)
+    {
+        // Retain the original permission-bearing view and shared media locations. Combining
+        // catalogs into one visible library would silently broaden independently configured ACLs.
+        var path = Path.Combine(_catalogPath, "presentation-exclusions.json");
+        _presentationExclusions ??= File.Exists(path)
+            ? JsonSerializer.Deserialize<Dictionary<Guid, Dictionary<Guid, HashSet<PreferenceKind>>>>(await File.ReadAllBytesAsync(path, ct).ConfigureAwait(false))
+                ?? throw new InvalidDataException("The catalog presentation ownership record is invalid.")
+            : [];
+        if (!_presentationExclusions.TryGetValue(view.Id, out var owned))
+            _presentationExclusions[view.Id] = owned = [];
+        var pending = owned.ToDictionary(pair => pair.Key, pair => new HashSet<PreferenceKind>(pair.Value));
+        var changedUsers = new List<Jellyfin.Database.Implementations.Entities.User>();
+        var changed = false;
+        foreach (var user in users.GetUsers())
+        {
+            if (!owned.TryGetValue(user.Id, out var preferences)) owned[user.Id] = preferences = [];
+            var changedUser = false;
+            foreach (var kind in new[] { PreferenceKind.MyMediaExcludes, PreferenceKind.LatestItemExcludes })
+            {
+                var values = user.GetPreference(kind);
+                var contains = values.Any(value => Guid.TryParse(value, out var id) && id == view.Id);
+                if (collectionOnly && !contains)
+                {
+                    preferences.Add(kind);
+                    user.SetPreference(kind, values.Append(view.Id.ToString("N")).ToArray());
+                    changedUser = true;
+                    changed = true;
+                }
+                else if (!collectionOnly && preferences.Remove(kind))
+                {
+                    // Exclusions that existed before collection-only mode remain untouched.
+                    if (contains)
+                    {
+                        user.SetPreference(kind, values.Where(value => !Guid.TryParse(value, out var id) || id != view.Id).ToArray());
+                        changedUser = true;
+                    }
+                    changed = true;
+                }
+            }
+            if (changedUser) changedUsers.Add(user);
+        }
+        if (!changed) return;
+        Directory.CreateDirectory(_catalogPath);
+        foreach (var (userId, preferences) in owned)
+        {
+            if (!pending.TryGetValue(userId, out var kinds)) pending[userId] = kinds = [];
+            kinds.UnionWith(preferences);
+        }
+        // Keep removal intent in the journal until the native preference updates commit.
+        // If interrupted, switching back retries rather than leaving owned exclusions forever.
+        _presentationExclusions[view.Id] = pending;
+        await SaveExclusionsAsync().ConfigureAwait(false);
+        foreach (var user in changedUsers) await users.UpdateUserAsync(user).ConfigureAwait(false);
+        _presentationExclusions[view.Id] = owned;
+        await SaveExclusionsAsync().ConfigureAwait(false);
+
+        async Task SaveExclusionsAsync()
+        {
+            var temporary = path + ".tmp";
+            try
+            {
+                await File.WriteAllBytesAsync(temporary, JsonSerializer.SerializeToUtf8Bytes(_presentationExclusions), ct).ConfigureAwait(false);
+                File.Move(temporary, path, true);
+            }
+            finally { if (File.Exists(temporary)) File.Delete(temporary); }
         }
     }
 

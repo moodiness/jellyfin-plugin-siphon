@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>My Siphon · Jellyfin</title>
+    <style>
+        :root { color-scheme: dark; --accent: #00a4dc; --line: rgba(128,128,128,.3); --panel: rgba(128,128,128,.08); }
+        * { box-sizing: border-box; }
+        [hidden] { display: none !important; }
+        body { margin: 0; background: #101010; color: #eee; font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+        main { max-width: 68rem; margin: auto; padding: 2rem 1.5rem 4rem; }
+        h1 { margin: 0; font-size: 2rem; font-weight: 600; letter-spacing: -.025em; display: flex; align-items: center; gap: .7rem; }
+        h1 img { object-fit: contain; }
+        h2 { font-size: 1.3rem; margin: 0 0 .5rem; }
+        h3 { font-size: 1.05rem; margin: 0 0 .35rem; overflow-wrap: anywhere; }
+        p { max-width: 70ch; }
+        a { color: var(--accent); overflow-wrap: anywhere; }
+        .help { opacity: .78; font-size: .9rem; margin: .4rem 0 1rem; }
+        .actions, header { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; }
+        header { justify-content: space-between; }
+        button, .button { border: 1px solid var(--line); background: #242424; border-radius: .25rem; color: inherit; font: inherit; cursor: pointer; padding: .65rem 1rem; text-decoration: none; touch-action: manipulation; }
+        button:hover, .button:hover { background: #333; }
+        button:disabled { opacity: .45; cursor: default; }
+        .primary { background: #007ea8; border-color: #007ea8; color: white; }
+        :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+        .inputContainer { margin: 0 0 1.25rem; min-width: 0; }
+        .inputLabel { display: block; margin-bottom: .45rem; }
+        input:not([type="checkbox"]), select { width: 100%; max-width: 100%; background: #202020; border: 1px solid #606060; border-radius: .2rem; color: inherit; font: inherit; padding: .7rem .8rem; }
+        input[type="checkbox"] { width: 1.2rem; height: 1.2rem; accent-color: var(--accent); flex-shrink: 0; }
+        .checkboxContainer label { display: flex; align-items: flex-start; gap: .6rem; }
+        fieldset { margin: 0; border: 0; padding: 0; min-width: 0; }
+        .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 1.5rem; }
+        .tabs { display: flex; overflow-x: auto; border-bottom: 1px solid var(--line); gap: .25rem; margin: 1.5rem 0; }
+        .tabs button { border: 0; border-bottom: 3px solid transparent; border-radius: 0; background: transparent; white-space: nowrap; padding: .85rem 1rem; }
+        .tabs [aria-selected="true"] { border-bottom-color: var(--accent); font-weight: 600; }
+        .message { padding: .8rem 1rem; border-inline-start: 3px solid var(--accent); background: var(--panel); overflow-wrap: anywhere; }
+        .message:empty { display: none; }
+        .message[data-error="true"] { border-color: #e27777; }
+        .list { list-style: none; padding: 0; margin: 1rem 0; }
+        .list > li, .row { padding: 1rem 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+        .list p { margin: .35rem 0; }
+        .facts { display: grid; grid-template-columns: minmax(7rem, 1fr) minmax(0, 2fr); gap: .4rem 1rem; font-size: .9rem; }
+        .facts dt { opacity: .78; }
+        .facts dd { margin: 0; overflow-wrap: anywhere; }
+        .save { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem; border: 1px solid var(--line); padding: 1rem; margin: 1rem 0; background: #202020; }
+        .save[data-dirty="true"] { border-color: var(--accent); }
+        #signIn { max-width: 30rem; margin: 2rem 0; }
+        #notificationsList [data-unread="true"] { border-inline-start: 3px solid var(--accent); padding-inline-start: 1rem; }
+        .pager { margin: 1rem 0; }
+        @media (max-width: 700px) { main { padding: 1.25rem .8rem 2rem; } .grid { grid-template-columns: minmax(0, 1fr); } .tabs button { padding: .75rem .8rem; } .facts { grid-template-columns: minmax(6rem, 1fr) minmax(0, 2fr); } .actions { gap: .5rem; } }
+    </style>
+</head>
+<body>
+<main id="SiphonUserPage">
+    <header><h1><img id="brandIcon" width="44" height="44" alt="">My Siphon</h1><div class="actions"><a id="jellyfinLink" class="button">Back to Jellyfin</a><button id="signOut" type="button" hidden>Sign out of portal</button></div></header>
+    <p id="account" class="help">Your search preferences, followed-series calendar and playback sources.</p>
+    <p id="sessionStatus" class="message" role="status" aria-live="polite"></p>
+    <section id="signIn" aria-labelledby="signInTitle">
+        <h2 id="signInTitle">Sign in to Jellyfin</h2>
+        <p class="help">Use your own account on this server. Administrator access is not required. This portal keeps its session token only in this tab's memory, not in the URL or browser storage. Reloading signs you out of the portal.</p>
+        <form id="loginForm">
+            <fieldset id="loginFields">
+                <div class="inputContainer"><label class="inputLabel" for="username">Username</label><input id="username" class="emby-input" autocomplete="username" required maxlength="256"></div>
+                <div class="inputContainer"><label class="inputLabel" for="password">Password</label><input id="password" class="emby-input" type="password" autocomplete="current-password" maxlength="4096"></div>
+                <button type="submit" class="primary">Sign in</button>
+            </fieldset>
+        </form>
+    </section>
+    <div id="authenticated" hidden>
+        <nav class="tabs" role="tablist" aria-label="Personal Siphon tools">
+            <button id="preferencesTab" role="tab" type="button" aria-controls="preferencesPanel" aria-selected="true">Preferences</button>
+            <button id="calendarTab" role="tab" type="button" aria-controls="calendarPanel" aria-selected="false" tabindex="-1">Release calendar</button>
+            <button id="notificationsTab" role="tab" type="button" aria-controls="notificationsPanel" aria-selected="false" tabindex="-1">Notifications</button>
+            <button id="sourcesTab" role="tab" type="button" aria-controls="sourcesPanel" aria-selected="false" tabindex="-1">My sources</button>
+        </nav>
+        <section id="preferencesPanel" role="tabpanel" aria-labelledby="preferencesTab">
+            <h2>My search &amp; notifications</h2>
+            <p class="help">These settings affect only your account. Playback addons are assigned by an administrator; shared catalogs, authoritative metadata and Jellyfin library permissions do not change.</p>
+            <form id="preferencesForm">
+                <fieldset id="preferencesFields" disabled>
+                    <div class="save" id="preferenceSaveBar" data-dirty="false"><span id="preferenceSaveState" role="status">Loading preferences…</span><div class="actions"><button id="reloadPreferences" type="button">Reload saved</button><button id="savePreferences" type="submit" class="primary" disabled>Save my preferences</button></div></div>
+                    <div class="inputContainer"><label class="inputLabel" for="searchMode">Native Jellyfin search</label><select id="searchMode" class="emby-select"><option value="Inherit">Use server default</option><option value="All">Local library and addon discovery</option><option value="Local">Local library only</option></select></div>
+                    <div class="inputContainer"><label class="inputLabel" for="hideUnreleased">Unreleased Siphon titles in search</label><select id="hideUnreleased" class="emby-select"><option value="inherit">Use server default</option><option value="true">Hide unreleased titles</option><option value="false">Include announced titles</option></select><p class="help">Release dates and the server's optional date buffer are not verified stream availability. Unknown dates cannot establish availability. Personal library items are unaffected.</p></div>
+                    <div class="checkboxContainer"><label><input id="notificationsEnabled" type="checkbox"><span>Notify me about new dated episodes, date changes and announced releases in series I follow</span></label></div>
+                    <p id="notificationPermission" class="help"></p>
+                    <p id="effectivePreferences" class="help"></p>
+                </fieldset>
+            </form>
+            <p id="preferencesStatus" class="message" role="status" aria-live="polite"></p>
+            <button id="preferencesRetry" type="button" hidden>Retry loading preferences</button>
+        </section>
+        <section id="calendarPanel" role="tabpanel" aria-labelledby="calendarTab" hidden>
+            <h2>My followed-series release calendar</h2>
+            <p class="help">Series you have favorited, started or resumed in Jellyfin. Only episodes you can access are shown. Dates are announced releases, not a guarantee of playable streams. Calendar days use UTC; date-only announcements are kept as dates.</p>
+            <form id="calendarForm"><div class="grid"><div class="inputContainer"><label class="inputLabel" for="calendarFrom">From (UTC date)</label><input id="calendarFrom" type="date" required></div><div class="inputContainer"><label class="inputLabel" for="calendarTo">Through (UTC date)</label><input id="calendarTo" type="date" required></div></div><div class="actions"><button id="calendarLoad" type="submit">Load calendar</button><button id="calendarCancel" type="button" hidden>Cancel</button></div></form>
+            <p id="calendarStatus" class="message" role="status" aria-live="polite">Open this tab to load your next 30 days.</p>
+            <ul id="calendarList" class="list"></ul>
+        </section>
+        <section id="notificationsPanel" role="tabpanel" aria-labelledby="notificationsTab" hidden>
+            <h2>My release notifications</h2>
+            <p class="help">Your private inbox, including notifications received while offline. No initial backlog is sent on opt-in. Announced release does not mean a source is playable.</p>
+            <button id="notificationsLoad" type="button">Refresh inbox</button>
+            <p id="notificationsStatus" class="message" role="status" aria-live="polite">Open this tab to load your inbox.</p>
+            <ul id="notificationsList" class="list"></ul>
+        </section>
+        <section id="sourcesPanel" role="tabpanel" aria-labelledby="sourcesTab" hidden>
+            <h2>My playback sources</h2>
+            <p class="help">Choose a managed movie or episode. Source order follows your assigned playback addons. Refresh affects only this item and your profile; other users' caches and credentials are not exposed.</p>
+            <form id="itemSearchForm"><div class="inputContainer"><label class="inputLabel" for="itemSearch">Native Jellyfin search for a movie or episode</label><input id="itemSearch" type="search" maxlength="200" autocomplete="off" required><p class="help">Honors your saved search preferences. Local searches existing library items only; All can also discover movies from shared addons. Episodes are found in your accessible library.</p></div><div class="actions"><button id="itemSearchSubmit" type="submit">Search Jellyfin</button><button id="itemSearchCancel" type="button" hidden>Cancel search</button></div></form>
+            <p id="itemSearchStatus" class="message" role="status" aria-live="polite"></p>
+            <ul id="itemSearchList" class="list"></ul>
+            <div class="actions pager"><button id="itemPrevious" type="button" hidden>Previous items</button><button id="itemNext" type="button" hidden>Next items</button></div>
+            <form id="sourcesForm"><div class="inputContainer"><label class="inputLabel" for="sourceItem">Jellyfin item ID or details-page URL</label><input id="sourceItem" autocomplete="off" spellcheck="false" required></div><div class="actions"><button id="sourcesLoad" type="submit">Diagnose my sources</button><button id="sourcesRefresh" type="button">Refresh my item sources</button><button id="sourcesCancel" type="button" hidden>Cancel view request</button></div></form>
+            <p id="sourcesStatus" class="message" role="status" aria-live="polite"></p>
+            <div id="sourceResults"></div>
+        </section>
+    </div>
+</main>
+<script>
+(function () {
+    'use strict';
+    var root = window.location.pathname.replace(/\/Siphon\/User\/?$/i, '').replace(/\/$/, '');
+    var token = null;
+    var currentUser = null;
+    var serverId = null;
+    var generation = 0;
+    var deviceId = 'siphon-portal-' + Array.from(crypto.getRandomValues(new Uint8Array(16)), function (value) { return value.toString(16).padStart(2, '0'); }).join('');
+    var requests = new Map();
+    var loaded = new Set();
+    var preferences = null;
+    var preferencesDirty = false;
+    var preferencesBusy = false;
+    var itemOffset = 0;
+    var itemQuery = '';
+    var tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+    function get(id) { return document.getElementById(id); }
+    function node(tag, text, parent) { var element = document.createElement(tag); if (text !== undefined) element.textContent = text; if (parent) parent.appendChild(element); return element; }
+    function action(parent, title, handler) { var control = node('button', title, parent); control.type = 'button'; control.addEventListener('click', handler); return control; }
+    function message(id, text, error) { get(id).textContent = text; get(id).dataset.error = String(Boolean(error)); }
+    function apiUrl(path) { return root + '/' + path; }
+    function stamp(value) { return value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : 'Not recorded'; }
+    function size(value) { return Number.isFinite(value) && value >= 0 ? (value / 1048576).toLocaleString(undefined, { maximumFractionDigits: 1 }) + ' MiB' : 'Size unknown'; }
+    function fact(parent, label, value) { node('dt', label, parent); node('dd', value, parent); }
+    function errorText(error, fallback) {
+        return error.status === 401 ? 'Your portal session expired. Sign in again.' : error.status === 403 ? 'Access denied by your Jellyfin permissions.' : error.status === 404 ? 'This item is not accessible or is not managed by Siphon.' : error.status === 415 ? 'This source is an HLS playlist, not a downloadable video file. Choose a progressive or P2P version.' : error.status === 429 ? 'Too many requests. Wait briefly before retrying.' : error.status === 502 ? 'The upstream source is unavailable. Refresh sources and try another version.' : fallback;
+    }
+    function authorization() { return 'MediaBrowser Client="Siphon portal", Device="Browser", DeviceId="' + deviceId + '", Version="1.4.1.0"' + (token ? ', Token="' + token + '"' : ''); }
+    async function request(path, method, data, signal) {
+        var requestToken = token;
+        var response = await fetch(apiUrl(path), { method: method || 'GET', credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer', signal: signal, headers: { Authorization: authorization(), 'Content-Type': 'application/json', Accept: 'application/json' }, body: data === undefined ? undefined : JSON.stringify(data) });
+        if (!response.ok) {
+            if (response.status === 401 && requestToken && token === requestToken) endSession('Your portal session expired. Sign in again.');
+            var failure = new Error('Request failed'); failure.status = response.status; throw failure;
+        }
+        if (response.status === 204) return null;
+        var text = await response.text();
+        return text ? JSON.parse(text) : null;
+    }
+    function begin(key) { if (requests.has(key)) requests.get(key).abort(); var controller = new AbortController(); requests.set(key, controller); return controller; }
+    function isCurrent(key, controller, expected) { return token && expected === generation && requests.get(key) === controller && !controller.signal.aborted; }
+    function finish(key, controller) { if (requests.get(key) === controller) requests.delete(key); }
+    function cancel(key, status, text) { if (requests.has(key)) requests.get(key).abort(); requests.delete(key); if (status) message(status, text || 'Cancelled. You can retry.'); }
+    function endSession(text) {
+        generation++; token = null; currentUser = null; serverId = null;
+        requests.forEach(function (controller) { controller.abort(); }); requests.clear(); loaded.clear();
+        preferences = null; preferencesDirty = false; preferencesBusy = false;
+        get('authenticated').hidden = true; get('signIn').hidden = false; get('signOut').hidden = true;
+        get('loginFields').disabled = false; get('password').value = '';
+        get('account').textContent = 'Your search preferences, followed-series calendar and playback sources.';
+        ['calendarList', 'notificationsList', 'sourceResults', 'itemSearchList'].forEach(function (id) { get(id).replaceChildren(); });
+        ['preferencesStatus', 'calendarStatus', 'notificationsStatus', 'sourcesStatus', 'itemSearchStatus'].forEach(function (id) { message(id, ''); });
+        get('sourceItem').value = ''; get('itemSearch').value = ''; itemOffset = 0; itemQuery = '';
+        get('searchMode').value = 'Inherit'; get('hideUnreleased').value = 'inherit'; get('notificationsEnabled').checked = false;
+        get('effectivePreferences').textContent = ''; get('notificationPermission').textContent = '';
+        get('itemPrevious').hidden = true; get('itemNext').hidden = true;
+        ['calendarCancel', 'sourcesCancel', 'itemSearchCancel'].forEach(function (id) { get(id).hidden = true; });
+        ['calendarLoad', 'notificationsLoad', 'sourcesLoad', 'sourcesRefresh', 'itemSearchSubmit'].forEach(function (id) { get(id).disabled = false; });
+        preferenceState(); message('sessionStatus', text || 'Signed out of the portal.');
+    }
+    function selectPanel(id, focus) {
+        tabs.forEach(function (tab) { var selected = tab.getAttribute('aria-controls') === id; tab.setAttribute('aria-selected', String(selected)); tab.tabIndex = selected ? 0 : -1; get(tab.getAttribute('aria-controls')).hidden = !selected; if (focus && selected) tab.focus(); });
+        if (!token) return;
+        if (id === 'preferencesPanel' && !loaded.has(id)) loadPreferences();
+        if (id === 'calendarPanel' && !loaded.has(id)) loadCalendar();
+        if (id === 'notificationsPanel' && !loaded.has(id)) loadNotifications();
+    }
+    function preferenceState() {
+        get('preferencesFields').disabled = !preferences || preferencesBusy;
+        get('savePreferences').disabled = !preferencesDirty || preferencesBusy || !preferences;
+        get('preferenceSaveBar').dataset.dirty = String(preferencesDirty);
+        get('preferenceSaveState').textContent = preferencesBusy ? 'Working…' : !preferences ? 'Preferences unavailable.' : preferencesDirty ? 'You have unsaved personal changes.' : 'Your preferences are saved.';
+        get('reloadPreferences').textContent = preferencesDirty ? 'Discard changes' : 'Reload saved';
+    }
+    function showPreferences(value) {
+        preferences = value;
+        get('searchMode').value = value.SearchMode;
+        get('hideUnreleased').value = value.HideUnreleased == null ? 'inherit' : String(value.HideUnreleased);
+        get('notificationsEnabled').checked = value.NotificationsEnabled;
+        get('notificationsEnabled').disabled = !value.NotificationsAllowed;
+        get('notificationPermission').textContent = value.NotificationsAllowed ? 'Opt-in applies only to your account. Notifications appear in your inbox and supported connected Jellyfin sessions.' : 'The administrator has disabled release notifications. Your saved opt-in is retained but inactive.';
+        get('effectivePreferences').textContent = 'Saved effective search: ' + (value.EffectiveSearchMode === 'Local' ? 'local library only' : 'local library and addon discovery') + ' · ' + (value.EffectiveHideUnreleased ? 'unreleased titles hidden' : 'announced titles included') + '.';
+        preferencesDirty = false; preferenceState();
+    }
+    async function loadPreferences() {
+        if (!token || preferencesBusy) return;
+        var controller = begin('preferences'); var expected = generation;
+        preferencesBusy = true; preferenceState(); get('preferencesRetry').hidden = true; message('preferencesStatus', 'Loading your preferences…');
+        try {
+            var value = await request('Siphon/Preferences', 'GET', undefined, controller.signal);
+            if (!isCurrent('preferences', controller, expected)) return;
+            showPreferences(value); loaded.add('preferencesPanel'); message('preferencesStatus', '');
+        } catch (error) {
+            if (isCurrent('preferences', controller, expected)) { message('preferencesStatus', errorText(error, 'Preferences could not be loaded. Retry to continue.'), true); get('preferencesRetry').hidden = false; }
+        } finally { if (expected === generation) { preferencesBusy = false; preferenceState(); } finish('preferences', controller); }
+    }
+    async function savePreferences(event) {
+        event.preventDefault();
+        if (!token || !preferences || !preferencesDirty || preferencesBusy) return;
+        var draft = { SearchMode: get('searchMode').value, HideUnreleased: get('hideUnreleased').value === 'inherit' ? null : get('hideUnreleased').value === 'true', NotificationsEnabled: get('notificationsEnabled').checked };
+        var controller = begin('preferences'); var expected = generation;
+        preferencesBusy = true; preferenceState(); message('preferencesStatus', 'Saving your preferences…');
+        try {
+            await request('Siphon/Preferences', 'PUT', draft, controller.signal);
+            var value = await request('Siphon/Preferences', 'GET', undefined, controller.signal);
+            if (!isCurrent('preferences', controller, expected)) return;
+            showPreferences(value); loaded.delete('notificationsPanel'); message('preferencesStatus', 'Your preferences were saved.');
+        } catch (error) {
+            if (isCurrent('preferences', controller, expected)) message('preferencesStatus', errorText(error, 'Save was not confirmed. Your draft is still here; reload saved preferences to check before retrying.'), true);
+        } finally { if (expected === generation) { preferencesBusy = false; preferenceState(); } finish('preferences', controller); }
+    }
+    function episodeTitle(episode) { var number = (episode.SeasonNumber == null ? '' : 'S' + episode.SeasonNumber) + (episode.EpisodeNumber == null ? '' : ' E' + episode.EpisodeNumber); return episode.SeriesName + ' · ' + (number ? number.trim() + ' · ' : '') + episode.Name; }
+    function nativeLink(parent, title, itemId) { var link = node('a', title, parent); link.href = apiUrl('web/index.html') + '#/details?id=' + encodeURIComponent(itemId) + '&serverId=' + encodeURIComponent(serverId || ''); return link; }
+    function episodeRow(parent, episode) {
+        var row = node('li', undefined, parent);
+        var heading = node('h3', undefined, row); nativeLink(heading, episodeTitle(episode), episode.Id);
+        node('p', episode.Date + (episode.IsDateOnly ? ' · Date only (UTC calendar)' : ' · ' + stamp(episode.AnnouncedReleaseUtc)) + ' · ' + (episode.AnnouncedReleased ? 'Announced date reached' : 'Upcoming announcement'), row).className = 'help';
+        return row;
+    }
+    async function loadCalendar() {
+        if (!token) return;
+        var from = get('calendarFrom').value; var to = get('calendarTo').value;
+        var first = Date.parse(from + 'T00:00:00Z'); var last = Date.parse(to + 'T00:00:00Z');
+        if (!Number.isFinite(first) || !Number.isFinite(last) || last < first || last - first > 89 * 86400000) { message('calendarStatus', 'Choose an inclusive UTC date range of 1–90 days.', true); return; }
+        var controller = begin('calendar'); var expected = generation;
+        get('calendarLoad').disabled = true; get('calendarCancel').hidden = false; get('calendarList').replaceChildren(); get('calendarList').setAttribute('aria-busy', 'true'); message('calendarStatus', 'Loading your followed episodes…');
+        try {
+            var result = await request('Siphon/Calendar?from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to), 'GET', undefined, controller.signal);
+            if (!isCurrent('calendar', controller, expected)) return;
+            result.Items.forEach(function (episode) { var row = episodeRow(get('calendarList'), episode); action(row, 'Check my sources', function () { get('sourceItem').value = episode.Id; selectPanel('sourcesPanel', true); loadSources(false); }); });
+            loaded.add('calendarPanel');
+            message('calendarStatus', (result.Items.length ? result.Items.length + ' announced episodes in this UTC date range.' : 'No dated episodes in this range. Favorite or start a managed series in Jellyfin to follow it.') + (result.Truncated ? ' Results were capped; narrow the date range.' : '') + ' ' + (result.AvailabilityNote || 'Dates do not verify playable sources.'));
+        } catch (error) { if (isCurrent('calendar', controller, expected)) message('calendarStatus', errorText(error, 'Calendar unavailable. Load calendar to retry.'), true); }
+        finally { if (requests.get('calendar') === controller) { get('calendarLoad').disabled = false; get('calendarCancel').hidden = true; get('calendarList').setAttribute('aria-busy', 'false'); } finish('calendar', controller); }
+    }
+    async function loadNotifications() {
+        if (!token) return;
+        var controller = begin('notifications'); var expected = generation;
+        get('notificationsLoad').disabled = true; get('notificationsList').replaceChildren(); get('notificationsList').setAttribute('aria-busy', 'true'); message('notificationsStatus', 'Loading your notification inbox…');
+        try {
+            var result = await request('Siphon/Notifications', 'GET', undefined, controller.signal);
+            if (!isCurrent('notifications', controller, expected)) return;
+            var kinds = { NewEpisode: 'New dated episode', DateChanged: 'Announced date changed', AnnouncedRelease: 'Announced release date reached' };
+            result.Items.forEach(function (entry) {
+                var row = episodeRow(get('notificationsList'), entry.Episode); row.dataset.unread = String(!entry.ReadUtc);
+                node('p', (kinds[entry.Kind] || 'Release notification') + ' · Received ' + stamp(entry.CreatedUtc), row);
+                if (entry.PreviousAnnouncedReleaseUtc) node('p', 'Previously announced: ' + stamp(entry.PreviousAnnouncedReleaseUtc), row).className = 'help';
+                if (!entry.ReadUtc) {
+                    var mark = action(row, 'Mark read', async function () {
+                        mark.disabled = true;
+                        try {
+                            await request('Siphon/Notifications/' + encodeURIComponent(entry.Id) + '/Read', 'POST', undefined, controller.signal);
+                            if (expected !== generation || !token || controller.signal.aborted || !row.isConnected) return;
+                            row.dataset.unread = 'false'; mark.remove(); node('p', 'Read', row).className = 'help';
+                            result.UnreadCount = Math.max(0, result.UnreadCount - 1); message('notificationsStatus', result.UnreadCount + ' unread.');
+                        } catch (error) { if (expected === generation && token && row.isConnected) { mark.disabled = false; message('notificationsStatus', errorText(error, 'Could not mark this notification read. Retry or refresh the inbox.'), true); } }
+                    });
+                } else node('p', 'Read ' + stamp(entry.ReadUtc), row).className = 'help';
+            });
+            loaded.add('notificationsPanel');
+            message('notificationsStatus', (result.Items.length ? result.UnreadCount + ' unread · ' + result.Items.length + ' notifications.' : 'Your notification inbox is empty.') + (!result.NotificationsAllowed ? ' Notifications are disabled by the administrator.' : !result.NotificationsEnabled ? ' Enable personal notifications in Preferences to receive future announcements.' : ' No initial backlog is sent.'));
+        } catch (error) { if (isCurrent('notifications', controller, expected)) message('notificationsStatus', errorText(error, 'Inbox unavailable. Refresh inbox to retry.'), true); }
+        finally { if (requests.get('notifications') === controller) { get('notificationsLoad').disabled = false; get('notificationsList').setAttribute('aria-busy', 'false'); } finish('notifications', controller); }
+    }
+    function parseItemId(value) { var text = value.trim(); if (/^[0-9a-f]{32}$/i.test(text) || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text)) return text; var match = /[?&]id=([0-9a-f-]{32,36})(?:[&#]|$)/i.exec(text); return match && /^[0-9a-f]{32}$/i.test(match[1].replace(/-/g, '')) ? match[1] : null; }
+    async function searchItems(offset) {
+        if (!token || !currentUser) return;
+        var query = get('itemSearch').value.trim();
+        if (!query) { get('itemSearch').focus(); return; }
+        if (query !== itemQuery) offset = 0;
+        itemQuery = query; itemOffset = offset;
+        var controller = begin('items'); var expected = generation;
+        get('itemSearchSubmit').disabled = true; get('itemSearchCancel').hidden = false; get('itemPrevious').hidden = true; get('itemNext').hidden = true; get('itemSearchList').replaceChildren(); get('itemSearchList').setAttribute('aria-busy', 'true'); message('itemSearchStatus', 'Searching Jellyfin with your saved preferences…');
+        try {
+            var result = await request('Items?userId=' + encodeURIComponent(currentUser.Id) + '&searchTerm=' + encodeURIComponent(query) + '&recursive=true&includeItemTypes=Movie,Episode&startIndex=' + offset + '&limit=25&enableTotalRecordCount=true', 'GET', undefined, controller.signal);
+            if (!isCurrent('items', controller, expected)) return;
+            result.Items.forEach(function (item) {
+                var row = node('li', undefined, get('itemSearchList')); node('strong', (item.SeriesName ? item.SeriesName + ' · ' : '') + item.Name, row);
+                node('p', item.Type + (item.ProductionYear ? ' · ' + item.ProductionYear : ''), row).className = 'help';
+                action(row, 'Choose item', function () { get('sourceItem').value = item.Id; loadSources(false); get('sourcesStatus').scrollIntoView({ block: 'nearest' }); });
+            });
+            message('itemSearchStatus', result.Items.length ? 'Showing ' + (offset + 1) + '–' + (offset + result.Items.length) + ' of ' + result.TotalRecordCount + '. Personal media may appear here; Siphon diagnoses only managed items.' : 'No matching accessible movie or episode. You can paste a managed item’s Jellyfin details URL below.');
+            get('itemPrevious').hidden = offset === 0; get('itemNext').hidden = offset + result.Items.length >= result.TotalRecordCount;
+        } catch (error) { if (isCurrent('items', controller, expected)) message('itemSearchStatus', errorText(error, 'Native search failed. Retry the search or paste an item ID.'), true); }
+        finally { if (requests.get('items') === controller) { get('itemSearchSubmit').disabled = false; get('itemSearchCancel').hidden = true; get('itemSearchList').setAttribute('aria-busy', 'false'); } finish('items', controller); }
+    }
+    async function loadSources(refresh) {
+        if (!token) return;
+        var itemId = parseItemId(get('sourceItem').value);
+        if (!itemId) { message('sourcesStatus', 'Enter a valid Jellyfin item ID or details-page URL.', true); get('sourceItem').focus(); return; }
+        var controller = begin('sources'); var expected = generation;
+        get('sourcesLoad').disabled = true; get('sourcesRefresh').disabled = true; get('sourcesCancel').hidden = false; get('sourceResults').replaceChildren(); get('sourceResults').setAttribute('aria-busy', 'true'); message('sourcesStatus', refresh ? 'Refreshing this item for your profile…' : 'Resolving your ordered playback sources…');
+        try {
+            var result = await request('Siphon/Items/' + encodeURIComponent(itemId) + '/Sources' + (refresh ? '/Refresh' : ''), refresh ? 'POST' : 'GET', undefined, controller.signal);
+            if (!isCurrent('sources', controller, expected)) return;
+            renderSources(result, expected);
+            message('sourcesStatus', result.Sources.length ? result.Sources.length + ' accepted versions for your account. Choose the exact version to download.' : 'No accepted streams for your current profile. An empty user override means no providers; inspect addon outcomes below.');
+        } catch (error) { if (isCurrent('sources', controller, expected)) message('sourcesStatus', errorText(error, 'Source diagnosis failed. Retry or ask the administrator to check your assigned playback profile.'), true); }
+        finally { if (requests.get('sources') === controller) { get('sourcesLoad').disabled = false; get('sourcesRefresh').disabled = false; get('sourcesCancel').hidden = true; get('sourceResults').setAttribute('aria-busy', 'false'); } finish('sources', controller); }
+    }
+    function renderSources(result, expected) {
+        var parent = get('sourceResults');
+        var facts = node('dl', undefined, parent); facts.className = 'facts';
+        fact(facts, 'Resolved', stamp(result.CreatedAt)); fact(facts, 'Cache expiry', stamp(result.ExpiresAt));
+        fact(facts, 'Cache age', Number.isFinite(Date.parse(result.CreatedAt)) ? Math.max(0, Math.floor((Date.now() - Date.parse(result.CreatedAt)) / 1000)) + ' seconds' : 'Not recorded');
+        node('h3', 'Ordered versions', parent);
+        var sources = node('ol', undefined, parent); sources.className = 'list';
+        result.Sources.forEach(function (source, index) {
+            var row = node('li', undefined, sources);
+            node('strong', (index + 1) + '. ' + (source.Name || 'Stream version'), row);
+            node('p', (source.Kind === 'P2p' ? 'P2P — server shares data, exposes its IP to peers and trackers, and does not use BitTorrent wire encryption' : 'HTTP source') + ' · ' + size(source.Size), row).className = 'help';
+            if (result.CanDownload && source.CanDownload) {
+                var download = action(row, 'Download this version', async function () {
+                    download.disabled = true;
+                    var status = row.querySelector('[role="status"]'); status.textContent = 'Preparing a short-lived download link…';
+                    try {
+                        var ticket = await request('Siphon/Items/' + encodeURIComponent(result.ItemId) + '/DownloadTicket', 'POST', { MediaSourceId: source.MediaSourceId });
+                        if (expected !== generation || !token || !row.isConnected) return;
+                        var url = new URL(ticket.Url, window.location.href);
+                        if (url.origin !== window.location.origin || !url.pathname.startsWith(root + '/Siphon/')) throw new Error('Unexpected download destination');
+                        var link = node('a', 'Download link', row); link.href = url.href; link.download = ''; link.referrerPolicy = 'no-referrer'; link.rel = 'noreferrer';
+                        link.click(); link.remove();
+                        status.textContent = 'Download requested for this version. Temporary authorization expires ' + stamp(ticket.ExpiresAtUtc) + '.';
+                    } catch (error) { if (expected === generation && token && row.isConnected) status.textContent = errorText(error, 'Download could not start. Refresh sources and retry the chosen version.'); }
+                    finally { download.disabled = false; }
+                });
+                var status = node('p', '', row); status.className = 'help'; status.setAttribute('role', 'status');
+            } else if (source.DownloadUnavailableReason) node('p', source.DownloadUnavailableReason === 'HlsDownloadUnsupported' ? 'HLS playlist — not a downloadable video file. Choose a progressive or P2P version.' : source.DownloadUnavailableReason, row).className = 'help';
+        });
+        if (!result.CanDownload) node('p', 'Downloads are disabled by your Jellyfin permissions. Playback may still be available in the native client.', parent).className = 'help';
+        node('h3', 'Addon outcomes', parent);
+        var outcomes = { Available: 'Sources available', Empty: 'No streams returned', Unsupported: 'Resource or item unsupported', Unavailable: 'Addon unavailable' };
+        var addons = node('ul', undefined, parent); addons.className = 'list';
+        result.Addons.forEach(function (addon) { var row = node('li', undefined, addons); node('strong', addon.Name || 'Addon', row); node('p', (outcomes[addon.Outcome] || 'Outcome unavailable') + ' · ' + addon.ElapsedMilliseconds + ' ms · ' + addon.Accepted + ' accepted', row); Object.keys(addon.Rejected || {}).forEach(function (reason) { node('p', reason + ': ' + addon.Rejected[reason], row).className = 'help'; }); });
+        if (!result.Addons.length) node('li', 'No enabled playback addons were used.', addons);
+        node('p', 'Upstream URLs, headers, addon credentials, torrent hashes and trackers stay on the server. Downloads use a short-lived purpose-scoped link, not your Jellyfin session token.', parent).className = 'help';
+    }
+    get('brandIcon').src = apiUrl('Siphon/Icon'); get('jellyfinLink').href = apiUrl('web/index.html');
+    var today = new Date(); get('calendarFrom').value = today.toISOString().slice(0, 10); get('calendarTo').value = new Date(today.getTime() + 29 * 86400000).toISOString().slice(0, 10);
+    get('loginForm').addEventListener('submit', async function (event) {
+        event.preventDefault(); if (get('loginFields').disabled) return;
+        get('loginFields').disabled = true; message('sessionStatus', 'Signing in to this Jellyfin server…');
+        try {
+            var result = await request('Users/AuthenticateByName', 'POST', { Username: get('username').value.trim(), Pw: get('password').value });
+            if (!result || !result.AccessToken || !result.User) throw new Error('Invalid sign-in response');
+            token = result.AccessToken; currentUser = result.User; serverId = result.ServerId; generation++;
+            get('password').value = ''; get('signIn').hidden = true; get('authenticated').hidden = false; get('signOut').hidden = false;
+            get('account').textContent = 'Signed in as ' + currentUser.Name + ' · personal settings only'; message('sessionStatus', ''); selectPanel('preferencesPanel');
+        } catch (error) { get('password').value = ''; message('sessionStatus', error.status === 401 || error.status === 403 ? 'Sign-in was not accepted. Check your username, password and account access.' : 'This server could not complete sign-in. Check the connection and try again.', true); }
+        finally { get('loginFields').disabled = false; }
+    });
+    get('signOut').addEventListener('click', async function () {
+        if (preferencesDirty && !window.confirm('Discard your unsaved personal preferences and sign out of this portal?')) return;
+        var logout = request('Sessions/Logout', 'POST'); endSession('Signed out of the portal.');
+        try { await logout; } catch (_) { message('sessionStatus', 'Local portal session cleared. The server could not confirm token revocation.'); }
+    });
+    tabs.forEach(function (tab, index) { tab.addEventListener('click', function () { selectPanel(tab.getAttribute('aria-controls')); }); tab.addEventListener('keydown', function (event) { var target = event.key === 'ArrowRight' ? (index + 1) % tabs.length : event.key === 'ArrowLeft' ? (index + tabs.length - 1) % tabs.length : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : -1; if (target >= 0) { event.preventDefault(); selectPanel(tabs[target].getAttribute('aria-controls'), true); } }); });
+    get('preferencesForm').addEventListener('input', function () { preferencesDirty = true; preferenceState(); });
+    get('preferencesForm').addEventListener('submit', savePreferences);
+    get('reloadPreferences').addEventListener('click', function () { if (!preferencesDirty || window.confirm('Discard your unsaved personal changes and reload?')) loadPreferences(); });
+    get('preferencesRetry').addEventListener('click', loadPreferences);
+    get('calendarForm').addEventListener('submit', function (event) { event.preventDefault(); loadCalendar(); });
+    get('calendarCancel').addEventListener('click', function () { cancel('calendar', 'calendarStatus'); get('calendarLoad').disabled = false; get('calendarCancel').hidden = true; get('calendarList').setAttribute('aria-busy', 'false'); });
+    get('notificationsLoad').addEventListener('click', loadNotifications);
+    get('itemSearchForm').addEventListener('submit', function (event) { event.preventDefault(); searchItems(0); });
+    get('itemSearch').addEventListener('input', function () {
+        cancel('items', 'itemSearchStatus', 'Choose Search Jellyfin to submit this title.');
+        get('itemSearchList').replaceChildren(); get('itemSearchList').setAttribute('aria-busy', 'false');
+        get('itemPrevious').hidden = true; get('itemNext').hidden = true;
+        get('itemSearchSubmit').disabled = false; get('itemSearchCancel').hidden = true;
+    });
+    get('itemSearchCancel').addEventListener('click', function () { cancel('items', 'itemSearchStatus'); get('itemSearchSubmit').disabled = false; get('itemSearchCancel').hidden = true; get('itemSearchList').setAttribute('aria-busy', 'false'); });
+    get('itemPrevious').addEventListener('click', function () { searchItems(Math.max(0, itemOffset - 25)); });
+    get('itemNext').addEventListener('click', function () { searchItems(itemOffset + 25); });
+    get('sourcesForm').addEventListener('submit', function (event) { event.preventDefault(); loadSources(false); });
+    get('sourceItem').addEventListener('input', function () {
+        cancel('sources', 'sourcesStatus', 'Choose Diagnose my sources for this item.');
+        get('sourceResults').replaceChildren(); get('sourceResults').setAttribute('aria-busy', 'false');
+        get('sourcesLoad').disabled = false; get('sourcesRefresh').disabled = false; get('sourcesCancel').hidden = true;
+    });
+    get('sourcesRefresh').addEventListener('click', function () { loadSources(true); });
+    get('sourcesCancel').addEventListener('click', function () { cancel('sources', 'sourcesStatus', 'View request cancelled. A server-side refresh may still finish; late results are ignored.'); get('sourcesLoad').disabled = false; get('sourcesRefresh').disabled = false; get('sourcesCancel').hidden = true; get('sourceResults').setAttribute('aria-busy', 'false'); });
+    window.addEventListener('beforeunload', function (event) { if (preferencesDirty) { event.preventDefault(); event.returnValue = ''; } });
+    window.addEventListener('pagehide', function () { if (token) endSession('Portal session cleared. Sign in again to continue.'); });
+}());
+</script>
+</body>
+</html>

@@ -6,9 +6,14 @@ namespace Jellyfin.Plugin.Siphon.Infrastructure;
 
 public sealed class SiphonStateStore : ISiphonStateStore, IDisposable
 {
+    internal const int MaximumItems = 100_000;
     private readonly string _path;
     private readonly SemaphoreSlim _writer = new(1, 1);
     private Snapshot _snapshot;
+    private long _revision;
+
+    /// <summary>Process-local commit revision for consumers caching immutable snapshots.</summary>
+    public long Revision => Interlocked.Read(ref _revision);
     private static readonly StringComparer PathComparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 
     public SiphonStateStore(SiphonPaths paths)
@@ -93,6 +98,7 @@ public sealed class SiphonStateStore : ISiphonStateStore, IDisposable
             File.Move(temporary, _path, overwrite: true);
             // Cancellation after the commit point must not leave memory behind durable state.
             Volatile.Write(ref _snapshot, next);
+            Interlocked.Increment(ref _revision);
         }
         finally
         {
@@ -112,6 +118,8 @@ public sealed class SiphonStateStore : ISiphonStateStore, IDisposable
 
     private static Snapshot CreateSnapshot(IReadOnlyList<ManagedItem> source)
     {
+        if (source.Count > MaximumItems)
+            throw new InvalidOperationException("Siphon is limited to 100,000 managed items.");
         var items = new ManagedItem[source.Count];
         var keys = new Dictionary<string, ManagedItem>(source.Count, StringComparer.Ordinal);
         var paths = new Dictionary<string, ManagedItem>(source.Count, PathComparer);
@@ -148,6 +156,7 @@ public sealed class SiphonStateStore : ISiphonStateStore, IDisposable
 
     private static ManagedItem Clone(ManagedItem item) => item with
     {
+        MetadataProvenance = Metadata.MetadataProvenance.Clone(item.MetadataProvenance),
         Owners = (string[])item.Owners.Clone(),
         MissingOwners = (string[])item.MissingOwners.Clone(),
         Genres = (string[])item.Genres.Clone(),

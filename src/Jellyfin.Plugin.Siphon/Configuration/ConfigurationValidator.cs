@@ -21,6 +21,10 @@ internal static class ConfigurationValidator
             throw new ArgumentException("PublicBaseUrl must be an HTTP(S) server URL without credentials, query or fragment.");
         }
 
+        if (config.MetadataAddonId is null || config.MetadataAddonId.Length > 32)
+            throw new ArgumentException("Choose a configured metadata addon, or automatic selection.");
+        var useAddonMetadata = config.MetadataAddonId.Length > 0;
+
         foreach (var credential in new[] { config.TmdbReadAccessToken, config.TvdbApiKey, config.FanartApiKey, config.MdbListApiKey, config.TvdbSubscriberPin })
         {
             if (credential is null || credential.Length > 4096 || credential.Any(char.IsControl))
@@ -41,14 +45,14 @@ internal static class ConfigurationValidator
             throw new ArgumentException("Choose a supported metadata update mode and distinct metadata fields.");
         }
         if ((config.EnableTmdbMetadata && string.IsNullOrWhiteSpace(config.TmdbReadAccessToken))
-            || (config.EnableTvdbMetadata && string.IsNullOrWhiteSpace(config.TvdbApiKey))
+            || (!useAddonMetadata && ((config.EnableTvdbMetadata && string.IsNullOrWhiteSpace(config.TvdbApiKey))
             || (config.EnableFanartMetadata && string.IsNullOrWhiteSpace(config.FanartApiKey))
-            || (config.EnableMdbListMetadata && string.IsNullOrWhiteSpace(config.MdbListApiKey)))
+            || (config.EnableMdbListMetadata && string.IsNullOrWhiteSpace(config.MdbListApiKey)))))
         {
             throw new ArgumentException("Enabled metadata providers require their corresponding credential.");
         }
         if (config.MetadataUpdateMode == "RefreshSelected" && config.MetadataRefreshFields.Length == 0
-            && (config.EnableTmdbMetadata || config.EnableTvdbMetadata || config.EnableFanartMetadata || config.EnableMdbListMetadata))
+            && (useAddonMetadata || config.EnableTmdbMetadata || config.EnableTvdbMetadata || config.EnableFanartMetadata || config.EnableMdbListMetadata))
         {
             throw new ArgumentException("Choose at least one metadata field for enabled providers to refresh.");
         }
@@ -68,11 +72,39 @@ internal static class ConfigurationValidator
             throw new ArgumentException("Item limits must be 1-10000, timeout 1-120 seconds, and concurrency 1-16.");
         }
 
+        if (config.DefaultSearchMode is not ("All" or "Local") || config.UnreleasedBufferDays is < 0 or > 30)
+            throw new ArgumentException("Choose All or Local search and a release buffer of 0-30 days.");
+        if (config.IntroDbCacheHours is < 1 or > 168 || config.IntroDbSegments is null
+            || config.IntroDbSegments.Length > 4
+            || config.IntroDbSegments.Any(segment => segment is not ("intro" or "recap" or "outro" or "post-credits"))
+            || config.IntroDbSegments.Distinct(StringComparer.Ordinal).Count() != config.IntroDbSegments.Length)
+            throw new ArgumentException("IntroDB requires distinct supported segment types and a cache lifetime of 1-168 hours.");
         if (config.P2pMaxConcurrentStreams is < 1 or > 16 || config.P2pMaxCacheMiB is < 128 or > 1048576
             || config.P2pDownloadLimitKiB is < 1 or > 1048576 || config.P2pUploadLimitKiB is < 1 or > 262144
             || config.P2pIdleMinutes is < 1 or > 120 || config.P2pMetadataTimeoutSeconds is < 10 or > 600
             || (config.P2pListenPort != 0 && (config.P2pListenPort < 1024 || config.P2pListenPort > 65535 - config.P2pMaxConcurrentStreams + 1)))
             throw new ArgumentException("P2P requires bounded concurrency (1-16), cache (128-1048576 MiB), positive rate limits, idle cleanup (1-120 minutes), metadata timeout (10-600 seconds), and an available listen-port range.");
+        if (config.UserProfiles is null || config.UserProfiles.Length > 256)
+            throw new ArgumentException("At most 256 user playback profiles are supported.");
+        var profileUsers = new HashSet<Guid>();
+        var profileAddonCount = 0;
+        foreach (var profile in config.UserProfiles)
+        {
+            if (profile is null || profile.UserId == Guid.Empty || !profileUsers.Add(profile.UserId)
+                || profile.Addons is null || profile.Addons.Length > 16)
+                throw new ArgumentException("Playback profiles require distinct users and at most 16 addons each.");
+            profileAddonCount += profile.Addons.Length;
+            if (profileAddonCount > 256)
+                throw new ArgumentException("At most 256 user-specific addon installations are supported in total.");
+            var installationIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var addon in profile.Addons)
+            {
+                if (addon is null || !Guid.TryParseExact(addon.Id, "N", out _) || !installationIds.Add(addon.Id)
+                    || addon.Catalogs is null || addon.Catalogs.Count != 0)
+                    throw new ArgumentException("Profile addons require unique installation IDs and no private catalog subscriptions.");
+                ValidateManifest(addon);
+            }
+        }
 
         if (config.Addons is null || config.Addons.Length > 64 || config.AllowedPrivateHosts is null || config.AllowedPrivateHosts.Count > 64)
         {
@@ -95,19 +127,7 @@ internal static class ConfigurationValidator
                 throw new ArgumentException("Addon installation IDs must be unique GUIDs.");
             }
 
-            try
-            {
-                if (addon.ManifestUrl is null || addon.ManifestUrl.Length > 16384)
-                {
-                    throw new ArgumentException("The addon manifest URL is missing or too long.");
-                }
-
-                _ = Protocol.StremioClient.ManifestUri(addon.ManifestUrl);
-            }
-            catch (Protocol.StremioException)
-            {
-                throw new ArgumentException("Use an HTTP(S) or stremio:// addon manifest URL.");
-            }
+            ValidateManifest(addon);
 
             if (addon.Catalogs is null || addon.Catalogs.Count > 128)
             {
@@ -120,12 +140,31 @@ internal static class ConfigurationValidator
                 if (catalog is null || !Guid.TryParseExact(catalog.Key, "N", out _) || !catalogKeys.Add(catalog.Key)
                     || string.IsNullOrWhiteSpace(catalog.Id) || string.IsNullOrWhiteSpace(catalog.Type)
                     || catalog.MaxItems is < 1 or > 10000 || catalog.Extras is null || catalog.Extras.Count > 32
+                    || catalog.Presentation is not ("Library" or "Collection" or "Both")
                     || catalog.Extras.Any(e => e is null || string.IsNullOrWhiteSpace(e.Name) || e.Name == "skip" || e.Value is null || e.Value.Length > 16384)
                     || catalog.Extras.Select(e => e.Name).Distinct(StringComparer.Ordinal).Count() != catalog.Extras.Count)
                 {
                     throw new ArgumentException("Catalog subscriptions require unique keys, type and ID, valid item limits, and unique extras excluding skip.");
                 }
             }
+        }
+        if (useAddonMetadata && (!Guid.TryParseExact(config.MetadataAddonId, "N", out _)
+            || !config.Addons.Any(addon => addon.Enabled && addon.Id == config.MetadataAddonId)))
+            throw new ArgumentException("The selected metadata addon must be configured and enabled. Choose a replacement or automatic selection before removing it.");
+    }
+
+    private static void ValidateManifest(ConfiguredAddon addon)
+    {
+        if (addon.ManifestUrl is null || addon.ManifestUrl.Length > 16384
+            || addon.DisplayName is null || addon.DisplayName.Length > 512 || addon.DisplayName.Any(char.IsControl))
+            throw new ArgumentException("Addon URLs must be at most 16384 characters and names at most 512 characters without controls.");
+        try
+        {
+            _ = Protocol.StremioClient.ManifestUri(addon.ManifestUrl);
+        }
+        catch (Protocol.StremioException)
+        {
+            throw new ArgumentException("Use an HTTP(S) or stremio:// addon manifest URL.");
         }
     }
 

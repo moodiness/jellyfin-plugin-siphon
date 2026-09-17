@@ -1,27 +1,30 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Jellyfin.Plugin.Siphon.Configuration;
+using Jellyfin.Plugin.Siphon.Identity;
 using Jellyfin.Plugin.Siphon.Infrastructure;
 
 namespace Jellyfin.Plugin.Siphon.Metadata;
 
 public sealed record MetadataProviderResult(string Provider, bool Success, string Code, long ElapsedMilliseconds);
 public sealed record MetadataProviderStatus(string Provider, bool Configured, bool Enabled, MetadataProviderResult? LastResult,
-    DateTimeOffset? PausedUntilUtc = null, string? PauseReason = null, int ConsecutiveFailures = 0);
+    DateTimeOffset? PausedUntilUtc = null, string? PauseReason = null, int ConsecutiveFailures = 0,
+    long? QuotaLimit = null, long? QuotaRemaining = null, DateTimeOffset? QuotaResetUtc = null, DateTimeOffset? QuotaObservedAtUtc = null);
 
 /// <summary>Fixed documented API origins, bounded typed responses and credential-free outcomes.</summary>
 public sealed class MetadataProviderClient(ConfigurationAccessor configuration, ISafeHttpClient http, SafeHttpClient post,
-    MetadataResponseCache? cache = null, TimeProvider? timeProvider = null) : IDisposable
+    MetadataResponseCache? cache = null, TimeProvider? timeProvider = null, MetadataQuotaStore? quotas = null) : IDisposable
 {
     public static readonly IReadOnlyList<string> ProviderNames = Array.AsReadOnly(new[] { "Tmdb", "Tvdb", "Fanart", "MdbList" });
     private static readonly JsonSerializerOptions Snake = new() { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower, MaxDepth = 48, RespectNullableAnnotations = true };
     private static readonly JsonSerializerOptions Camel = new() { PropertyNameCaseInsensitive = true, MaxDepth = 48, RespectNullableAnnotations = true };
     private readonly ConcurrentDictionary<string, MetadataProviderResult> _results = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, RequestGate> _gates = ProviderNames.ToDictionary(name => name, _ => new RequestGate(), StringComparer.Ordinal);
+    private readonly Dictionary<string, RequestGate> _gates = ProviderNames.ToDictionary(name => name, name => new RequestGate(name), StringComparer.Ordinal);
     private readonly AsyncLocal<RequestScope?> _scope = new();
     private readonly AsyncLocal<bool> _probe = new();
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
@@ -30,23 +33,10 @@ public sealed class MetadataProviderClient(ConfigurationAccessor configuration, 
     private string? _tvdbCredential;
     private DateTimeOffset _tokenExpires;
 
-    internal IDisposable BeginScope(PluginConfiguration config, string? language, string identity, string episodeSet, bool force, SyncDiagnostics? diagnostics)
+    internal IDisposable BeginScope(PluginConfiguration config, bool force, SyncDiagnostics? diagnostics)
     {
         var previous = _scope.Value;
-        var policy = Digest(JsonSerializer.Serialize(new
-        {
-            Schema = 1,
-            language,
-            identity,
-            episodeSet,
-            config.MetadataUpdateMode,
-            Fields = config.MetadataRefreshFields.Order(StringComparer.Ordinal),
-            config.EnableTmdbMetadata,
-            config.EnableTvdbMetadata,
-            config.EnableFanartMetadata,
-            config.EnableMdbListMetadata
-        }));
-        _scope.Value = new(config, policy, force, diagnostics);
+        _scope.Value = new(config, force, diagnostics);
         return new ScopeLease(() => _scope.Value = previous);
     }
 
@@ -58,9 +48,15 @@ public sealed class MetadataProviderClient(ConfigurationAccessor configuration, 
             var gate = Gate(name, config);
             lock (gate)
             {
-                var paused = gate.BlockedUntil > _clock.GetUtcNow();
+                var now = _clock.GetUtcNow();
+                var quota = gate.Quota;
+                var limited = quota.PausedUntilUtc > now;
+                var until = limited ? quota.PausedUntilUtc : gate.BlockedUntil;
                 return new MetadataProviderStatus(name, !string.IsNullOrWhiteSpace(Key(config, name)), Enabled(config, name),
-                    _results.GetValueOrDefault(name), paused ? gate.BlockedUntil : null, paused ? gate.BlockCode : null, gate.Failures);
+                    _results.GetValueOrDefault(name), until > now ? until : null,
+                    limited ? "RateLimited" : until > now ? gate.BlockCode : null, gate.Failures,
+                    quota.Limit, quota.ResetUtc <= now || quota.ObservedAtUtc > now ? null : quota.Remaining,
+                    quota.ResetUtc, quota.ObservedAtUtc);
             }
         }).ToArray();
     }
@@ -122,49 +118,69 @@ public sealed class MetadataProviderClient(ConfigurationAccessor configuration, 
     }
 
     internal async Task<T> GetAsync<T>(string provider, string url, IReadOnlyDictionary<string, string>? headers, bool snake, CancellationToken ct,
-        Func<T, bool> valid, Func<Task<IReadOnlyDictionary<string, string>>>? authorize = null) where T : class
+        Func<T, bool> valid, Func<Task<IReadOnlyDictionary<string, string>>>? authorize = null, string? revision = null) where T : class
     {
         ct.ThrowIfCancellationRequested();
         var scope = _scope.Value;
         var config = scope?.Config ?? configuration.Current;
         var credential = Credential(config, provider);
         var gate = Gate(provider, config);
-        var key = Digest(JsonSerializer.Serialize(new { provider, url, Type = typeof(T).FullName, Policy = scope?.Policy, credential }));
-        if (cache is not null && scope is { Force: false })
-        {
-            var saved = await cache.ReadAsync<T>(key, _clock.GetUtcNow(), TimeSpan.FromHours(Math.Clamp(config.MetadataCacheHours, 1, 168)), ct).ConfigureAwait(false);
-            if (saved is not null && valid(saved))
-            {
-                ct.ThrowIfCancellationRequested();
-                scope.Diagnostics?.RecordProviderRequest(provider, true);
-                return saved;
-            }
-        }
-        CheckPause(gate);
+        var key = cache is not null && scope is not null
+            ? Digest(JsonSerializer.Serialize(new { Schema = 2, provider, url, Type = typeof(T).FullName, snake, revision, credential }))
+            : null;
+        if (await ReadCachedAsync(key, scope, provider, valid, ct).ConfigureAwait(false) is { } saved) return saved;
+        CheckPause(gate, credential);
         if (authorize is not null) headers = await authorize().ConfigureAwait(false);
         await gate.Mutex.WaitAsync(ct).ConfigureAwait(false);
+        var requested = false;
         try
         {
-            CheckPause(gate);
+            // Another title may have populated this same response while we waited for the provider.
+            if (await ReadCachedAsync(key, scope, provider, valid, ct).ConfigureAwait(false) is { } shared) return shared;
+            CheckPause(gate, credential);
             await PaceAsync(gate, ct).ConfigureAwait(false);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(config.AddonTimeoutSeconds, 1, 120)));
             try
             {
                 scope?.Diagnostics?.RecordProviderRequest(provider, false);
+                requested = true;
                 using var response = await http.SendAsync(new Uri(url), HttpMethod.Get, headers, timeout.Token).ConfigureAwait(false);
                 CheckStatus(response, gate, credential);
                 var value = await ReadAsync<T>(response, snake, timeout.Token).ConfigureAwait(false);
                 if (!valid(value)) throw new ProviderFailure("InvalidResponse");
                 ct.ThrowIfCancellationRequested();
                 Recover(gate, credential);
-                if (cache is not null && scope is not null) await cache.WriteAsync(key, value, _clock.GetUtcNow(), ct).ConfigureAwait(false);
+                var observedAt = _clock.GetUtcNow();
+                var cached = cache is not null && scope is not null && key is not null
+                    && await cache.WriteAsync(key, value, observedAt, ct).ConfigureAwait(false);
+                if (cached) scope!.Refreshed?.TryAdd(key!, 0);
+                MetadataProvenance.Observe(value, new MetadataObservation(provider, null, observedAt,
+                    cached ? observedAt : null, cached ? observedAt.AddHours(Math.Clamp(config.MetadataCacheHours, 1, 168)) : null));
                 return value;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex) { ct.ThrowIfCancellationRequested(); Fail(gate, credential, FailureCode(ex)); throw; }
         }
-        finally { gate.NextRequest = _clock.GetUtcNow().AddMilliseconds(150); gate.Mutex.Release(); }
+        finally
+        {
+            if (requested) gate.NextRequest = _clock.GetUtcNow().AddMilliseconds(150);
+            gate.Mutex.Release();
+        }
+    }
+
+    private async Task<T?> ReadCachedAsync<T>(string? key, RequestScope? scope, string provider, Func<T, bool> valid, CancellationToken ct) where T : class
+    {
+        if (cache is null || key is null || scope is null || (scope.Force && !scope.Refreshed!.ContainsKey(key))) return null;
+        var now = _clock.GetUtcNow();
+        var lifetime = TimeSpan.FromHours(Math.Clamp(scope.Config.MetadataCacheHours, 1, 168));
+        var saved = await cache.ReadObservedAsync<T>(key, now, lifetime, ct).ConfigureAwait(false);
+        if (saved is null || !valid(saved.Value.Value)) return null;
+        ct.ThrowIfCancellationRequested();
+        scope.Diagnostics?.RecordProviderRequest(provider, true);
+        MetadataProvenance.Observe(saved.Value.Value, new MetadataObservation(provider, null, saved.Value.CreatedAt,
+            saved.Value.CreatedAt, saved.Value.CreatedAt + lifetime));
+        return saved.Value.Value;
     }
 
     internal async Task<string> TmdbImageBaseAsync(PluginConfiguration config, CancellationToken ct)
@@ -185,7 +201,7 @@ public sealed class MetadataProviderClient(ConfigurationAccessor configuration, 
             await gate.Mutex.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                CheckPause(gate);
+                CheckPause(gate, credential);
                 await PaceAsync(gate, ct).ConfigureAwait(false);
                 var payload = new Dictionary<string, string> { ["apikey"] = config.TvdbApiKey.Trim() };
                 if (!string.IsNullOrWhiteSpace(config.TvdbSubscriberPin)) payload["pin"] = config.TvdbSubscriberPin.Trim();
@@ -219,6 +235,7 @@ public sealed class MetadataProviderClient(ConfigurationAccessor configuration, 
             var response = await GetAsync<TvdbEnvelope<T>>("Tvdb", "https://api4.thetvdb.com/v4/" + path, null, false, ct,
                 value => value.Status == "success" && value.Data is not null && valid(value.Data),
                 async () => Bearer(await TvdbTokenAsync(config, false, ct).ConfigureAwait(false))).ConfigureAwait(false);
+            MetadataProvenance.Observe(response.Data!, MetadataProvenance.Observation(response));
             return response.Data!;
         }
         catch (ProviderFailure ex) when (ex.Code == "AuthenticationFailed") { _tvdbToken = null; throw; }
@@ -243,24 +260,50 @@ public sealed class MetadataProviderClient(ConfigurationAccessor configuration, 
 
     private void CheckStatus(HttpResponseMessage response, RequestGate gate, string credential)
     {
-        if (response.StatusCode == HttpStatusCode.TooManyRequests)
+        var now = _clock.GetUtcNow();
+        var reportedRemaining = HeaderNumber(response, "X-RateLimit-Remaining");
+        var limit = HeaderNumber(response, "X-RateLimit-Limit");
+        if (limit < 0) limit = null;
+        var remaining = reportedRemaining;
+        if (remaining < 0 || remaining > limit) remaining = null;
+        DateTimeOffset? reset = null;
+        if (HeaderNumber(response, "X-RateLimit-Reset") is { } seconds && seconds >= 0)
         {
-            var now = _clock.GetUtcNow();
-            var until = response.Headers.RetryAfter?.Date ?? now.Add(response.Headers.RetryAfter?.Delta ?? TimeSpan.FromMinutes(5));
+            try { reset = DateTimeOffset.FromUnixTimeSeconds(seconds); }
+            catch (ArgumentOutOfRangeException) { }
+        }
+        DateTimeOffset deadline = default;
+        if (response.StatusCode == HttpStatusCode.TooManyRequests || reportedRemaining <= 0)
+        {
+            var retry = response.Headers.RetryAfter;
+            var until = retry?.Date;
+            if (retry?.Delta is { } delta) until = delta < DateTimeOffset.MaxValue - now ? now.Add(delta) : DateTimeOffset.MaxValue;
+            // A short burst retry must not override an exhausted daily budget's later reset.
+            if (reset > now && (reportedRemaining <= 0 || (reportedRemaining is null && until is null)) && (until is null || reset > until)) until = reset;
+            deadline = until ?? now.AddMinutes(5);
+            if (deadline <= now) deadline = now.AddSeconds(1);
+        }
+        // Keep a single observation, not a mixture of numbers reported at different times.
+        // A response with no usable quota fields must not make an older observation appear fresh.
+        var hasObservation = limit.HasValue || remaining.HasValue || reset.HasValue;
+        if (hasObservation || deadline != default)
+        {
+            var observation = new MetadataQuotaState(deadline, limit, remaining, reset, hasObservation ? now : null);
+            var saved = quotas?.Record(gate.Provider, credential, observation);
             lock (gate)
             {
-                if (gate.Credential == credential)
-                {
-                    gate.BlockCode = "RateLimited";
-                    gate.BlockedUntil = until > now ? until : now.AddSeconds(1);
-                }
+                if (gate.Credential == credential) gate.Quota = saved ?? gate.Quota.Merge(observation);
             }
-            throw new ProviderFailure("RateLimited");
         }
+        if (response.StatusCode == HttpStatusCode.TooManyRequests) throw new ProviderFailure("RateLimited");
         if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden) throw new ProviderFailure("AuthenticationFailed");
         if (response.StatusCode == HttpStatusCode.NotFound) throw new ProviderFailure("NotFound");
         if (!response.IsSuccessStatusCode) throw new ProviderFailure("ProviderUnavailable");
     }
+
+    private static long? HeaderNumber(HttpResponseMessage response, string name)
+        => response.Headers.TryGetValues(name, out var values)
+            && long.TryParse(values.FirstOrDefault(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) ? value : null;
 
     private RequestGate Gate(string provider, PluginConfiguration config)
     {
@@ -273,20 +316,25 @@ public sealed class MetadataProviderClient(ConfigurationAccessor configuration, 
                 gate.Credential = credential;
                 gate.Failures = 0;
                 gate.BlockedUntil = default;
+                gate.Quota = MetadataQuotaState.Empty;
                 gate.BlockCode = "ProviderUnavailable";
                 _results.TryRemove(provider, out _);
             }
+            // Clean reads are memory-only; a pending failed quota write can retry without a provider request.
+            if (quotas is not null) gate.Quota = quotas.Get(provider, credential);
         }
         return gate;
     }
 
-    private void CheckPause(RequestGate gate)
+    private void CheckPause(RequestGate gate, string credential)
     {
         lock (gate)
         {
             // An administrator may probe recovery, but never circumvent a provider's quota deadline.
-            if (gate.BlockedUntil > _clock.GetUtcNow() && (!_probe.Value || gate.BlockCode == "RateLimited"))
-                throw new ProviderFailure(gate.BlockCode);
+            var now = _clock.GetUtcNow();
+            var until = (gate.Credential == credential ? gate.Quota : quotas?.Get(gate.Provider, credential))?.PausedUntilUtc ?? default;
+            if (until > now) throw new ProviderFailure("RateLimited");
+            if (gate.Credential == credential && gate.BlockedUntil > now && !_probe.Value) throw new ProviderFailure(gate.BlockCode);
         }
     }
     private async Task PaceAsync(RequestGate gate, CancellationToken ct)
@@ -330,20 +378,26 @@ public sealed class MetadataProviderClient(ConfigurationAccessor configuration, 
     internal static Dictionary<string, string> Bearer(string token) => new() { ["Authorization"] = "Bearer " + token.Trim() };
     internal static string FanartUrl(PluginConfiguration config, string path) => "https://webservice.fanart.tv/v3.2/" + path + "?api_key=" + Uri.EscapeDataString(config.FanartApiKey.Trim());
     internal static string MdbUrl(PluginConfiguration config, string path) => "https://api.mdblist.com/" + path + "?apikey=" + Uri.EscapeDataString(config.MdbListApiKey.Trim());
-    internal static bool Enabled(PluginConfiguration config, string provider) => provider switch { "Tmdb" => config.EnableTmdbMetadata, "Tvdb" => config.EnableTvdbMetadata, "Fanart" => config.EnableFanartMetadata, "MdbList" => config.EnableMdbListMetadata, _ => false };
+    internal static bool Enabled(PluginConfiguration config, string provider) => (provider == "Tmdb" || string.IsNullOrEmpty(config.MetadataAddonId))
+        && (provider switch { "Tmdb" => config.EnableTmdbMetadata, "Tvdb" => config.EnableTvdbMetadata, "Fanart" => config.EnableFanartMetadata, "MdbList" => config.EnableMdbListMetadata, _ => false });
     private static string Key(PluginConfiguration config, string provider) => provider switch { "Tmdb" => config.TmdbReadAccessToken, "Tvdb" => config.TvdbApiKey, "Fanart" => config.FanartApiKey, "MdbList" => config.MdbListApiKey, _ => "" };
     private static bool ValidImageBase(string? value) => Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Scheme == "https" && uri.Host == "image.tmdb.org" && string.IsNullOrEmpty(uri.Query) && string.IsNullOrEmpty(uri.UserInfo);
     public void Dispose() { _tokenGate.Dispose(); foreach (var gate in _gates.Values) gate.Mutex.Dispose(); }
-    private sealed class RequestGate
+    private sealed class RequestGate(string provider)
     {
+        public string Provider { get; } = provider;
         public SemaphoreSlim Mutex { get; } = new(1, 1);
         public DateTimeOffset NextRequest { get; set; }
         public DateTimeOffset BlockedUntil { get; set; }
+        public MetadataQuotaState Quota { get; set; } = MetadataQuotaState.Empty;
         public string BlockCode { get; set; } = "ProviderUnavailable";
         public string? Credential { get; set; }
         public int Failures { get; set; }
     }
-    private sealed record RequestScope(PluginConfiguration Config, string Policy, bool Force, SyncDiagnostics? Diagnostics);
+    private sealed record RequestScope(PluginConfiguration Config, bool Force, SyncDiagnostics? Diagnostics)
+    {
+        public ConcurrentDictionary<string, byte>? Refreshed { get; } = Force ? new(StringComparer.Ordinal) : null;
+    }
     private sealed class ScopeLease(Action restore) : IDisposable { public void Dispose() => restore(); }
     internal sealed class ProviderFailure(string code) : Exception(code) { public string Code { get; } = code; }
 }

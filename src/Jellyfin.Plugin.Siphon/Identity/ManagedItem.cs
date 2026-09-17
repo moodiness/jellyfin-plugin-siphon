@@ -1,3 +1,6 @@
+using System.Text.Json.Serialization;
+using Jellyfin.Plugin.Siphon.Metadata;
+
 namespace Jellyfin.Plugin.Siphon.Identity;
 
 /// <summary>A playable movie or episode owned by Siphon, independent of expiring URLs.</summary>
@@ -20,6 +23,13 @@ public sealed record ManagedItem
     public DateTimeOffset? MissingSinceUtc { get; init; }
     // Keep historical ownership: absence requires a complete snapshot from every owner.
     public string[] MissingOwners { get; init; } = [];
+    // Search discoveries are persisted for native ID lookup, but are not subscriptions.
+    public bool IsSearchPreview { get; init; }
+    public DateTimeOffset? PreviewExpiresUtc { get; init; }
+    public string? SearchAddonId { get; init; }
+    public string? SearchResourceType { get; init; }
+    // Null means the lightweight search result has not loaded detail metadata yet.
+    public string? SearchMetadataAddonId { get; init; }
     public string? Description { get; init; }
     public string? SeriesDescription { get; init; }
     public string? PosterUrl { get; init; }
@@ -45,6 +55,9 @@ public sealed record ManagedItem
     public string[] EpisodeProductionLocations { get; init; } = [];
     public ManagedPerson[] EpisodePeople { get; init; } = [];
     public StreamIdentity[] StreamIdentities { get; init; } = [];
+    // Current field origins only, never raw responses or an unbounded change history.
+    [JsonConverter(typeof(MetadataProvenanceJsonConverter))]
+    public Dictionary<string, MetadataFieldProvenance> MetadataProvenance { get; init; } = new(StringComparer.Ordinal);
 }
 
 /// <summary>Exact addon-provided resource identity, never inferred from Jellyfin numbering.</summary>
@@ -52,3 +65,8 @@ public sealed record StreamIdentity(string Type, string VideoId);
 
 /// <summary>An addon-provided credit, kept separate for a series and its episodes.</summary>
 public sealed record ManagedPerson(string Name, string Type, string? Role = null, string? PhotoUrl = null);
+
+public sealed record MetadataObservation(string Origin, string? InstallationId, DateTimeOffset? ObservedAtUtc,
+    DateTimeOffset? CacheCreatedAtUtc = null, DateTimeOffset? CacheExpiresAtUtc = null);
+
+public sealed record MetadataFieldProvenance(MetadataObservation[] Sources, string? PreservationReason = null);

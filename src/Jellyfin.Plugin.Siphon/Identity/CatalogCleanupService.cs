@@ -14,6 +14,7 @@ public sealed class CatalogCleanupService(
     ISiphonStateStore state,
     LibraryMaterializer materializer,
     IDbContextFactory<JellyfinDbContext> database,
+    Collections.CollectionRetentionService collections,
     TimeProvider? timeProvider = null)
 {
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
@@ -99,7 +100,7 @@ public sealed class CatalogCleanupService(
             try
             {
                 await state.SaveAsync(retained, ct).ConfigureAwait(false);
-                await materializer.ApplyAsync(retained, ct).ConfigureAwait(false);
+                await materializer.ApplyAsync(retained, ct, previousItems: items).ConfigureAwait(false);
             }
             finally
             {
@@ -138,9 +139,13 @@ public sealed class CatalogCleanupService(
     private async Task<Dictionary<string, string>> GetProtectionsAsync(ManagedItem[] missing, PluginConfiguration config, CancellationToken ct)
     {
         var result = new Dictionary<string, string>(StringComparer.Ordinal);
-        if (missing.Length == 0 || (!config.ProtectFavorites && !config.ProtectResumePositions)) return result;
+        if (missing.Length == 0) return result;
         try
         {
+            var membership = collections.GetProtectedContentKeys();
+            foreach (var item in missing)
+                if (membership.Contains(item.ContentKey)) result[item.Key] = "CollectionOrPlaylist";
+            if (!config.ProtectFavorites && !config.ProtectResumePositions) return result;
             await using var context = await database.CreateDbContextAsync(ct).ConfigureAwait(false);
             var relevantKeys = missing.SelectMany(item => item.Type == "series"
                 ? new[] { item.Key, item.ContentKey, SeasonKey(item) } : new[] { item.Key }).Distinct(StringComparer.Ordinal);
@@ -168,7 +173,7 @@ public sealed class CatalogCleanupService(
             }
             foreach (var item in missing)
             {
-                if (ProtectionReason(item, config, favorites, resume) is { } reason) result[item.Key] = reason;
+                if (!result.ContainsKey(item.Key) && ProtectionReason(item, config, favorites, resume) is { } reason) result[item.Key] = reason;
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
@@ -190,7 +195,7 @@ public sealed class CatalogCleanupService(
     }
 
     private static string SeasonKey(ManagedItem item) => item.ContentKey + ":season:" + (item.Season ?? 0).ToString(CultureInfo.InvariantCulture);
-    private static bool IsProtectionReason(string reason) => reason is "Favorite" or "ResumePosition" or "ProtectionUnavailable" or "SynchronizationUnconfirmed";
+    private static bool IsProtectionReason(string reason) => reason is "Favorite" or "ResumePosition" or "CollectionOrPlaylist" or "ProtectionUnavailable" or "SynchronizationUnconfirmed";
 
     private string Fingerprint(IReadOnlyList<ManagedItem> items)
     {

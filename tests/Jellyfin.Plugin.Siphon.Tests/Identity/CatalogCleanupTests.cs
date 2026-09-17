@@ -1,7 +1,10 @@
+using System.Reflection;
 using Jellyfin.Database.Implementations;
+using Jellyfin.Plugin.Siphon.Collections;
 using Jellyfin.Plugin.Siphon.Configuration;
 using Jellyfin.Plugin.Siphon.Identity;
 using Jellyfin.Plugin.Siphon.Infrastructure;
+using MediaBrowser.Controller.Library;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
 
@@ -191,7 +194,9 @@ public sealed class CatalogCleanupTests
     };
 
     private static CatalogCleanupService Service(PluginConfiguration config, MemoryState state, Clock? clock = null)
-        => new(new ConfigurationAccessor(() => config), state, null!, new UnavailableDatabase(), clock ?? new Clock(Now));
+        => new(new ConfigurationAccessor(() => config), state, null!, new UnavailableDatabase(),
+            new CollectionRetentionService(DispatchProxy.Create<ILibraryManager, CatalogSyncTests.EmptyLibraryProxy>(), state, null!),
+            clock ?? new Clock(Now));
 
     private sealed class Clock(DateTimeOffset now) : TimeProvider
     {

@@ -26,7 +26,9 @@ internal sealed class TmdbRecord
     public TmdbPerson[] Crew { get; set; } = [];
     public TmdbIds? ExternalIds { get; set; }
     public TmdbRecord[] Episodes { get; set; } = [];
-    public int SeasonNumber { get; set; }
+    public TmdbRecord[] Seasons { get; set; } = [];
+    public int? ShowId { get; set; }
+    public int? SeasonNumber { get; set; }
     public int EpisodeNumber { get; set; }
 }
 internal sealed class NamedValue { public string? Name { get; set; } }
@@ -63,6 +65,7 @@ internal sealed class TvdbRecord
     public TvdbTranslations? Translations { get; set; }
     public TvdbRemoteId[] RemoteIds { get; set; } = [];
     public int SeasonNumber { get; set; }
+    public int? SeriesId { get; set; }
     public int Number { get; set; }
 }
 internal sealed class TvdbRelease { public string? Date { get; set; } }

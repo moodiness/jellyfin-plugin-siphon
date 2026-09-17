@@ -7,4 +7,8 @@ public sealed record ResolvedStream(
     Uri Url,
     IReadOnlyDictionary<string, string> RequestHeaders,
     string? FileName,
-    long? Size);
+    long? Size)
+{
+    public Guid UserId { get; init; }
+    public P2p.P2pSource? P2p { get; init; }
+}

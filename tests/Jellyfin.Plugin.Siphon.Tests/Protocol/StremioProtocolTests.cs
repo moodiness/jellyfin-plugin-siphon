@@ -54,10 +54,10 @@ public sealed class StremioProtocolTests
         Assert.Empty(metas[1].Videos[0].ProviderIds);
     }
     [Fact]
-    public void UnknownSourcesAreSkippedAndHeaderConditionsRemainVisible()
+    public void HttpStreamHeaderConditionsRemainVisible()
     {
         using var json = JsonDocument.Parse("""{"streams":[{"infoHash":"abc"},{"externalUrl":"https://example.org"},{"url":"https://example.org/v","title":"Legacy description","description":"Canonical","behaviorHints":{"proxyHeaders":{"request":{"Authorization":"Bearer secret"},"response":{"X-Test":"yes"}}}}]}""");
-        var stream = Assert.Single(StremioJson.Streams(json.RootElement));
+        var stream = Assert.Single(StremioJson.Streams(json.RootElement), value => value.Url == "https://example.org/v");
         Assert.Equal("Canonical", stream.Description);
         Assert.True(stream.UnsupportedHeaders);
         Assert.Equal("Bearer secret", stream.RequestHeaders["Authorization"]);
@@ -89,7 +89,7 @@ public sealed class StremioProtocolTests
     [Fact]
     public void CanonicalNullIdsDoNotResurrectAliasValues()
     {
-        using var json = JsonDocument.Parse("""{"metas":[{"id":"opaque","type":"movie","name":"Movie","imdb_id":null,"imdbId":"tt1234567","tmdb_id":null,"moviedb_id":42,"ids":{"tvdb":null,"mal":null},"tvdb_id":99,"mal_id":16},{"id":"another","type":"movie","name":"Other","ids":null,"imdb_id":"tt1234567"},{"id":"legacy","type":"movie","name":"Legacy","moviedb_id":42,"mal_id":"16"}]}""");
+        using var json = JsonDocument.Parse("""{"metas":[{"id":"opaque","type":"movie","name":"Movie","imdb_id":null,"imdbId":"tt1234567","_imdbId":"tt1234567","tmdb_id":null,"moviedb_id":42,"_tmdbId":"42","ids":{"tvdb":null,"mal":null},"tvdb_id":99,"mal_id":16,"_tvdbId":"99","_malId":"16"},{"id":"another","type":"movie","name":"Other","ids":null,"imdb_id":"tt1234567","_tmdbId":"42"},{"id":"legacy","type":"movie","name":"Legacy","moviedb_id":42,"mal_id":"16"}]}""");
         var metas = StremioJson.Catalog(json.RootElement).Items;
         Assert.Empty(metas[0].ProviderIds);
         Assert.Empty(metas[1].ProviderIds);
@@ -139,17 +139,108 @@ public sealed class StremioProtocolTests
     }
 
     [Fact]
-    public void MissingSeasonArtworkDoesNotShiftLaterSeasons()
+    public void AioMetadataResponseKeepsParentArtworkCreditsAndOpaqueEpisodeMetadataSeparate()
     {
+        // Producer: cedya77/aiometadata@118e50c8cb0c8d1e85b1f35990032962f631c469
+        // addon/lib/getMeta.js: stampIds, buildTmdbSeriesResponse; addon/utils/parseProps.js: parseCast.
+        // TMDB seasonPosters excludes specials and carries no season numbers; it is not season-indexed.
         using var json = JsonDocument.Parse("""
-            {"id":"show","type":"series","name":"Show","app_extras":{"seasonPosters":[
-              "https://example.org/specials.jpg",null,"https://example.org/season2.jpg",7,"https://example.org/season4.jpg"]}}
+            {"meta":{
+              "id":"tt1234567","type":"series","name":"Example series","imdb_id":"tt1234567",
+              "_tmdbId":"42","_tvdbId":"99","_imdbId":"tt1234567","_malId":"16",
+              "description":"Series plot","poster":"https://example.org/series.jpg",
+              "background":"https://example.org/series-background.jpg","logo":"https://example.org/series-logo.png",
+              "runtime":"44 min","imdbRating":"8.1","status":"Returning Series",
+              "app_extras":{
+                "seasonPosters":["https://example.org/season1.jpg",null,"https://example.org/season4.jpg"],
+                "cast":[{"name":"A. Actor","character":"The narrator","photo":"https://example.org/actor.jpg"}],
+                "directors":[{"name":"A. Director","character":"A. Director","photo":null}],
+                "writers":[{"name":"A. Writer","character":"A. Writer","photo":null}],
+                "certification":"TV-14"
+              },
+              "videos":[
+                {"id":"tt1234567:0:1","title":"Special","season":0,"episode":1,
+                 "released":"2024-01-01T12:00:00.000Z","overview":"Special plot",
+                 "thumbnail":"https://example.org/special.jpg","runtime":"12 min"},
+                {"id":"kitsu:987:7","title":"Fourth season premiere","season":4,"episode":1,
+                 "released":"2024-02-01T12:00:00.000Z","overview":"Episode plot",
+                 "thumbnail":"https://example.org/episode.jpg","runtime":"47 min"},
+                {"id":"tt1234567:4:2","title":"Upcoming","season":4,"episode":2,
+                 "released":null,"overview":null,"thumbnail":null}
+              ]
+            }}
             """);
+        var meta = Assert.IsType<StremioMeta>(StremioJson.MetaResponse(json.RootElement));
+        Assert.Equal("tt1234567", meta.Id);
+        Assert.Equal("series", meta.Type);
+        Assert.Equal("42", meta.ProviderIds["Tmdb"]);
+        Assert.Equal("99", meta.ProviderIds["Tvdb"]);
+        Assert.Equal("tt1234567", meta.ProviderIds["Imdb"]);
+        Assert.Equal("16", meta.ProviderIds["MyAnimeList"]);
+        Assert.Equal("Series plot", meta.Description);
+        Assert.Equal("https://example.org/series.jpg", meta.Poster);
+        Assert.Equal("https://example.org/series-background.jpg", meta.Background);
+        Assert.Equal("https://example.org/series-logo.png", meta.Logo);
+        Assert.Equal("TV-14", meta.OfficialRating);
+        var actor = Assert.Single(meta.People, person => person.Type == "Actor");
+        Assert.Equal("The narrator", actor.Role);
+        Assert.Equal("https://example.org/actor.jpg", actor.PhotoUrl);
+        Assert.Equal("A. Director", Assert.Single(meta.People, person => person.Type == "Director").Name);
+        Assert.Equal("A. Writer", Assert.Single(meta.People, person => person.Type == "Writer").Name);
+        Assert.True(meta.VideosComplete);
+        Assert.Equal(0, meta.Videos[0].Season);
+        Assert.Equal("https://example.org/special.jpg", meta.Videos[0].Thumbnail);
+        var episode = meta.Videos[1];
+        Assert.Equal("kitsu:987:7", episode.Id);
+        Assert.Equal(4, episode.Season);
+        Assert.Equal(1, episode.Episode);
+        Assert.Equal("Fourth season premiere", episode.Name);
+        Assert.Equal("Episode plot", episode.Description);
+        Assert.Equal("https://example.org/episode.jpg", episode.Thumbnail);
+        Assert.Equal(TimeSpan.FromMinutes(47).Ticks, episode.RunTimeTicks);
+        Assert.Empty(episode.ProviderIds);
+        Assert.Empty(episode.People);
+        Assert.Null(episode.Background);
+        Assert.Null(episode.Logo);
+        Assert.Null(episode.CommunityRating);
+        Assert.Null(meta.Videos[2].Description);
+        Assert.Null(meta.Videos[2].Thumbnail);
+        Assert.Null(meta.Videos[2].RunTimeTicks);
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("""{"videos":null}""")]
+    [InlineData("""{"videos":{}}""")]
+    [InlineData("""{"videos":"invalid"}""")]
+    [InlineData("""{"videos":[null]}""")]
+    [InlineData("""{"videos":[{"id":"opaque","episode":1}]}""")]
+    [InlineData("""{"videos":[{"id":"opaque","season":"4","episode":1}]}""")]
+    [InlineData("""{"videos":[{"id":"opaque","season":-1,"episode":1}]}""")]
+    [InlineData("""{"videos":[{"id":"opaque","season":10000,"episode":1}]}""")]
+    public void MissingOrMalformedEpisodeSnapshotsCannotAuthorizeRemoval(string fields)
+    {
+        using var json = JsonDocument.Parse(fields.Insert(1, "\"id\":\"show\",\"type\":\"series\",\"name\":\"Show\"" + (fields.Length > 2 ? "," : "")));
         var meta = Assert.IsType<StremioMeta>(StremioJson.Meta(json.RootElement));
-        Assert.Null(meta.SeasonPosters[1]);
-        Assert.Equal("https://example.org/season2.jpg", meta.SeasonPosters[2]);
-        Assert.Null(meta.SeasonPosters[3]);
-        Assert.Equal("https://example.org/season4.jpg", meta.SeasonPosters[4]);
+        Assert.False(meta.VideosComplete);
+    }
+
+    [Fact]
+    public void ExplicitEmptyEpisodeSnapshotRemainsAuthoritative()
+    {
+        using var json = JsonDocument.Parse("""{"id":"show","type":"series","name":"Show","videos":[]}""");
+        var meta = Assert.IsType<StremioMeta>(StremioJson.Meta(json.RootElement));
+        Assert.True(meta.VideosComplete);
+        Assert.Empty(meta.Videos);
+    }
+
+    [Fact]
+    public void MovieWithoutAnEpisodeArrayRemainsComplete()
+    {
+        using var json = JsonDocument.Parse("""{"id":"movie","type":"movie","name":"Movie"}""");
+        var meta = Assert.IsType<StremioMeta>(StremioJson.Meta(json.RootElement));
+        Assert.True(meta.VideosComplete);
+        Assert.Empty(meta.Videos);
     }
 
     [Fact]

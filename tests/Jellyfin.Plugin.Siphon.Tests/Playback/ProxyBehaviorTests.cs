@@ -2,12 +2,18 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Reflection;
 using System.Text;
+using Jellyfin.Data;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Database.Implementations.Enums;
 using Jellyfin.Plugin.Siphon.Configuration;
 using Jellyfin.Plugin.Siphon.Identity;
 using Jellyfin.Plugin.Siphon.Infrastructure;
 using Jellyfin.Plugin.Siphon.Playback;
 using Jellyfin.Plugin.Siphon.Protocol;
 using MediaBrowser.Common.Configuration;
+using MediaBrowser.Controller.Entities.Movies;
+using MediaBrowser.Controller.Library;
+using MediaBrowser.Model.Entities;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -18,6 +24,27 @@ namespace Jellyfin.Plugin.Siphon.Tests.Playback;
 public sealed class ProxyBehaviorTests : IDisposable
 {
     private readonly string _directory = Path.Combine(Path.GetTempPath(), "siphon-proxy-" + Guid.NewGuid().ToString("N"));
+    [Theory]
+    [InlineData("Disabled")]
+    [InlineData("PlaybackDisabled")]
+    [InlineData("ScheduleClosed")]
+    public async Task AnonymousCapabilityStopsWhenItsOwnersNativePolicyIsRevoked(string policy)
+    {
+        using var fixture = CreateFixture(new byte[1024], "https://upstream.example/movie.mp4");
+        var allowed = NewContext("GET", "bytes=0-9");
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = allowed };
+        await fixture.Controller.Media(fixture.Session.Token);
+        Assert.Equal(206, allowed.Response.StatusCode);
+        if (policy == "Disabled") fixture.User.SetPermission(PermissionKind.IsDisabled, true);
+        else if (policy == "PlaybackDisabled") fixture.User.SetPermission(PermissionKind.EnableMediaPlayback, false);
+        else fixture.User.AccessSchedules.Add(new AccessSchedule(DynamicDayOfWeek.Everyday, 0, 0, fixture.User.Id));
+        var denied = NewContext("GET", "bytes=0-9");
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = denied };
+        await fixture.Controller.Media(fixture.Session.Token);
+        Assert.Equal(404, denied.Response.StatusCode);
+        Assert.Empty(((MemoryStream)denied.Response.Body).ToArray());
+    }
+
 
     [Fact]
     public async Task ProgressiveRangeAndHeadPreserveRepresentation()
@@ -136,6 +163,31 @@ public sealed class ProxyBehaviorTests : IDisposable
         Assert.Empty(((MemoryStream)context.Response.Body).ToArray());
     }
 
+    [Fact]
+    public async Task ParentArtworkCapabilitySurvivesSeriesShellExpansion()
+    {
+        var bytes = new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 };
+        using var fixture = CreateFixture(bytes, "https://upstream.example/series.png", "image/png");
+        var episode = Item() with
+        {
+            Key = "series:tt1234567:1:2",
+            ContentKey = "series:tt1234567",
+            Type = "series",
+            Season = 1,
+            Episode = 2,
+            PosterUrl = "https://upstream.example/series.png"
+        };
+        await fixture.Store.SaveAsync([episode], CancellationToken.None);
+        var token = new CapabilityTokenService(new SiphonSecretStore(Paths())).SignItem(episode.ContentKey);
+        var context = NewContext("GET", "");
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = context };
+
+        await fixture.Controller.Image(token);
+
+        Assert.Equal(200, context.Response.StatusCode);
+        Assert.Equal(bytes, ((MemoryStream)context.Response.Body).ToArray());
+    }
+
     [Theory]
     [InlineData("video/mp4", 0)]
     [InlineData("video/mp4", 512)]
@@ -181,8 +233,18 @@ public sealed class ProxyBehaviorTests : IDisposable
         var registry = new AddonRegistry(client, config, NullLogger<AddonRegistry>.Instance);
         var resolver = new StreamResolver(client, registry, config, NullLogger<StreamResolver>.Instance, new SourceBindingStore(Paths()));
         var sessions = new ProxySessionStore(config);
-        var session = sessions.Create(Item(), new ResolvedStream(new string('A', 64), "Film", new Uri(url), new Dictionary<string, string>(), null, null));
-        return new Fixture(new SiphonProxyController(tokens, store, resolver, sessions, http, config), session, store, client);
+        var user = new User("viewer", "authentication", "password-reset") { Id = Guid.NewGuid() };
+        user.SetPermission(PermissionKind.EnableMediaPlayback, true);
+        var source = new ResolvedStream(new string('A', 64), "Film", new Uri(url), new Dictionary<string, string>(), null, null) { UserId = user.Id };
+        var session = sessions.Create(Item(), source);
+        var video = new Movie { Id = Guid.NewGuid() };
+        video.SetProviderId("Siphon", Item().Key);
+        video.SetProviderId(NativeVersionService.SourceProvider, source.Id);
+        video.SetProviderId(NativeVersionService.OwnerProvider, user.Id.ToString("N"));
+        var library = DispatchProxy.Create<ILibraryManager, NativeSourceLifetimeTests.Library>();
+        ((NativeSourceLifetimeTests.Library)(object)library).Video = video;
+        var access = NativeSourceLifetimeTests.CreateAccess(library, user, authenticated: false);
+        return new Fixture(new SiphonProxyController(tokens, store, resolver, sessions, http, config, access, null!), session, store, client, user);
     }
 
     private ManagedItem Item() => new()
@@ -268,7 +330,7 @@ public sealed class ProxyBehaviorTests : IDisposable
         }
     }
 
-    private sealed record Fixture(SiphonProxyController Controller, ProxySession Session, SiphonStateStore Store, StremioClient Client) : IDisposable
+    private sealed record Fixture(SiphonProxyController Controller, ProxySession Session, SiphonStateStore Store, StremioClient Client, User User) : IDisposable
     {
         public void Dispose() { Store.Dispose(); Client.Dispose(); }
     }

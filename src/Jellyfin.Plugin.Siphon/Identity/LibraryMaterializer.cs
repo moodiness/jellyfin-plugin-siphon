@@ -31,7 +31,9 @@ public sealed class LibraryMaterializer(
     NativeVersionService versions,
     ILogger<LibraryMaterializer> logger,
     SiphonPaths paths,
-    SyncDiagnostics diagnostics) : IHostedService
+    SyncDiagnostics diagnostics,
+    Collections.CatalogCollectionService catalogCollections,
+    Recovery.RecoveryLedger recoveryLedger) : IHostedService
 {
     private const string ItemProvider = "Siphon";
     private const string LegacyCatalogType = "Jellyfin.Plugin.Siphon.Identity.SiphonCatalogFolder";
@@ -75,7 +77,8 @@ public sealed class LibraryMaterializer(
 
     public async Task ApplyAsync(IReadOnlyList<ManagedItem> retained, CancellationToken cancellationToken,
         IReadOnlyDictionary<string, string>? catalogNames = null, IProgress<double>? progress = null,
-        IReadOnlySet<string>? changedKeys = null, IReadOnlySet<string>? scopedContentKeys = null)
+        IReadOnlySet<string>? changedKeys = null, PublicationScope? scope = null,
+        IReadOnlyList<ManagedItem>? previousItems = null)
     {
         if (retained.Count > 0 && string.IsNullOrWhiteSpace(configuration.Current.PublicBaseUrl))
         {
@@ -91,11 +94,13 @@ public sealed class LibraryMaterializer(
             changedKeys = changed;
         }
         await MaterializeAsync(retained, owned.Items, owned.TopParents, owned.CatalogRoots, cancellationToken, catalogNames,
-            progress, changedKeys, scopedContentKeys).ConfigureAwait(false);
-        var publishedKeys = scopedContentKeys is null ? null
-            : retained.Where(item => scopedContentKeys.Contains(item.ContentKey)).Select(item => item.Key).ToHashSet(StringComparer.Ordinal);
+            progress, changedKeys, scope, previousItems).ConfigureAwait(false);
+        var publishedKeys = scope is null ? null
+            : retained.Where(item => scope.ContentKeys.Contains(item.ContentKey)).Select(item => item.Key).ToHashSet(StringComparer.Ordinal);
         await SavePublicationAsync(hashes, publishedKeys, cancellationToken).ConfigureAwait(false);
     }
+
+    public sealed record PublicationScope(IReadOnlySet<string> ContentKeys, IReadOnlyList<ManagedItem> PreviousItems);
 
     private async Task<(Dictionary<Guid, BaseItem> Items, Dictionary<Guid, Guid?> TopParents, Guid[] CatalogRoots)> LoadManagedItemsAsync(CancellationToken cancellationToken)
     {
@@ -139,21 +144,26 @@ public sealed class LibraryMaterializer(
     private async Task MaterializeAsync(IReadOnlyList<ManagedItem> retained, Dictionary<Guid, BaseItem> existing,
         IReadOnlyDictionary<Guid, Guid?> topParents, Guid[] obsoleteRoots, CancellationToken cancellationToken,
         IReadOnlyDictionary<string, string>? catalogNames, IProgress<double>? progress = null,
-        IReadOnlySet<string>? changedKeys = null, IReadOnlySet<string>? scopedContentKeys = null)
+        IReadOnlySet<string>? changedKeys = null, PublicationScope? scope = null,
+        IReadOnlyList<ManagedItem>? previousItems = null)
     {
-        IReadOnlyList<ManagedItem> selected = scopedContentKeys is null ? retained
-            : retained.Where(item => scopedContentKeys.Contains(item.ContentKey)).ToArray();
+        IReadOnlyList<ManagedItem> selected = scope is null ? retained
+            : retained.Where(item => scope.ContentKeys.Contains(item.ContentKey)).ToArray();
         var changedContent = changedKeys is null ? null
             : selected.Where(item => changedKeys.Contains(item.Key)).Select(item => item.ContentKey).ToHashSet(StringComparer.Ordinal);
-        var scopedOwners = scopedContentKeys is null ? null : selected.SelectMany(item => item.Owners).ToHashSet(StringComparer.Ordinal);
+        var scopedOwners = scope is null ? null : new HashSet<string>(StringComparer.Ordinal);
         var wanted = new HashSet<Guid>();
-        if (scopedContentKeys is not null)
+        if (scope is not null)
         {
-            var selectedKeys = selected.Select(item => item.Key).ToHashSet(StringComparer.Ordinal);
-            foreach (var item in selected.Where(item => item.Type == "series"))
+            // Selection survives removals and owner transitions. Retained-only keys would
+            // protect deleted episodes and leave their former catalog locations linked.
+            var selectedKeys = new HashSet<string>(scope.ContentKeys, StringComparer.Ordinal);
+            foreach (var item in scope.PreviousItems.Where(item => scope.ContentKeys.Contains(item.ContentKey)).Concat(selected))
             {
-                selectedKeys.Add(item.ContentKey);
-                selectedKeys.Add(item.ContentKey + ":season:" + (item.Season ?? 0));
+                selectedKeys.Add(item.Key);
+                scopedOwners!.UnionWith(item.Owners);
+                if (item.Type == "series" && !(item.IsSearchPreview && item.Season is null))
+                    selectedKeys.Add(item.ContentKey + ":season:" + (item.Season ?? 0));
             }
             foreach (var item in existing.Values)
                 if (!selectedKeys.Contains(item.GetProviderId(ItemProvider) ?? string.Empty)) wanted.Add(item.Id);
@@ -220,6 +230,9 @@ public sealed class LibraryMaterializer(
                         series.Add(managed.ContentKey, show);
                     }
                     wanted.Add(show.Id);
+                    // A search hit is a real browsable Series, not a fabricated episode.
+                    // The selected-item filter expands it before native detail/episode actions.
+                    if (managed.IsSearchPreview && managed.Season is null) continue;
                     var seasonKey = (managed.ContentKey, managed.Season ?? 0);
                     if (!seasons.TryGetValue(seasonKey, out season))
                     {
@@ -318,17 +331,28 @@ public sealed class LibraryMaterializer(
         progress?.Report(95);
         diagnostics.ReportStage("Finalizing", "Items", 0, selected.Count);
 
-        await catalogs.PublishAsync(layout, cancellationToken, scopedContentKeys is null).ConfigureAwait(false);
+        await catalogs.PublishAsync(layout, cancellationToken, scope is null).ConfigureAwait(false);
 
-        foreach (var stale in existing.Values.Where(item => !wanted.Contains(item.Id))
-            .OrderBy(item => item is Series ? 2 : item is Season ? 1 : 0))
+        var staleItems = existing.Values.Where(item => !wanted.Contains(item.Id))
+            .OrderBy(item => item is Series ? 2 : item is Season ? 1 : 0).ToArray();
+        if (staleItems.Length > 0)
+            await recoveryLedger.CaptureAsync(staleItems, scope?.PreviousItems ?? previousItems ?? retained, cancellationToken).ConfigureAwait(false);
+        foreach (var stale in staleItems)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (stale is Folder folder) folder.Children = null;
-            library.DeleteItem(stale, new DeleteOptions { DeleteFileLocation = false });
+            var parent = stale.GetParent() as Folder;
+            var userData = parent?.UserData;
+            try { library.DeleteItem(stale, new DeleteOptions { DeleteFileLocation = false }); }
+            finally
+            {
+                // Native deletion invalidates the parent's rows, not just its child list.
+                if (parent is not null && wanted.Contains(parent.Id)) parent.UserData ??= userData;
+            }
         }
         if (obsoleteRoots.Length > 0) persistence.DeleteItem(obsoleteRoots);
         library.RootFolder.Children = null;
+        await catalogCollections.ReconcileAsync(retained, cancellationToken, scopedOwners).ConfigureAwait(false);
         logger.LogInformation("Siphon published {ItemCount} unique playable items into native catalog libraries", retained.Count);
         progress?.Report(100);
         diagnostics.ReportStage("Finalizing", "Items", selected.Count, selected.Count);
@@ -346,7 +370,7 @@ public sealed class LibraryMaterializer(
                     using var stream = File.OpenRead(_publicationPath);
                     if (stream.Length > 64 * 1024 * 1024) throw new InvalidDataException();
                     var document = JsonSerializer.Deserialize<PublicationDocument>(stream);
-                    if (document is null || document.Version != 1 || document.Items is null || document.Items.Count > 100000
+                    if (document is null || document.Version != 1 || document.Items is null || document.Items.Count > SiphonStateStore.MaximumItems
                         || document.Items.Any(entry => entry.Key.Length is 0 or > 1024 || entry.Value is null
                             || entry.Value.Length != 64 || !entry.Value.All(char.IsAsciiHexDigit))) throw new InvalidDataException();
                     _published = document.Items;
@@ -360,7 +384,7 @@ public sealed class LibraryMaterializer(
         }
 
         var config = configuration.Current;
-        var policy = string.Join('\n', "1", config.PublicBaseUrl, config.MetadataUpdateMode,
+        var policy = string.Join('\n', "2", config.MetadataAddonId, config.PublicBaseUrl, config.MetadataUpdateMode,
             string.Join(',', config.MetadataRefreshFields.Order(StringComparer.Ordinal)));
         var policyHash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(policy)));
         return items.ToDictionary(item => item.Key, item => Convert.ToHexStringLower(SHA256.HashData(
@@ -440,7 +464,8 @@ public sealed class LibraryMaterializer(
     private void Save(BaseItem item, bool isNew, CancellationToken cancellationToken)
     {
         item.DateLastSaved = DateTime.UtcNow;
-        if (isNew) library.CreateItems([item], item.GetParent(), cancellationToken);
+        // Parentage is already set. Passing the parent makes native creation clear its user-data cache.
+        if (isNew) library.CreateItems([item], null, cancellationToken);
         else
         {
             persistence.SaveItems([item], cancellationToken);

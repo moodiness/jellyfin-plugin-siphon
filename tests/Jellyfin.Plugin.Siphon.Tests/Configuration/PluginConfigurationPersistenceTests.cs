@@ -38,6 +38,27 @@ public sealed class PluginConfigurationPersistenceTests
         ConfigurationValidator.Validate(configuration);
     }
 
+    [Fact]
+    public void SelectedMetadataInstallationSurvivesReloadAndCannotSilentlyFallBack()
+    {
+        var configuration = new PluginConfiguration();
+        var selected = configuration.Addons[0];
+        configuration.MetadataAddonId = selected.Id;
+        configuration.EnableTvdbMetadata = true; // Inactive with a selected addon; no copied key is required.
+        configuration = Reload(configuration);
+        Assert.Equal(selected.Id, configuration.MetadataAddonId);
+        ConfigurationValidator.Validate(configuration);
+
+        configuration.EnableTmdbMetadata = true;
+        Assert.Throws<ArgumentException>(() => ConfigurationValidator.Validate(configuration));
+        configuration.TmdbReadAccessToken = "fixture-season-poster-token";
+        ConfigurationValidator.Validate(configuration);
+        configuration.Addons[0].Enabled = false;
+        Assert.Throws<ArgumentException>(() => ConfigurationValidator.Validate(configuration));
+        configuration.Addons = [];
+        Assert.Throws<ArgumentException>(() => ConfigurationValidator.Validate(configuration));
+    }
+
     private static PluginConfiguration Reload(PluginConfiguration configuration)
     {
         var serializer = new XmlSerializer(typeof(PluginConfiguration));

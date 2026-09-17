@@ -9,6 +9,7 @@ using Jellyfin.Plugin.Siphon.Identity;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.Persistence;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -90,7 +91,7 @@ public sealed class NativeCreditsTests
 
     private static ItemMetadataMapper Mapper(Database database)
         => new(new ConfigurationAccessor(() => new PluginConfiguration { MetadataUpdateMode = "RefreshSelected", MetadataRefreshFields = ["People"] }),
-            null!, DispatchProxy.Create<ILibraryManager, Library>(), database, null!);
+            null!, DispatchProxy.Create<ILibraryManager, Library>(), database, DispatchProxy.Create<IItemPersistenceService, CatalogSyncTests.VersionPersistenceProxy>());
 
     private sealed class CallbackProgress(Action<double> report) : IProgress<double>
     {

@@ -94,7 +94,7 @@ public sealed class NativeMediaInfoTests
 
     private static NativeVersionService Service(ILibraryManager library, IMediaStreamRepository streams)
         => new(new ConfigurationAccessor(() => new PluginConfiguration()), null!, null!, library,
-            DispatchProxy.Create<IItemPersistenceService, Persistence>(), streams, null!, null!);
+            DispatchProxy.Create<IItemPersistenceService, Persistence>(), streams, null!, null!, null!);
 
     public class Library : DispatchProxy
     {

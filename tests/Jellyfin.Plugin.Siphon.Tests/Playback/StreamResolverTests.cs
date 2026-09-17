@@ -33,6 +33,7 @@ public sealed class StreamResolverTests : IDisposable
         var registry = new AddonRegistry(client, accessor, NullLogger<AddonRegistry>.Instance);
         var path = Path.Combine(_directory, "source-bindings.json");
         var resolver = new StreamResolver(client, registry, accessor, NullLogger<StreamResolver>.Instance, new SourceBindingStore(path));
+        var userId = Guid.NewGuid();
         var item = new ManagedItem
         {
             Key = "movie:tt1234567",
@@ -45,33 +46,33 @@ public sealed class StreamResolverTests : IDisposable
             StreamIdentities = [new("movie", "tt1234567")]
         };
 
-        var sources = await resolver.GetSourcesAsync(item, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+        var sources = await resolver.GetSourcesAsync(item, userId, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(new[] { "/first.mkv", "/mirror.mkv", "/last.mkv" }, sources.Select(source => source.Url.AbsolutePath));
         Assert.NotEqual(sources[0].Id, sources[1].Id);
 
         origin.Token = "renewed";
         resolver.Invalidate();
-        var renewed = await resolver.GetSourcesAsync(item, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+        var renewed = await resolver.GetSourcesAsync(item, userId, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(sources.Select(source => source.Id), renewed.Select(source => source.Id));
         Assert.All(renewed, source => Assert.Equal("?token=renewed", source.Url.Query));
 
         origin.Paths = ["mirror", "first"];
         resolver.Invalidate();
-        var reordered = await resolver.GetSourcesAsync(item, CancellationToken.None);
+        var reordered = await resolver.GetSourcesAsync(item, userId, CancellationToken.None);
         Assert.Equal(new[] { sources[1].Id, sources[0].Id, sources[2].Id }, reordered.Select(source => source.Id));
         origin.Paths = ["mirror"];
         resolver.Invalidate();
-        var disappeared = await resolver.GetSourcesAsync(item, CancellationToken.None);
+        var disappeared = await resolver.GetSourcesAsync(item, userId, CancellationToken.None);
         Assert.Equal(new[] { sources[1].Id, sources[2].Id }, disappeared.Select(source => source.Id));
         Assert.DoesNotContain(disappeared, source => source.Id == sources[0].Id);
 
         resolver = new StreamResolver(client, registry, accessor, NullLogger<StreamResolver>.Instance, new SourceBindingStore(path));
-        var restarted = await resolver.GetSourcesAsync(item, CancellationToken.None);
+        var restarted = await resolver.GetSourcesAsync(item, userId, CancellationToken.None);
         Assert.Equal(disappeared.Select(source => source.Id), restarted.Select(source => source.Id));
         origin.Paths = ["mirror", "first"];
         origin.Token = "after-restart";
         resolver.Invalidate();
-        var returned = await resolver.GetSourcesAsync(item, CancellationToken.None);
+        var returned = await resolver.GetSourcesAsync(item, userId, CancellationToken.None);
         Assert.Equal(new[] { sources[1].Id, sources[0].Id, sources[2].Id }, returned.Select(source => source.Id));
         var persisted = File.ReadAllText(path);
         Assert.DoesNotContain("example", persisted);
