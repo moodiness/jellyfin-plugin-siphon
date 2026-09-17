@@ -54,6 +54,8 @@ public sealed class ServiceRegistrator : MediaBrowser.Controller.Plugins.IPlugin
         serviceCollection.AddSingleton<Identity.CatalogCleanupService>();
         serviceCollection.AddSingleton<Infrastructure.SiphonItemLocator>();
         serviceCollection.AddSingleton<Microsoft.Extensions.Hosting.IHostedService>(services => services.GetRequiredService<Identity.LibraryMaterializer>());
+        serviceCollection.AddSingleton<P2p.P2pStreamService>();
+        serviceCollection.AddSingleton<Microsoft.Extensions.Hosting.IHostedService>(services => services.GetRequiredService<P2p.P2pStreamService>());
         serviceCollection.AddSingleton<Playback.StreamResolver>();
         serviceCollection.AddSingleton<Playback.SourceBindingStore>();
         serviceCollection.AddSingleton<Playback.ProxySessionStore>();

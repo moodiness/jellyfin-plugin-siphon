@@ -6,6 +6,7 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <Version>1.4.1.0</Version>
     <RepositoryUrl>https://github.com/moodiness/jellyfin-plugin-siphon</RepositoryUrl>
   </PropertyGroup>
@@ -15,6 +16,7 @@
     <PackageReference Include="Jellyfin.Controller" Version="12.1.0" />
     <PackageReference Include="Jellyfin.Data" Version="12.1.0" />
     <PackageReference Include="Jellyfin.Model" Version="12.1.0" />
+    <PackageReference Include="MonoTorrent" Version="3.0.2" />
   </ItemGroup>
 
   <ItemGroup>

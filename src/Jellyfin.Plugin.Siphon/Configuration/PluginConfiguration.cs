@@ -16,6 +16,17 @@ public sealed class PluginConfiguration : BasePluginConfiguration
     /// <summary>Gets or sets the URL clients can use to reach this Jellyfin server.</summary>
     public string PublicBaseUrl { get; set; } = string.Empty;
 
+    /// <summary>P2P is opt-in and uses the server's public network identity.</summary>
+    public bool EnableP2p { get; set; }
+    public int P2pMaxConcurrentStreams { get; set; } = 2;
+    public int P2pMaxCacheMiB { get; set; } = 20480;
+    public int P2pDownloadLimitKiB { get; set; } = 4096;
+    public int P2pUploadLimitKiB { get; set; } = 256;
+    public int P2pIdleMinutes { get; set; } = 5;
+    public int P2pMetadataTimeoutSeconds { get; set; } = 90;
+    public bool P2pEnableDht { get; set; } = true;
+    public int P2pListenPort { get; set; }
+
     /// <summary>Gets or sets the optional TMDB application read-access token.</summary>
     public string TmdbReadAccessToken { get; set; } = string.Empty;
 

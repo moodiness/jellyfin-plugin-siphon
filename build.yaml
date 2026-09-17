@@ -11,5 +11,18 @@ category: "General"
 artifacts:
   - "Jellyfin.Plugin.Siphon.dll"
   - "siphon.png"
+  - "Mono.Nat.dll"
+  - "MonoTorrent.BEncoding.dll"
+  - "MonoTorrent.Client.dll"
+  - "MonoTorrent.Connections.dll"
+  - "MonoTorrent.Dht.dll"
+  - "MonoTorrent.dll"
+  - "MonoTorrent.Factories.dll"
+  - "MonoTorrent.Messages.dll"
+  - "MonoTorrent.PiecePicking.dll"
+  - "MonoTorrent.PieceWriter.dll"
+  - "MonoTorrent.PortForwarding.dll"
+  - "MonoTorrent.Trackers.dll"
+  - "ReusableTasks.dll"
 changelog: |-
   - Register a real Siphon media library in Dashboard Libraries and My Media; migrate v1.3 catalog roots, deduplicate media, and preserve native browsing across scans and restarts without manual paths.
