@@ -47,36 +47,72 @@ public sealed class ItemMetadataMapper(
         if (target is Season)
         {
             // Episode plots and dates never belong on a season.
-            SetImage(target, item, ImageType.Primary, item.SeasonPosterUrl ?? item.PosterUrl, "season", initialize);
+            SetImage(target, item, ImageType.Primary, item.SeasonPosterUrl, "season", initialize);
             return;
         }
 
         var isEpisode = target is Episode;
         var isSeries = target is Series;
         var name = isSeries ? item.SeriesName : item.Name;
-        if (!string.IsNullOrWhiteSpace(name) && Can("Name", string.IsNullOrWhiteSpace(target.Name))) target.Name = name;
+        if (!string.IsNullOrWhiteSpace(name) && Can("Name", string.IsNullOrWhiteSpace(target.Name)))
+        {
+            target.Name = name;
+            ItemMetadataOwnership.Record(target, "Name", target.Name, item, isSeries ? "SeriesName" : "Name");
+        }
         var overview = isSeries ? item.SeriesDescription : item.Description;
-        if (!string.IsNullOrWhiteSpace(overview) && Can("Overview", string.IsNullOrWhiteSpace(target.Overview))) target.Overview = overview;
+        if (!string.IsNullOrWhiteSpace(overview) && Can("Overview", string.IsNullOrWhiteSpace(target.Overview)))
+        {
+            target.Overview = overview;
+            ItemMetadataOwnership.Record(target, "Overview", target.Overview, item, isSeries ? "SeriesDescription" : "Description");
+        }
 
         var premiere = ParseDate(isSeries ? item.SeriesReleased : item.Released);
-        if (premiere.HasValue && Can("ReleaseDate", !target.PremiereDate.HasValue)) target.PremiereDate = premiere;
+        if (premiere.HasValue && Can("ReleaseDate", !target.PremiereDate.HasValue))
+        {
+            target.PremiereDate = premiere;
+            ItemMetadataOwnership.Record(target, "PremiereDate", target.PremiereDate, item, isSeries ? "SeriesReleased" : "Released");
+        }
         var year = isEpisode ? premiere?.Year : item.Year ?? premiere?.Year;
-        if (year is >= 1800 and <= 2200 && Can("ReleaseDate", !target.ProductionYear.HasValue)) target.ProductionYear = year;
+        if (year is >= 1800 and <= 2200 && Can("ReleaseDate", !target.ProductionYear.HasValue))
+        {
+            target.ProductionYear = year;
+            ItemMetadataOwnership.Record(target, "ProductionYear", target.ProductionYear, item,
+                isEpisode || !item.Year.HasValue ? isSeries ? "SeriesReleased" : "Released" : "Year");
+        }
 
         var rating = isEpisode ? item.EpisodeCommunityRating : item.CommunityRating;
-        if (rating is >= 0 and <= 10 && Can("Ratings", !target.CommunityRating.HasValue)) target.CommunityRating = rating;
+        if (rating is >= 0 and <= 10 && Can("Ratings", !target.CommunityRating.HasValue))
+        {
+            target.CommunityRating = rating;
+            ItemMetadataOwnership.Record(target, "CommunityRating", target.CommunityRating, item, isEpisode ? "EpisodeCommunityRating" : "CommunityRating");
+        }
         var runtime = isEpisode ? item.EpisodeRunTimeTicks : item.RunTimeTicks;
         // A probed native version can be a different cut from the catalog's advertised runtime.
         if (runtime is > 0 and <= MaximumRuntimeTicks
             && Can("Runtime", !target.RunTimeTicks.HasValue)
             && !(target is Video { Container: not null } && target.GetProviderId(Playback.NativeVersionService.SourceProvider) is not null))
+        {
             target.RunTimeTicks = runtime;
+            ItemMetadataOwnership.Record(target, "RunTimeTicks", target.RunTimeTicks, item, isEpisode ? "EpisodeRunTimeTicks" : "RunTimeTicks");
+        }
         var certification = isEpisode ? item.EpisodeOfficialRating : item.OfficialRating;
-        if (!string.IsNullOrWhiteSpace(certification) && Can("Ratings", string.IsNullOrWhiteSpace(target.OfficialRating))) target.OfficialRating = certification;
+        if (!string.IsNullOrWhiteSpace(certification) && Can("Ratings", string.IsNullOrWhiteSpace(target.OfficialRating)))
+        {
+            target.OfficialRating = certification;
+            ItemMetadataOwnership.Record(target, "OfficialRating", target.OfficialRating, item, isEpisode ? "EpisodeOfficialRating" : "OfficialRating");
+        }
         var genres = isEpisode ? item.EpisodeGenres : item.Genres;
-        if (genres.Length > 0 && Can("Genres", target.Genres.Length == 0)) target.Genres = (string[])genres.Clone();
+        if (genres.Length > 0 && Can("Genres", target.Genres.Length == 0))
+        {
+            target.Genres = (string[])genres.Clone();
+            ItemMetadataOwnership.Record(target, "Genres", target.Genres, item, isEpisode ? "EpisodeGenres" : "Genres");
+        }
         var locations = isEpisode ? item.EpisodeProductionLocations : item.ProductionLocations;
-        if (locations.Length > 0 && Can("ProductionLocations", target.ProductionLocations.Length == 0)) target.ProductionLocations = (string[])locations.Clone();
+        if (locations.Length > 0 && Can("ProductionLocations", target.ProductionLocations.Length == 0))
+        {
+            target.ProductionLocations = (string[])locations.Clone();
+            ItemMetadataOwnership.Record(target, "ProductionLocations", target.ProductionLocations, item, isEpisode ? "EpisodeProductionLocations" : "ProductionLocations");
+        }
         if (target is Series series)
         {
             var status = item.SeriesStatus switch
@@ -86,7 +122,11 @@ public sealed class ItemMetadataMapper(
                 "Unreleased" => SeriesStatus.Unreleased,
                 _ => (SeriesStatus?)null
             };
-            if (status.HasValue && Can("Status", !series.Status.HasValue)) series.Status = status;
+            if (status.HasValue && Can("Status", !series.Status.HasValue))
+            {
+                series.Status = status;
+                ItemMetadataOwnership.Record(target, "Status", series.Status?.ToString(), item, "SeriesStatus");
+            }
         }
 
         SetImage(target, item, ImageType.Primary, isEpisode ? item.ThumbnailUrl : item.PosterUrl, isEpisode ? "thumbnail" : "poster", initialize);
@@ -128,6 +168,7 @@ public sealed class ItemMetadataMapper(
                 .Where(map => itemIds.Contains(map.ItemId)).ToListAsync(cancellationToken).ConfigureAwait(false);
             var byItem = rows.ToLookup(map => map.ItemId);
             var portraits = new Dictionary<Guid, (string Name, ManagedItem Managed, ManagedPerson Credit, string Variant)>();
+            var publications = new List<(BaseItem Target, object People, MetadataFieldProvenance Provenance)>();
             foreach (var (target, item, initialize) in batch)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -141,6 +182,14 @@ public sealed class ItemMetadataMapper(
                     Type = Enum.TryParse<PersonKind>(map.People.PersonType, out var kind) ? kind : PersonKind.Actor,
                     SortOrder = map.SortOrder
                 }).ToList();
+                var oldPeople = ItemMetadataOwnership.People(credits);
+                var oldReceipt = ItemMetadataOwnership.Read(target, "People");
+                var evidence = item.MetadataProvenance.GetValueOrDefault(target is Episode ? "EpisodePeople" : "People")
+                    ?? new MetadataFieldProvenance([new("Unknown", null, null)]);
+                if (credits.Count > 0)
+                    evidence = MetadataProvenance.Combine(evidence,
+                        oldReceipt?.Fingerprint == ItemMetadataOwnership.Fingerprint(oldPeople) ? oldReceipt.Provenance
+                            : new([new("Unknown", null, null)]));
                 var incoming = target is Episode ? item.EpisodePeople : item.People;
                 var photos = new Dictionary<(string Name, string Type), (ManagedPerson Credit, int Index)>(new PersonIdentityComparer());
                 for (var index = 0; index < incoming.Length; index++)
@@ -206,6 +255,7 @@ public sealed class ItemMetadataMapper(
                     order++;
                 }
                 context.PeopleBaseItemMap.RemoveRange(remaining);
+                publications.Add((target, ItemMetadataOwnership.People(credits), evidence));
             }
 
             // Publish native Person entities before their credits: cancellation cannot leave a
@@ -213,6 +263,9 @@ public sealed class ItemMetadataMapper(
             PublishPeople(portraits, published, cancellationToken);
             if (context.ChangeTracker.HasChanges())
                 await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            foreach (var publication in publications)
+                ItemMetadataOwnership.Record(publication.Target, "People", publication.People, publication.Provenance);
+            if (publications.Count > 0) persistence.SaveItems(publications.Select(publication => publication.Target).ToArray(), cancellationToken);
             completed += batch.Length;
             progress?.Report(100d * completed / eligible.Length);
             diagnostics?.ReportStage("Credits", "Items", completed, eligible.Length);
@@ -281,23 +334,40 @@ public sealed class ItemMetadataMapper(
 
     private bool SetImage(BaseItem target, ManagedItem item, ImageType imageType, string? upstream, string variant, bool initialize, string? revisionVariant = null)
     {
-        if (!MetadataPolicy.CanUpdate(target, configuration.Current, "Images", !target.HasImage(imageType), initialize)) return false;
+        if (!MetadataPolicy.CanUpdate(target, configuration.Current, "Images", true, initialize)) return false;
         if (string.IsNullOrWhiteSpace(configuration.Current.PublicBaseUrl)
             || !Uri.TryCreate(upstream, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https")) return false;
         var marker = "SiphonImage" + imageType;
-        var revision = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(configuration.Current.PublicBaseUrl + "\n" + (revisionVariant ?? variant) + "\n" + upstream)));
+        var imageKey = target is Series ? item.ContentKey : item.Key;
+        var revision = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(configuration.Current.PublicBaseUrl + "\n" + imageKey + "\n" + (revisionVariant ?? variant) + "\n" + upstream)));
         if (target.GetProviderId(marker) == revision && target.HasImage(imageType)) return false;
+        var inheritedFrom = imageType == ImageType.Primary && target is Season or Episode
+            ? library?.GetItemById(library.GetNewItemId("siphon:series:" + item.ContentKey, typeof(Series))) : null;
+        if (!MetadataPolicy.CanUpdateImage(target, configuration.Current, imageType, missingManagedValue: true,
+                initialize: initialize, inheritedFrom: inheritedFrom)) return false;
         target.SetProviderId(marker, revision);
         target.SetImage(new ItemImageInfo
         {
             Type = imageType,
-            Path = configuration.Current.PublicBaseUrl.TrimEnd('/') + "/Siphon/image/" + tokens.SignItem(item.Key) + "?type=" + variant,
+            Path = configuration.Current.PublicBaseUrl.TrimEnd('/') + "/Siphon/image/" + tokens.SignItem(imageKey) + "?type=" + variant,
             DateModified = DateTime.UtcNow
         }, 0);
+        var field = variant switch
+        {
+            "season" => "SeasonPosterUrl",
+            "thumbnail" => "ThumbnailUrl",
+            "poster" => "PosterUrl",
+            "backdrop" => "BackdropUrl",
+            "logo" => "LogoUrl",
+            "episode-backdrop" => "EpisodeBackdropUrl",
+            "episode-logo" => "EpisodeLogoUrl",
+            _ => variant.StartsWith("episode-person-", StringComparison.Ordinal) ? "EpisodePeople" : "People"
+        };
+        ItemMetadataOwnership.Record(target, "Image" + imageType, target.GetImageInfo(imageType, 0)?.Path, item, field);
         return true;
     }
 
-    private static DateTime? ParseDate(string? value)
+    internal static DateTime? ParseDate(string? value)
         => value is { Length: >= 10 and <= 64 }
             && DateTime.TryParseExact(value, DateFormats, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var date)
             && date.Year is >= 1800 and <= 2200 ? date : null;

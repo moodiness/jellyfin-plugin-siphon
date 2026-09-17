@@ -9,7 +9,10 @@ internal sealed record SubtitleCandidate(
     string ItemKey,
     string SourceId,
     Uri Url,
-    string Language);
+    string Language)
+{
+    public Guid UserId { get; init; }
+}
 
 /// <summary>Server-only download capabilities; neither upstream IDs nor URLs leave this store.</summary>
 internal sealed class SubtitleTicketStore(TimeProvider clock, int capacity, TimeSpan lifetime)

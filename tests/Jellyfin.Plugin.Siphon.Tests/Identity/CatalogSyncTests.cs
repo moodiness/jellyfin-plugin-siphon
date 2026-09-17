@@ -1,11 +1,16 @@
 using System.Net;
 using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Plugin.Siphon.Collections;
 using Jellyfin.Plugin.Siphon.Configuration;
 using Jellyfin.Plugin.Siphon.Identity;
 using Jellyfin.Plugin.Siphon.Infrastructure;
 using Jellyfin.Plugin.Siphon.Metadata;
 using Jellyfin.Plugin.Siphon.Playback;
 using Jellyfin.Plugin.Siphon.Protocol;
+using Jellyfin.Plugin.Siphon.Tests.Playback;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
@@ -17,6 +22,7 @@ using Xunit;
 
 namespace Jellyfin.Plugin.Siphon.Tests.Identity;
 
+[Collection("Native publication")]
 public sealed class CatalogSyncTests
 {
     [Fact]
@@ -363,6 +369,7 @@ public sealed class CatalogSyncTests
         movie.SetProviderId("Siphon", managed.Key);
         var library = DispatchProxy.Create<ILibraryManager, VersionLibraryProxy>();
         ((VersionLibraryProxy)(object)library).Movie = movie;
+        movie.SetParent(((VersionLibraryProxy)(object)library).Parent);
         var persistence = DispatchProxy.Create<IItemPersistenceService, VersionPersistenceProxy>();
         var applicationPaths = DispatchProxy.Create<IApplicationPaths, PathsProxy>();
         var directory = Path.Combine(Path.GetTempPath(), "siphon-concurrent-sync-" + Guid.NewGuid().ToString("N"));
@@ -373,28 +380,45 @@ public sealed class CatalogSyncTests
         var resolver = new StreamResolver(client, registry, configuration, NullLogger<StreamResolver>.Instance,
             new SourceBindingStore(Path.Combine(directory, "sources.json")));
         var metadata = new ItemMetadataMapper(configuration, tokens, library, null!, persistence);
-        var versions = new NativeVersionService(configuration, tokens, state, library, persistence, null!, metadata, resolver);
-        var cleanup = new CatalogCleanupService(configuration, state, null!, null!);
+        var user = new User("viewer", "authentication", "password-reset") { Id = Guid.NewGuid() };
+        var versions = new NativeVersionService(configuration, tokens, state, library, persistence, null!, metadata, resolver,
+            NativeSourceLifetimeTests.CreateAccess(library, user));
+        var cleanup = new CatalogCleanupService(configuration, state, null!, null!, new CollectionRetentionService(library, state, null!));
         var enrichment = new MetadataEnrichmentService(configuration, null!, library, null!, state);
         var sync = new CatalogSyncService(configuration, registry, client, state, null!, NullLogger<CatalogSyncService>.Instance,
             cleanup, enrichment, diagnostics);
         using var cancellation = new CancellationTokenSource();
+        using var waitingCancellation = new CancellationTokenSource();
+        using var refreshCancellation = new CancellationTokenSource();
         var synchronizing = sync.SynchronizeAsync(new Progress<double>(), cancellation.Token);
         Task<IReadOnlyList<NativeStreamVersion>>? opening = null;
         Task<CleanupPreview>? preview = null;
+        Task? waitingTargeted = null;
+        Task? fullRefresh = null;
+        var originalLibrary = BaseItem.LibraryManager;
+        BaseItem.LibraryManager = library;
         try
         {
             await origin.CatalogStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
             preview = cleanup.PreviewAsync(0, 50, CancellationToken.None);
-            opening = versions.GetVersionsAsync(movie, cancellation.Token);
+            opening = versions.GetVersionsAsync(movie, user.Id, cancellation.Token);
             var available = await opening.WaitAsync(TimeSpan.FromSeconds(5));
-            Assert.Equal(movie.Id, Assert.Single(available).Item.Id);
+            Assert.Single(available);
             Assert.False(synchronizing.IsCompleted);
             Assert.False(preview.IsCompleted);
-            await Assert.ThrowsAsync<InvalidOperationException>(() =>
-                sync.SynchronizeAsync(new Progress<double>(), CancellationToken.None, SyncKind.FollowedSeries));
-            await Assert.ThrowsAsync<InvalidOperationException>(() =>
-                sync.SynchronizeAsync(new Progress<double>(), CancellationToken.None));
+            var activeRun = diagnostics.GetSnapshot().CurrentRun!;
+            waitingTargeted = sync.SynchronizeAsync(new Progress<double>(), waitingCancellation.Token, SyncKind.Targeted, new SyncTarget(CatalogKey: SyncTarget.CatalogIdentity("installation", "subscription")));
+            Assert.False(waitingTargeted.IsCompleted);
+            waitingCancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waitingTargeted);
+            Assert.Equal(activeRun.StartedAtUtc, diagnostics.GetSnapshot().CurrentRun!.StartedAtUtc);
+            Assert.Equal("Catalogs", diagnostics.GetSnapshot().CurrentRun!.Kind);
+            Assert.Null(diagnostics.GetSnapshot().LastRun);
+            Assert.False(preview.IsCompleted);
+
+            fullRefresh = sync.SynchronizeAsync(new Progress<double>(), refreshCancellation.Token, SyncKind.FullRefresh);
+            Assert.False(fullRefresh.IsCompleted);
+            Assert.False(synchronizing.IsCompleted);
 
             cancellation.Cancel();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => synchronizing);
@@ -403,6 +427,9 @@ public sealed class CatalogSyncTests
             Assert.Equal(managed, Assert.Single(state.GetItems()));
 
             origin.ReleaseCatalog.TrySetResult();
+            await Assert.ThrowsAsync<SnapshotCapturedException>(() => fullRefresh.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal("FullRefresh", diagnostics.GetSnapshot().LastRun!.Kind);
+            Assert.Null(diagnostics.GetSnapshot().CurrentRun);
             await Assert.ThrowsAsync<SnapshotCapturedException>(() =>
                 sync.SynchronizeAsync(new Progress<double>(), CancellationToken.None));
             Assert.Equal(managed.Key, Assert.Single(state.GetItems()).Key);
@@ -410,6 +437,9 @@ public sealed class CatalogSyncTests
         finally
         {
             cancellation.Cancel();
+            BaseItem.LibraryManager = originalLibrary;
+            waitingCancellation.Cancel();
+            refreshCancellation.Cancel();
             origin.ReleaseCatalog.TrySetResult();
             try { await synchronizing; }
             catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
@@ -417,6 +447,17 @@ public sealed class CatalogSyncTests
             {
                 try { await opening; }
                 catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+            }
+            if (waitingTargeted is not null)
+            {
+                try { await waitingTargeted; }
+                catch (OperationCanceledException) when (waitingCancellation.IsCancellationRequested) { }
+            }
+            if (fullRefresh is not null)
+            {
+                try { await fullRefresh; }
+                catch (OperationCanceledException) when (refreshCancellation.IsCancellationRequested) { }
+                catch (SnapshotCapturedException) { }
             }
             if (preview is not null) await preview;
             diagnostics.Dispose();
@@ -441,10 +482,239 @@ public sealed class CatalogSyncTests
         Assert.Equal(previous, Assert.Single(snapshot));
     }
 
+    [Fact]
+    public async Task OneCatalogCannotRefreshOrCleanUpAnotherCatalogsAlreadyMissingTitle()
+    {
+        var selected = Item("movie:tt1234567", "movie", "tt1234567");
+        var unrelated = Item("movie:tt1234568", "movie", "tt1234568") with
+        {
+            Owners = ["installation:second"],
+            MissingOwners = ["installation:second"],
+            MissingSinceUtc = DateTimeOffset.UtcNow.AddDays(-30),
+            Description = "Preserve unrelated metadata"
+        };
+        var snapshot = await SynchronizeToStateAsync("movie", [selected, unrelated], uri => uri.AbsolutePath switch
+        {
+            "/manifest.json" => """{"id":"catalog","catalogs":[{"type":"movie","id":"all"},{"type":"movie","id":"other"}]}""",
+            "/catalog/movie/all.json" => """{"metas":[{"id":"tt1234567","type":"movie","name":"Selected update"}]}""",
+            _ => throw new InvalidOperationException("An unrelated catalog must not be requested.")
+        }, config => config.Addons[0].Catalogs.Add(new() { Key = "second", Type = "movie", Id = "other" }),
+            kind: SyncKind.Targeted, target: new(CatalogKey: SyncTarget.CatalogIdentity("installation", "subscription")));
+        Assert.Equal("Selected update", snapshot.Single(item => item.Key == selected.Key).Name);
+        Assert.Equal(unrelated, snapshot.Single(item => item.Key == unrelated.Key));
+    }
+
+    [Fact]
+    public async Task OneSeriesRefreshPreservesOtherSeriesAndOmittedEpisodesWithoutCatalogDiscovery()
+    {
+        var selected = Item("series:tt1234567:1:1", "series", "tt1234567") with
+        {
+            ContentKey = "series:tt1234567",
+            Season = 1,
+            Episode = 1,
+            VideoId = "original-exact-video"
+        };
+        var unrelated = selected with
+        {
+            Key = "series:tt1234568:1:1",
+            ContentKey = "series:tt1234568",
+            ContentId = "tt1234568",
+            MissingOwners = selected.Owners,
+            MissingSinceUtc = DateTimeOffset.UtcNow.AddDays(-30),
+            SeriesName = "Unrelated series"
+        };
+        var snapshot = await SynchronizeToStateAsync("series", [selected, unrelated], uri => uri.AbsolutePath switch
+        {
+            "/manifest.json" => """{"id":"catalog","types":["series"],"resources":["meta"],"catalogs":[{"type":"series","id":"all"}]}""",
+            "/meta/series/tt1234567.json" => """{"meta":{"id":"tt1234567","type":"series","name":"Selected series","videos":[{"id":"new-exact-video","season":1,"episode":2}]}}""",
+            _ => throw new InvalidOperationException("A series refresh must not request catalogs or another series.")
+        }, kind: SyncKind.Targeted, target: new(ContentKey: selected.ContentKey));
+        Assert.Equal(unrelated, snapshot.Single(item => item.Key == unrelated.Key));
+        Assert.Equal("original-exact-video", snapshot.Single(item => item.Key == selected.Key).VideoId);
+        Assert.Equal("Selected series", snapshot.Single(item => item.Key == selected.Key).SeriesName);
+        Assert.Equal("new-exact-video", snapshot.Single(item => item.ContentKey == selected.ContentKey && item.Episode == 2).VideoId);
+    }
+
+    [Fact]
+    public async Task CatalogAbsenceCannotRemoveAnExplicitManualAddition()
+    {
+        var previous = Item("movie:tt1234567", "movie", "tt1234567") with
+        {
+            Owners = ["installation:subscription", "siphon:manual:movie"],
+            SearchAddonId = "installation",
+            SearchResourceType = "movie"
+        };
+        var snapshot = await SynchronizeToStateAsync("movie", [previous], EmptyCatalog);
+        var retained = Assert.Single(snapshot);
+        Assert.Equal(previous.Owners, retained.Owners);
+        Assert.Null(retained.MissingSinceUtc);
+        Assert.Equal(previous.SearchAddonId, retained.SearchAddonId);
+    }
+
+    [Theory]
+    [InlineData(SyncKind.Catalogs)]
+    [InlineData(SyncKind.Targeted)]
+    public async Task CatalogDiscoveryKeepsNewEpisodesOfAManuallySavedSeriesAfterCatalogAbsence(SyncKind kind)
+    {
+        var previous = FollowedSeriesSelectorTests.Episode("opaque") with
+        {
+            Owners = ["siphon:manual:series"],
+            SearchAddonId = "installation",
+            SearchResourceType = "series"
+        };
+        var target = kind == SyncKind.Targeted
+            ? new SyncTarget(CatalogKey: SyncTarget.CatalogIdentity("installation", "subscription")) : null;
+        var discovered = await SynchronizeToStateAsync("series", [previous], uri => uri.AbsolutePath == "/manifest.json"
+            ? """{"id":"catalog","catalogs":[{"type":"series","id":"all"}]}"""
+            : """{"metas":[{"id":"opaque","imdb_id":"tt1234567","type":"series","name":"Saved series","videos":[{"id":"opaque:video:1","season":1,"episode":1},{"id":"opaque:video:2","season":1,"episode":2}]},{"id":"other","type":"series","name":"Catalog only","videos":[{"id":"other:video:1","season":1,"episode":1}]}]}""",
+            kind: kind, target: target);
+        var added = Assert.Single(discovered, item => item.ContentKey == previous.ContentKey && item.Episode == 2);
+        Assert.Contains("siphon:manual:series", added.Owners);
+        Assert.Equal("opaque:video:2", added.VideoId);
+        Assert.Equal(previous.Path, discovered.Single(item => item.Key == previous.Key).Path);
+        Assert.DoesNotContain("siphon:manual:series", discovered.Single(item => item.ContentId == "other").Owners);
+
+        var retained = await SynchronizeToStateAsync("series", discovered, uri => uri.AbsolutePath == "/manifest.json"
+            ? """{"id":"catalog","catalogs":[{"type":"series","id":"all"}]}""" : """{"metas":[]}""",
+            kind: kind, target: target);
+        Assert.Equal(new[] { previous.Key, added.Key }.Order(StringComparer.Ordinal),
+            retained.Select(item => item.Key).Order(StringComparer.Ordinal));
+        Assert.All(retained, item =>
+        {
+            Assert.Contains("siphon:manual:series", item.Owners);
+            Assert.Null(item.MissingSinceUtc);
+        });
+    }
+
+    [Theory]
+    [InlineData("movie")]
+    [InlineData("series")]
+    public async Task CatalogAdoptionDropsTemporaryPreviewOwnershipAndSeriesShells(string type)
+    {
+        var preview = Item(type + ":tt1234567", type, "tt1234567") with
+        {
+            Owners = ["siphon:preview:" + type],
+            IsSearchPreview = true,
+            SearchAddonId = "installation",
+            SearchResourceType = type,
+            PreviewExpiresUtc = DateTimeOffset.UtcNow.AddMinutes(10)
+        };
+        var snapshot = await SynchronizeToStateAsync(type, [preview], uri => uri.AbsolutePath == "/manifest.json"
+            ? $$"""{"id":"catalog","catalogs":[{"type":"{{type}}","id":"all"}]}"""
+            : $$"""{"metas":[{"id":"tt1234567","type":"{{type}}","name":"Adopted title","videos":[{"id":"episode-video","season":1,"episode":1}]}]}""");
+        var adopted = Assert.Single(snapshot);
+        Assert.Equal(preview.ContentKey, adopted.ContentKey);
+        Assert.False(adopted.IsSearchPreview);
+        Assert.Null(adopted.PreviewExpiresUtc);
+        Assert.Equal(new[] { "installation:subscription" }, adopted.Owners);
+        if (type == "series") Assert.Equal(1, adopted.Episode);
+    }
+
+    [Fact]
+    public async Task SelectedMetadataAddonOwnsDetailsWithoutCatalogFallback()
+    {
+        var previous = Item("series:tt0149460:1:1", "series", "tt0149460") with
+        {
+            ContentKey = "series:tt0149460",
+            Season = 1,
+            Episode = 1,
+            Genres = ["Old catalog genre"],
+            People = [new("Old catalog actor", "Actor")]
+        };
+        var snapshot = await SynchronizeToStateAsync("series", [previous], uri => uri.AbsolutePath switch
+        {
+            "/manifest.json" => """{"id":"catalog","types":["series"],"resources":["catalog","meta"],"catalogs":[{"type":"series","id":"all"}]}""",
+            "/aio/manifest.json" => """{"id":"metadata","types":["series"],"resources":["meta"]}""",
+            "/catalog/series/all.json" => """{"metas":[{"id":"tt0149460","type":"series","name":"Catalog name","description":"Catalog plot","genres":["Catalog genre"],"videos":[{"id":"catalog:1:1","season":1,"episode":1,"thumbnail":"https://art.example/catalog.jpg"}]}]}""",
+            "/aio/meta/series/tt0149460.json" => """
+                {"meta":{"id":"tt0149460","type":"series","name":"AIOMetadata title","description":"Selected series plot",
+                  "poster":"https://art.example/series.jpg","background":"https://art.example/background.jpg",
+                  "logo":"https://art.example/logo.png","_tmdbId":"615","genres":["Animation"],
+                  "app_extras":{"cast":[{"name":"Selected actor","character":"Narrator"}],"seasonPosters":["https://art.example/season-one.jpg","https://art.example/season-four.jpg"]},
+                  "videos":[{"id":"exact:one","season":1,"episode":1,"title":"First","overview":"First plot","thumbnail":"https://art.example/one.jpg"},
+                    {"id":"exact:four","season":4,"episode":1,"title":"Fourth","overview":"Fourth plot"}]}}
+                """,
+            _ => throw new InvalidOperationException("Catalog metadata must not replace the selected metadata addon.")
+        }, config =>
+        {
+            config.MetadataAddonId = "metadata";
+            config.Addons = [.. config.Addons, new ConfiguredAddon { Id = "metadata", ManifestUrl = "https://example.org/aio/manifest.json" }];
+        });
+        Assert.Equal(2, snapshot.Count);
+        Assert.All(snapshot, item =>
+        {
+            Assert.Equal("AIOMetadata title", item.SeriesName);
+            Assert.Equal("Selected series plot", item.SeriesDescription);
+            Assert.Equal("https://art.example/background.jpg", item.BackdropUrl);
+            Assert.Equal("https://art.example/logo.png", item.LogoUrl);
+            Assert.Equal(new[] { "Animation" }, item.Genres);
+            Assert.Equal("Selected actor", Assert.Single(item.People).Name);
+            Assert.Null(item.SeasonPosterUrl); // Unnumbered artwork must not be attached to the wrong season.
+            Assert.Equal("615", item.ProviderIds["Tmdb"]);
+        });
+        Assert.Equal("https://art.example/one.jpg", snapshot.Single(item => item.Season == 1).ThumbnailUrl);
+        Assert.Null(snapshot.Single(item => item.Season == 4).ThumbnailUrl);
+        Assert.Equal("exact:four", snapshot.Single(item => item.Season == 4).VideoId);
+    }
+
+    [Fact]
+    public async Task SelectedMetadataFailureRetainsExistingTitleWithoutTryingOtherAddons()
+    {
+        var previous = Item("movie:tt1234567", "movie", "tt1234567") with { Description = "Retained metadata" };
+        var snapshot = await SynchronizeToStateAsync("movie", [previous], uri => uri.AbsolutePath switch
+        {
+            "/manifest.json" => """{"id":"catalog","types":["movie"],"resources":["catalog","meta"],"catalogs":[{"type":"movie","id":"all"}]}""",
+            "/aio/manifest.json" => """{"id":"metadata","types":["movie"],"resources":["meta"]}""",
+            "/catalog/movie/all.json" => """{"metas":[{"id":"tt1234567","type":"movie","name":"Unwanted catalog replacement","description":"Do not use this fallback"}]}""",
+            "/aio/meta/movie/tt1234567.json" => """{"meta":null}""",
+            _ => throw new InvalidOperationException("A selected source failure must not activate Cinemata or another metadata addon.")
+        }, config =>
+        {
+            config.MetadataAddonId = "metadata";
+            config.Addons = [.. config.Addons, new ConfiguredAddon { Id = "metadata", ManifestUrl = "https://example.org/aio/manifest.json" }];
+        });
+        Assert.Equal(previous, Assert.Single(snapshot));
+    }
+
+    [Theory]
+    [InlineData("615", "Selected title")]
+    [InlineData("999", "Original")]
+    public async Task CanonicalizedMetadataMustProveTheSameIdentity(string returnedTmdbId, string expectedName)
+    {
+        var previous = Item("series:tmdb:615:1:1", "series", "tmdb:615") with
+        {
+            Name = "Episode",
+            SeriesName = "Original",
+            ContentKey = "series:tmdb:615",
+            Season = 1,
+            Episode = 1,
+            ProviderIds = new() { ["Tmdb"] = "615" },
+            VideoId = "original:video"
+        };
+        var snapshot = await SynchronizeToStateAsync("series", [previous], uri => uri.AbsolutePath switch
+        {
+            "/manifest.json" => """{"id":"catalog","types":["series"],"resources":["catalog"],"catalogs":[{"type":"series","id":"all"}]}""",
+            "/aio/manifest.json" => """{"id":"metadata","types":["series"],"resources":["meta"]}""",
+            "/catalog/series/all.json" => """{"metas":[{"id":"tmdb:615","type":"series","name":"Catalog title"}]}""",
+            "/aio/meta/series/tmdb%3A615.json" => $$$"""{"meta":{"id":"tt0149460","type":"series","name":"Selected title","_tmdbId":"{{{returnedTmdbId}}}","videos":[{"id":"exact:response:video","season":1,"episode":1,"title":"Episode"}]}}""",
+            _ => throw new InvalidOperationException("Unexpected metadata request.")
+        }, config =>
+        {
+            config.MetadataAddonId = "metadata";
+            config.Addons = [.. config.Addons, new ConfiguredAddon { Id = "metadata", ManifestUrl = "https://example.org/aio/manifest.json" }];
+        });
+        var result = Assert.Single(snapshot);
+        Assert.Equal(expectedName, result.SeriesName);
+        Assert.Equal(previous.Key, result.Key);
+        Assert.Equal(previous.ContentKey, result.ContentKey);
+        Assert.Equal(previous.Path, result.Path);
+        Assert.Equal(returnedTmdbId == "615" ? "exact:response:video" : previous.VideoId, result.VideoId);
+    }
+
     private static async Task<IReadOnlyList<ManagedItem>> SynchronizeToStateAsync(string type, IReadOnlyList<ManagedItem> previous, Func<Uri, string> respond,
         Action<PluginConfiguration>? configure = null, Action<SyncDiagnostics>? inspectDiagnostics = null,
         SyncKind kind = SyncKind.Catalogs, FollowedSeriesSelector? selector = null, bool? expectCommit = true,
-        CancellationToken cancellationToken = default, bool expectCancellation = false)
+        CancellationToken cancellationToken = default, bool expectCancellation = false, SyncTarget? target = null)
     {
         var config = new PluginConfiguration
         {
@@ -466,8 +736,8 @@ public sealed class CatalogSyncTests
         var state = new StateBoundary(previous);
         // Exercise real parsing and reconciliation, stopping at persistence before native
         // Jellyfin materialization, which needs a running server and its database.
-        var cleanup = new CatalogCleanupService(configuration, state, null!, null!);
         var library = DispatchProxy.Create<ILibraryManager, EmptyLibraryProxy>();
+        var cleanup = new CatalogCleanupService(configuration, state, null!, null!, new CollectionRetentionService(library, state, null!));
         var enrichment = new MetadataEnrichmentService(configuration, null!, library, null!, state);
         var proxy = DispatchProxy.Create<IApplicationPaths, PathsProxy>();
         ((PathsProxy)(object)proxy).DataPath = Path.Combine(Path.GetTempPath(), "siphon-sync-" + Guid.NewGuid().ToString("N"));
@@ -477,12 +747,12 @@ public sealed class CatalogSyncTests
             var sync = new CatalogSyncService(configuration, registry, client, state, null!, NullLogger<CatalogSyncService>.Instance,
                 cleanup, enrichment, diagnostics, selector);
             if (expectCancellation)
-                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => sync.SynchronizeAsync(new Progress<double>(), cancellationToken, kind));
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => sync.SynchronizeAsync(new Progress<double>(), cancellationToken, kind, target));
             else if (expectCommit == true)
-                await Assert.ThrowsAsync<SnapshotCapturedException>(() => sync.SynchronizeAsync(new Progress<double>(), cancellationToken, kind));
+                await Assert.ThrowsAsync<SnapshotCapturedException>(() => sync.SynchronizeAsync(new Progress<double>(), cancellationToken, kind, target));
             else if (expectCommit == false)
-                await Assert.ThrowsAsync<InvalidOperationException>(() => sync.SynchronizeAsync(new Progress<double>(), cancellationToken, kind));
-            else await sync.SynchronizeAsync(new Progress<double>(), cancellationToken, kind);
+                await Assert.ThrowsAsync<InvalidOperationException>(() => sync.SynchronizeAsync(new Progress<double>(), cancellationToken, kind, target));
+            else await sync.SynchronizeAsync(new Progress<double>(), cancellationToken, kind, target);
             inspectDiagnostics?.Invoke(diagnostics);
             return state.GetItems();
         }
@@ -507,6 +777,7 @@ public sealed class CatalogSyncTests
         {
             "GetNewItemId" => Guid.Empty,
             "GetItemById" => null,
+            "GetItemList" => Array.Empty<BaseItem>(),
             _ => throw new NotSupportedException()
         };
     }
@@ -514,16 +785,23 @@ public sealed class CatalogSyncTests
     public class VersionLibraryProxy : DispatchProxy
     {
         public Movie Movie { get; set; } = null!;
+        public Folder Parent { get; } = new() { Id = Guid.NewGuid(), Path = "/fixture/parent" };
+        private readonly List<Video> _versions = [];
         protected override object? Invoke(MethodInfo? method, object?[]? args) => method?.Name switch
         {
-            "GetNewItemId" => Movie.Id,
-            "GetItemById" => args![0] is Guid id && id == Movie.Id ? Movie : null,
-            "GetItemList" => new List<BaseItem> { Movie },
-            "GetLinkedAlternateVersions" => new List<Video>(),
+            "GetNewItemId" => new Guid(MD5.HashData(Encoding.UTF8.GetBytes(args![0] + ":" + args[1]))),
+            "GetItemById" => args![0] is Guid id ? id == Parent.Id ? Parent : id == Movie.Id ? Movie : _versions.FirstOrDefault(version => version.Id == id) : null,
+            "GetItemList" => ((InternalItemsQuery)args![0]!).IncludeItemTypes.Any(kind => kind.ToString() is "BoxSet" or "Playlist")
+                ? Array.Empty<BaseItem>() : new BaseItem[] { Movie }.Concat(_versions).ToArray(),
+            "GetLinkedAlternateVersions" => _versions.ToArray(),
+            "CreateItems" => Add((IEnumerable<BaseItem>)args![0]!),
+            "ConfigureUserAccess" => null,
+            "UpsertLinkedChild" => null,
             "GetPeople" => new List<PersonInfo>(),
             "RegisterItem" => null,
             _ => throw new NotSupportedException(method?.Name)
         };
+        private object? Add(IEnumerable<BaseItem> items) { _versions.AddRange(items.OfType<Video>()); return null; }
     }
 
     public class VersionPersistenceProxy : DispatchProxy

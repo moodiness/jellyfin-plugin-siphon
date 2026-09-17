@@ -332,10 +332,131 @@ public sealed class SiphonDiagnosticsControllerTests : IDisposable
         using var restarted = Diagnostics(paths);
         var status = restarted.GetRunStatus();
         Assert.Null(status.CurrentRun);
-        Assert.Equal("Failed", status.LastRun!.State);
+        Assert.Equal("Interrupted", status.LastRun!.State);
         Assert.Equal("FollowedSeries", status.LastRun.Kind);
         Assert.Equal((12, 40), (status.LastRun.Completed, status.LastRun.Total));
         Assert.Null(status.LastRun.FinishedAtUtc);
+        Assert.Equal(new[] { "Interrupted", "Completed" }, restarted.GetHistory().Select(run => run.State));
+    }
+
+    [Fact]
+    public void TwentyRunsRotateDurablyAndDecisionsArePagedWithoutCredentialBearingValues()
+    {
+        var paths = Paths();
+        string removedId = "";
+        string latestId = "";
+        using (var diagnostics = Diagnostics(paths))
+        {
+            for (var index = 0; index < 23; index++)
+            {
+                diagnostics.BeginRun("Targeted", "Series", "https://private.invalid/" + SensitiveValue);
+                if (index == 0) removedId = diagnostics.GetRunStatus().CurrentRun!.Id;
+                diagnostics.RecordDecision("series:tt1234567", "Example series", "Pending", "CacheHit");
+                diagnostics.RecordDecision("series:tt1234567", "Example series", "Unchanged", "NoChanges");
+                diagnostics.RecordDecision("https://private.invalid/" + SensitiveValue, "https://private.invalid/" + SensitiveValue, "Preserved", "MetadataLocked");
+                diagnostics.RecordDecision("movie:tt1234568", "New movie", "Added", "Published");
+                diagnostics.FinishRun(index == 22 ? "Cancelled" : "Completed");
+                latestId = diagnostics.GetRunStatus().LastRun!.Id;
+            }
+        }
+        using var restarted = Diagnostics(paths);
+        var history = restarted.GetHistory();
+        Assert.Equal(20, history.Count);
+        Assert.Equal(latestId, history[0].Id);
+        Assert.Equal("Cancelled", history[0].State);
+        Assert.Null(restarted.GetHistoryDetails(removedId, 0, 100));
+        var first = restarted.GetHistoryDetails(latestId, 0, 1)!;
+        Assert.Equal(3, first.TotalCount);
+        Assert.Equal("Unchanged", Assert.Single(first.Items).Action);
+        Assert.Contains("CacheHit", first.Items[0].Reasons);
+        var remainder = restarted.GetHistoryDetails(latestId, 1, 2)!;
+        Assert.Equal(new[] { "Preserved", "Added" }, remainder.Items.Select(item => item.Action));
+        Assert.Empty(restarted.GetHistoryDetails(latestId, 3, 2)!.Items);
+        Assert.DoesNotContain(SensitiveValue, JsonSerializer.Serialize(history));
+        Assert.DoesNotContain(SensitiveValue, JsonSerializer.Serialize(remainder));
+        foreach (var path in Directory.EnumerateFiles(paths.DataDirectory, "*", SearchOption.AllDirectories))
+            Assert.DoesNotContain(SensitiveValue, File.ReadAllText(path));
+    }
+
+    [Fact]
+    public async Task ParallelTitleScopesAttributeOnlyActualProviderObservations()
+    {
+        using var diagnostics = Diagnostics(Paths());
+        diagnostics.BeginRun("Catalogs");
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        async Task Paused()
+        {
+            using var scope = diagnostics.BeginTitle("movie:tt1234567", "Paused movie");
+            ready.SetResult();
+            await release.Task;
+            diagnostics.RecordProviderError("Tmdb", "ProviderPaused");
+        }
+        var paused = Paused();
+        await ready.Task;
+        using (diagnostics.BeginTitle("movie:tt1234568", "Cached movie"))
+            diagnostics.RecordProviderRequest("Tvdb", cached: true);
+        diagnostics.RecordDecision("movie:tt1234568", "Cached movie", "Unchanged", "NoChanges");
+        release.SetResult();
+        await paused;
+        diagnostics.FinishRun("Completed");
+        var page = diagnostics.GetHistoryDetails(diagnostics.GetRunStatus().LastRun!.Id, 0, 10)!;
+        var cached = page.Items.Single(item => item.ContentKey == "movie:tt1234568");
+        Assert.DoesNotContain("ProviderPaused", cached.Reasons);
+        Assert.Equal("Unchanged", cached.Action);
+        Assert.Equal("ProviderPaused", page.Items.Single(item => item.ContentKey == "movie:tt1234567").Action);
+    }
+
+    [Fact]
+    public void InterruptedDetailsSurviveRepeatedRestartAndCorruptionDoesNotEraseSummaries()
+    {
+        var paths = Paths();
+        string id;
+        using (var diagnostics = Diagnostics(paths))
+        {
+            diagnostics.BeginRun("Catalogs");
+            diagnostics.RecordDecision("movie:tt1234567", "Unfinished movie", "Pending", "Scheduled");
+            id = diagnostics.GetRunStatus().CurrentRun!.Id;
+        }
+        using (var restarted = Diagnostics(paths))
+        {
+            Assert.Equal("Interrupted", Assert.Single(restarted.GetHistory()).State);
+            var decision = Assert.Single(restarted.GetHistoryDetails(id, 0, 10)!.Items);
+            Assert.Equal("Error", decision.Action);
+            Assert.Contains("Interrupted", decision.Reasons);
+        }
+        File.WriteAllText(Path.Combine(paths.DataDirectory, "sync-history", id + ".jsonl"), "{broken");
+        using var again = Diagnostics(paths);
+        Assert.Equal(id, Assert.Single(again.GetHistory()).Id);
+        Assert.Equal("HistoryDetailsUnavailable", again.GetHistoryDetails(id, 0, 10)!.StorageCode);
+        Assert.Equal("Interrupted", again.GetRunStatus().LastRun!.State);
+    }
+
+    [Fact]
+    public void VersionTwoMigrationKeepsLastRunAlongsideInterruptedCurrentRun()
+    {
+        var paths = Paths();
+        Directory.CreateDirectory(paths.DataDirectory);
+        var completed = new SyncRunSnapshot("Catalogs", "Completed", DateTimeOffset.UtcNow.AddHours(-2), DateTimeOffset.UtcNow.AddHours(-1),
+            "Finalizing", "Items", 5, 5, 0, 2, 3, 0, 0, 0, 0, []);
+        var current = completed with { Kind = "FullRefresh", State = "Running", StartedAtUtc = DateTimeOffset.UtcNow, FinishedAtUtc = null };
+        File.WriteAllText(Path.Combine(paths.DataDirectory, "diagnostics.json"), JsonSerializer.Serialize(new
+        {
+            Version = 2,
+            Addons = Array.Empty<InstallationDiagnostic>(),
+            LastRun = completed,
+            CurrentRun = current
+        }));
+        string[] ids;
+        using (var migrated = Diagnostics(paths))
+        {
+            var history = migrated.GetHistory();
+            Assert.Equal(new[] { "Interrupted", "Completed" }, history.Select(run => run.State));
+            Assert.Equal((2, 3), (history[1].Added, history[1].Updated));
+            ids = history.Select(run => run.Id).ToArray();
+        }
+        using var restarted = Diagnostics(paths);
+        Assert.Equal(ids, restarted.GetHistory().Select(run => run.Id));
     }
 
     private static SyncDiagnostics Diagnostics(SiphonPaths paths) => new(paths, NullLogger<SyncDiagnostics>.Instance);

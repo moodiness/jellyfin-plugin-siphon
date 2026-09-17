@@ -24,6 +24,7 @@ public sealed class MetadataEnrichmentService(
     {
         ct.ThrowIfCancellationRequested();
         var config = configuration.Current;
+        var seasonPostersOnly = !string.IsNullOrEmpty(config.MetadataAddonId);
         var total = items.Select(item => item.ContentKey).Distinct(StringComparer.Ordinal).Count();
         diagnostics?.ReportStage("Metadata", "Titles", 0, total);
         if (items.Count == 0) { progress?.Report(100); return items; }
@@ -49,12 +50,20 @@ public sealed class MetadataEnrichmentService(
         var fillMissing = new PluginConfiguration();
         var languages = LibraryLanguages();
         var groups = items.Select((item, index) => (Item: item, Index: index)).GroupBy(entry => entry.Item.ContentKey, StringComparer.Ordinal);
+        using var requestScope = providers.BeginScope(config, forceRefresh, diagnostics);
         await Parallel.ForEachAsync(groups, new ParallelOptions { MaxDegreeOfParallelism = Math.Clamp(config.MaxConcurrentRequests, 1, 16), CancellationToken = ct }, async (group, token) =>
         {
             var entries = group.ToArray();
             var first = entries[0].Item;
+            using var titleScope = diagnostics?.BeginTitle(first.ContentKey, first.SeriesName ?? first.Name);
             if (first.Type is not ("movie" or "series")) { Complete(); return; }
+            if (seasonPostersOnly && (first.Type != "series" || !entries.Any(entry => NeedsSeasonPoster(entry.Item, config)))) { Complete(); return; }
+            // Consolidate pre-existing parent fields before enrichment so every retained episode shares one parent snapshot.
+            var parent = first;
+            if (!seasonPostersOnly)
+                foreach (var entry in entries.Skip(1)) parent = MetadataPolicy.Merge(parent, ParentValues(entry.Item), fillMissing);
             var ids = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var idOrigins = new Dictionary<string, MetadataObservation>(StringComparer.OrdinalIgnoreCase);
             foreach (var entry in entries)
                 foreach (var (key, value) in entry.Item.ProviderIds) ids.TryAdd(key, value);
             var native = Native(first, first.Type == "series");
@@ -62,10 +71,6 @@ public sealed class MetadataEnrichmentService(
                 foreach (var (key, value) in native.ProviderIds) ids.TryAdd(key, value);
             var language = Clean(config.MetadataLanguage) ?? first.Owners.Order(StringComparer.Ordinal).Select(owner => languages.GetValueOrDefault(owner)).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))
                 ?? Clean(native?.GetPreferredMetadataLanguage()) ?? Clean(server.Configuration.PreferredMetadataLanguage);
-            var episodeSet = first.Type == "series"
-                ? string.Join(";", entries.Select(entry => FormattableString.Invariant($"{entry.Item.Season}:{entry.Item.Episode}")).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal))
-                : string.Empty;
-            using var requestScope = providers.BeginScope(config, language, first.ContentKey, episodeSet, forceRefresh, diagnostics);
             var values = new MetadataValues();
             TmdbRecord? tmdb = null;
             TvdbRecord? tvdb = null;
@@ -87,18 +92,21 @@ public sealed class MetadataEnrichmentService(
                         id = matches[0].Id.ToString(CultureInfo.InvariantCulture);
                     }
                     var route = first.Type == "movie" ? "movie/" : "tv/";
-                    var record = await providers.GetAsync<TmdbRecord>("Tmdb", "https://api.themoviedb.org/3/" + route + id + "?append_to_response=credits,external_ids" + Language(language), MetadataProviderClient.Bearer(config.TmdbReadAccessToken), true, token,
+                    var query = seasonPostersOnly
+                        ? language is null ? string.Empty : "?language=" + Uri.EscapeDataString(language)
+                        : "?append_to_response=credits,external_ids" + Language(language);
+                    var record = await providers.GetAsync<TmdbRecord>("Tmdb", "https://api.themoviedb.org/3/" + route + id + query, MetadataProviderClient.Bearer(config.TmdbReadAccessToken), true, token,
                         value => value.Id.ToString(CultureInfo.InvariantCulture) == id && !string.IsNullOrWhiteSpace(first.Type == "movie" ? value.Title : value.Name)).ConfigureAwait(false);
                     imageBase = await providers.TmdbImageBaseAsync(config, token).ConfigureAwait(false);
-                    AddId(ids, "Tmdb", id);
-                    AddId(ids, "Imdb", record.ExternalIds?.ImdbId);
-                    AddId(ids, "Tvdb", record.ExternalIds?.TvdbId?.ToString(CultureInfo.InvariantCulture));
+                    if (AddId(ids, "Tmdb", id)) idOrigins["Tmdb"] = MetadataProvenance.Observation(record);
+                    if (AddId(ids, "Imdb", record.ExternalIds?.ImdbId)) idOrigins["Imdb"] = MetadataProvenance.Observation(record);
+                    if (AddId(ids, "Tvdb", record.ExternalIds?.TvdbId?.ToString(CultureInfo.InvariantCulture))) idOrigins["Tvdb"] = MetadataProvenance.Observation(record);
                     return record;
                 }, token).ConfigureAwait(false);
                 tmdb = fetched.Value;
-                if (tmdb is not null) values = TmdbValues(tmdb, imageBase!);
+                if (tmdb is not null && !seasonPostersOnly) values = TmdbValues(tmdb, imageBase!);
             }
-            if (config.EnableTvdbMetadata)
+            if (MetadataProviderClient.Enabled(config, "Tvdb"))
             {
                 var fetched = await providers.TryAsync("Tvdb", config, async () =>
                 {
@@ -115,15 +123,16 @@ public sealed class MetadataEnrichmentService(
                     }
                     var record = await providers.TvdbAsync<TvdbRecord>(config, (first.Type == "movie" ? "movies/" : "series/") + id + "/extended?meta=translations", token,
                         value => value.Id.ToString(CultureInfo.InvariantCulture) == id && !string.IsNullOrWhiteSpace(value.Name)).ConfigureAwait(false);
-                    AddId(ids, "Tvdb", id);
+                    if (AddId(ids, "Tvdb", id)) idOrigins["Tvdb"] = MetadataProvenance.Observation(record);
                     foreach (var remote in record.RemoteIds)
-                        if (remote?.SourceName?.Equals("IMDB", StringComparison.OrdinalIgnoreCase) == true) AddId(ids, "Imdb", remote.Id);
+                        if (remote?.SourceName?.Equals("IMDB", StringComparison.OrdinalIgnoreCase) == true && AddId(ids, "Imdb", remote.Id))
+                            idOrigins["Imdb"] = MetadataProvenance.Observation(record);
                     return record;
                 }, token).ConfigureAwait(false);
                 tvdb = fetched.Value;
                 if (tvdb is not null) values = values.FillFrom(TvdbValues(tvdb, language));
             }
-            if (config.EnableFanartMetadata)
+            if (MetadataProviderClient.Enabled(config, "Fanart"))
             {
                 var fetched = await providers.TryAsync("Fanart", config, async () =>
                 {
@@ -137,15 +146,16 @@ public sealed class MetadataEnrichmentService(
                 if (fanart is not null)
                 {
                     var movie = first.Type == "movie";
-                    values = values with
+                    values = new MetadataValues
                     {
-                        Poster = Image(movie ? fanart.Movieposter : fanart.Tvposter, language) ?? values.Poster,
-                        Backdrop = Image(movie ? fanart.Moviebackground : fanart.Showbackground, language) ?? values.Backdrop,
-                        Logo = Image(movie ? fanart.Hdmovielogo : fanart.Hdtvlogo, language) ?? Image(movie ? fanart.Movielogo : fanart.Clearlogo, language) ?? values.Logo
-                    };
+                        Poster = Image(movie ? fanart.Movieposter : fanart.Tvposter, language),
+                        Backdrop = Image(movie ? fanart.Moviebackground : fanart.Showbackground, language),
+                        Logo = Image(movie ? fanart.Hdmovielogo : fanart.Hdtvlogo, language) ?? Image(movie ? fanart.Movielogo : fanart.Clearlogo, language)
+                    }.Observed(fanart).FillFrom(values);
                 }
             }
-            if (config.EnableMdbListMetadata)
+            if (MetadataProviderClient.Enabled(config, "MdbList") && MetadataPolicy.Wants(config, "Ratings", !parent.CommunityRating.HasValue)
+                && (native is null || MetadataPolicy.CanUpdate(native, config, "Ratings", !native.CommunityRating.HasValue)))
             {
                 var fetched = await providers.TryAsync("MdbList", config, async () =>
                 {
@@ -161,46 +171,71 @@ public sealed class MetadataEnrichmentService(
                         }) == id && value.Type == type && !string.IsNullOrWhiteSpace(value.Title)).ConfigureAwait(false);
                     return result;
                 }, token).ConfigureAwait(false);
-                if (fetched.Value?.Score is >= 0 and <= 100) values = values with { Rating = fetched.Value.Score / 10f };
+                if (fetched.Value?.Score is >= 0 and <= 100)
+                    values = new MetadataValues { Rating = fetched.Value.Score / 10f }.Observed(fetched.Value).FillFrom(values);
             }
 
-            // Consolidate pre-existing parent fields before enrichment so every retained episode shares one parent snapshot.
-            var parent = first;
-            foreach (var entry in entries.Skip(1)) parent = MetadataPolicy.Merge(parent, ParentValues(entry.Item), fillMissing);
             if (native?.IsLocked == true) values = values with { Poster = null, Backdrop = null, Logo = null };
-            parent = MetadataPolicy.Merge(parent, values, config);
+            if (!seasonPostersOnly) parent = MetadataPolicy.Merge(parent, values, config);
             foreach (var entry in entries)
             {
+                if (seasonPostersOnly) continue;
                 var item = first.Type == "series" ? WithParent(entry.Item, parent) : MetadataPolicy.Merge(entry.Item, values, config);
                 var discovered = new Dictionary<string, string>(item.ProviderIds, StringComparer.OrdinalIgnoreCase);
-                foreach (var key in new[] { "Imdb", "Tmdb", "Tvdb" }) if (Id(ids, key) is { } id) discovered.TryAdd(key, id);
+                foreach (var key in new[] { "Imdb", "Tmdb", "Tvdb" })
+                    if (Id(ids, key) is { } id && discovered.TryAdd(key, id))
+                        item = MetadataProvenance.Contribute(item, "ProviderIds", idOrigins.GetValueOrDefault(key) ?? new("Unknown", null, null));
                 item = item with { ProviderIds = discovered };
-                if (fanart is not null && item.Season.HasValue && !SeasonLocked(item) && MetadataPolicy.Wants(config, "Images", string.IsNullOrWhiteSpace(item.SeasonPosterUrl)))
-                    item = item with { SeasonPosterUrl = Image(fanart.Seasonposter.Where(image => image is not null && image.Season == item.Season.Value.ToString(CultureInfo.InvariantCulture)), language) ?? item.SeasonPosterUrl };
+                if (fanart is not null && (tmdb is null || imageBase is null) && item.Type == "series" && item.Season is >= 0)
+                    item = WithSeasonPoster(item, Image(fanart.Seasonposter.Where(image => image is not null && image.Season == item.Season.Value.ToString(CultureInfo.InvariantCulture)), language), config, MetadataProvenance.Observation(fanart));
                 output[entry.Index] = item;
             }
             if (first.Type != "series") { Complete(); return; }
             var episodeValues = new Dictionary<int, MetadataValues>();
             if (tmdb is not null && imageBase is not null)
             {
-                foreach (var season in entries.Where(entry => NeedsEpisode(output[entry.Index], config, true, forceRefresh)).GroupBy(entry => entry.Item.Season))
+                var knownSeasons = (tmdb.Seasons ?? []).Where(season => season is { Id: > 0, SeasonNumber: >= 0 })
+                    .GroupBy(season => season.SeasonNumber!.Value).Where(season => season.Count() == 1)
+                    .ToDictionary(season => season.Key, season => season.First());
+                foreach (var season in entries.Where(entry => entry.Item.Season is >= 0).GroupBy(entry => entry.Item.Season!.Value))
                 {
-                    if (season.Key is not >= 0) continue;
-                    var fetched = await providers.TryAsync("Tmdb", config, () => providers.GetAsync<TmdbRecord>("Tmdb", "https://api.themoviedb.org/3/tv/" + tmdb.Id.ToString(CultureInfo.InvariantCulture) + "/season/" + season.Key.Value.ToString(CultureInfo.InvariantCulture) + (language is null ? string.Empty : "?language=" + Uri.EscapeDataString(language)), MetadataProviderClient.Bearer(config.TmdbReadAccessToken), true, token,
-                        value => value.Id > 0 && value.SeasonNumber == season.Key && value.Episodes is not null
-                            && value.Episodes.All(episode => episode is not null && episode.Id > 0 && episode.SeasonNumber == season.Key && episode.EpisodeNumber > 0)
-                            && value.Episodes.Select(episode => episode.EpisodeNumber).Distinct().Count() == value.Episodes.Length), token).ConfigureAwait(false);
+                    knownSeasons.TryGetValue(season.Key, out var knownSeason);
+                    var poster = fanart is null ? null : Image(fanart.Seasonposter.Where(image => image is not null && image.Season == season.Key.ToString(CultureInfo.InvariantCulture)), language);
+                    var posterSource = MetadataProvenance.Observation(fanart);
+                    if (MissingChildImage(output[season.First().Index], poster))
+                    {
+                        poster = TmdbImage(imageBase, knownSeason?.PosterPath);
+                        posterSource = MetadataProvenance.Observation(tmdb);
+                    }
+                    if (MissingChildImage(output[season.First().Index], poster)) poster = null;
+                    foreach (var entry in season)
+                        output[entry.Index] = WithSeasonPoster(output[entry.Index], poster, config, posterSource);
+                    var eligibleEpisodes = seasonPostersOnly ? [] : season.Where(entry => NeedsEpisode(output[entry.Index], config, true, forceRefresh)).ToArray();
+                    if (eligibleEpisodes.Length == 0 && !season.Any(entry => MissingChildImage(output[entry.Index], output[entry.Index].SeasonPosterUrl) && NeedsSeasonPoster(output[entry.Index], config))) continue;
+                    var fetched = await providers.TryAsync("Tmdb", config, () => providers.GetAsync<TmdbRecord>("Tmdb", "https://api.themoviedb.org/3/tv/" + tmdb.Id.ToString(CultureInfo.InvariantCulture) + "/season/" + season.Key.ToString(CultureInfo.InvariantCulture) + (language is null ? string.Empty : "?language=" + Uri.EscapeDataString(language)), MetadataProviderClient.Bearer(config.TmdbReadAccessToken), true, token,
+                        value => value.Id > 0 && (knownSeason is null || value.Id == knownSeason.Id) && value.SeasonNumber == season.Key
+                            && (!value.ShowId.HasValue || value.ShowId == tmdb.Id) && (seasonPostersOnly || (value.Episodes is not null
+                            && value.Episodes.All(episode => episode is not null && episode.Id > 0 && episode.SeasonNumber == season.Key && episode.EpisodeNumber > 0
+                                && (!episode.ShowId.HasValue || episode.ShowId == tmdb.Id))
+                            && value.Episodes.Select(episode => episode.EpisodeNumber).Distinct().Count() == value.Episodes.Length)),
+                        revision: seasonPostersOnly ? null : string.Join(";", season.Where(entry => entry.Item.Episode > 0)
+                            .Select(entry => entry.Item.Episode!.Value.ToString(CultureInfo.InvariantCulture)).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal))), token).ConfigureAwait(false);
                     if (fetched.Value is null) continue;
                     foreach (var entry in season)
+                        output[entry.Index] = WithSeasonPoster(output[entry.Index], poster ?? TmdbImage(imageBase, fetched.Value.PosterPath), config,
+                            poster is null ? MetadataProvenance.Observation(fetched.Value) : posterSource);
+                    foreach (var entry in eligibleEpisodes)
                     {
-                        var episode = (fetched.Value.Episodes ?? []).FirstOrDefault(record => record is not null && record.SeasonNumber == entry.Item.Season && record.EpisodeNumber == entry.Item.Episode);
-                        if (episode is null || episode.Id <= 0) continue;
+                        var episode = fetched.Value.Episodes.FirstOrDefault(record => record.SeasonNumber == entry.Item.Season && record.EpisodeNumber == entry.Item.Episode);
+                        if (episode is null || (Id(entry.Item.EpisodeProviderIds, "Tmdb") is { } episodeId && episode.Id.ToString(CultureInfo.InvariantCulture) != episodeId)) continue;
+                        MetadataProvenance.Observe(episode, MetadataProvenance.Observation(fetched.Value));
                         var metadata = TmdbValues(episode, imageBase, true);
                         if (Native(entry.Item)?.IsLocked == true) metadata = metadata with { Poster = null };
                         episodeValues[entry.Index] = metadata;
-                        var item = MetadataPolicy.Merge(output[entry.Index], metadata, config, true);
+                        var item = MergeEpisode(output[entry.Index], metadata, config);
                         var episodeIds = new Dictionary<string, string>(item.EpisodeProviderIds, StringComparer.OrdinalIgnoreCase);
-                        AddId(episodeIds, "Tmdb", episode.Id.ToString(CultureInfo.InvariantCulture));
+                        if (AddId(episodeIds, "Tmdb", episode.Id.ToString(CultureInfo.InvariantCulture)))
+                            item = MetadataProvenance.Contribute(item, "EpisodeProviderIds", MetadataProvenance.Observation(episode));
                         output[entry.Index] = item with { EpisodeProviderIds = episodeIds };
                     }
                 }
@@ -215,8 +250,9 @@ public sealed class MetadataEnrichmentService(
                     var fetched = await providers.TryAsync("Tvdb", config, async () =>
                     {
                         var record = await providers.TvdbAsync<TvdbRecord>(config, "episodes/" + id + "/extended?meta=translations", token,
-                            value => value.Id.ToString(CultureInfo.InvariantCulture) == id && value.SeasonNumber == entry.Item.Season
-                                && value.Number == entry.Item.Episode && !string.IsNullOrWhiteSpace(value.Name)).ConfigureAwait(false);
+                            value => value.Id.ToString(CultureInfo.InvariantCulture) == id && value.SeriesId == tvdb.Id
+                                && value.SeasonNumber == entry.Item.Season && value.Number == entry.Item.Episode
+                                && !string.IsNullOrWhiteSpace(value.Name)).ConfigureAwait(false);
                         return record;
                     }, token).ConfigureAwait(false);
                     if (fetched.Value is not null)
@@ -224,7 +260,7 @@ public sealed class MetadataEnrichmentService(
                         var metadata = TvdbValues(fetched.Value, language, true);
                         if (episodeValues.TryGetValue(entry.Index, out var preferred)) metadata = preferred.FillFrom(metadata);
                         if (Native(entry.Item)?.IsLocked == true) metadata = metadata with { Poster = null };
-                        output[entry.Index] = MetadataPolicy.Merge(output[entry.Index], metadata, config, true);
+                        output[entry.Index] = MergeEpisode(output[entry.Index], metadata, config);
                     }
                 }
             }
@@ -238,8 +274,10 @@ public sealed class MetadataEnrichmentService(
         ManagedItem[]? output = null;
         var config = configuration.Current;
         var peoplePolicy = new Dictionary<Guid, bool>();
-        bool PreserveImage(BaseItem? target, ImageType type)
-            => target is not null && !MetadataPolicy.CanUpdate(target, config, "Images", !target.HasImage(type));
+        bool PreserveImage(BaseItem? target, ImageType type, bool missing, BaseItem? inheritedFrom = null)
+            => target is not null && !MetadataPolicy.CanUpdateImage(target, config, type, missingManagedValue: missing, inheritedFrom: inheritedFrom);
+        bool Locked(BaseItem? target, string field)
+            => target is not null && !MetadataPolicy.CanUpdate(target, config, field, true, initialize: true);
         bool PreservePeople(BaseItem? target)
         {
             if (target is null) return false;
@@ -250,48 +288,62 @@ public sealed class MetadataEnrichmentService(
             return preserve;
         }
         var parents = new Dictionary<string, BaseItem?>(StringComparer.Ordinal);
-        var seasons = new Dictionary<(string, int), bool>();
+        var seasons = new Dictionary<(string, int), BaseItem?>();
         for (var index = 0; index < items.Count; index++)
         {
             ct.ThrowIfCancellationRequested();
             if (index % 64 == 0) progress?.Report(100d * index / items.Count);
             var item = items[index];
+            var previous = Previous(item);
+            if (previous is null) continue;
             var native = Native(item);
             var parent = native;
-            var seasonLocked = false;
+            BaseItem? season = null;
             if (item.Type == "series")
             {
                 if (!parents.TryGetValue(item.ContentKey, out parent)) parents[item.ContentKey] = parent = Native(item, true);
                 var seasonKey = (item.ContentKey, item.Season.GetValueOrDefault());
-                if (!seasons.TryGetValue(seasonKey, out seasonLocked))
-                {
-                    var season = library.GetItemById(library.GetNewItemId("siphon:season:" + item.ContentKey + ":season:" + item.Season.GetValueOrDefault().ToString(CultureInfo.InvariantCulture), typeof(Season)));
-                    seasons[seasonKey] = seasonLocked = PreserveImage(season, ImageType.Primary);
-                }
+                if (item.Season is >= 0 && !seasons.TryGetValue(seasonKey, out season))
+                    seasons[seasonKey] = season = NativeSeason(item);
             }
-            var parentPoster = PreserveImage(parent, ImageType.Primary);
-            var parentBackdrop = PreserveImage(parent, ImageType.Backdrop);
-            var parentLogo = PreserveImage(parent, ImageType.Logo);
-            var episodePoster = item.Type == "series" && PreserveImage(native, ImageType.Primary);
-            var episodeBackdrop = item.Type == "series" && PreserveImage(native, ImageType.Backdrop);
-            var episodeLogo = item.Type == "series" && PreserveImage(native, ImageType.Logo);
+            var parentPoster = PreserveImage(parent, ImageType.Primary, string.IsNullOrWhiteSpace(previous.PosterUrl));
+            var parentBackdrop = PreserveImage(parent, ImageType.Backdrop, string.IsNullOrWhiteSpace(previous.BackdropUrl));
+            var parentLogo = PreserveImage(parent, ImageType.Logo, string.IsNullOrWhiteSpace(previous.LogoUrl));
+            var seasonPoster = PreserveImage(season, ImageType.Primary, IsFallbackImage(previous.SeasonPosterUrl, previous.PosterUrl), parent);
+            var episodePoster = item.Type == "series" && PreserveImage(native, ImageType.Primary, IsFallbackImage(previous.ThumbnailUrl, previous.PosterUrl), parent);
+            var episodeBackdrop = item.Type == "series" && PreserveImage(native, ImageType.Backdrop, string.IsNullOrWhiteSpace(previous.EpisodeBackdropUrl));
+            var episodeLogo = item.Type == "series" && PreserveImage(native, ImageType.Logo, string.IsNullOrWhiteSpace(previous.EpisodeLogoUrl));
             var parentPeople = PreservePeople(parent);
             var episodePeople = item.Type == "series" && PreservePeople(native);
-            if (!(parentPoster || parentBackdrop || parentLogo || episodePoster || episodeBackdrop || episodeLogo || seasonLocked || parentPeople || episodePeople)) continue;
-            var previous = state.FindByKey(item.Key);
-            if (previous is null) continue;
+            if (!(parentPoster || parentBackdrop || parentLogo || episodePoster || episodeBackdrop || episodeLogo || seasonPoster || parentPeople || episodePeople)) continue;
+            if (((parentPoster || parentBackdrop || parentLogo) && Locked(parent, "Images"))
+                || ((episodePoster || episodeBackdrop || episodeLogo) && Locked(native, "Images"))
+                || (seasonPoster && Locked(season, "Images")) || (parentPeople && Locked(parent, "People"))
+                || (episodePeople && Locked(native, "People")))
+                diagnostics?.RecordDecision(item.ContentKey, item.SeriesName ?? item.Name, "Preserved", "MetadataLocked");
             var preserved = item with
             {
                 PosterUrl = parentPoster ? previous.PosterUrl : item.PosterUrl,
                 BackdropUrl = parentBackdrop ? previous.BackdropUrl : item.BackdropUrl,
                 LogoUrl = parentLogo ? previous.LogoUrl : item.LogoUrl,
-                SeasonPosterUrl = seasonLocked ? previous.SeasonPosterUrl ?? previous.PosterUrl : item.SeasonPosterUrl,
+                SeasonPosterUrl = seasonPoster ? previous.SeasonPosterUrl : item.SeasonPosterUrl,
                 ThumbnailUrl = episodePoster ? previous.ThumbnailUrl : item.ThumbnailUrl,
                 EpisodeBackdropUrl = episodeBackdrop ? previous.EpisodeBackdropUrl : item.EpisodeBackdropUrl,
                 EpisodeLogoUrl = episodeLogo ? previous.EpisodeLogoUrl : item.EpisodeLogoUrl,
                 People = parentPeople ? previous.People : item.People,
                 EpisodePeople = episodePeople ? previous.EpisodePeople : item.EpisodePeople
             };
+            var retainedFields = new List<string>(9);
+            if (parentPoster) retainedFields.Add("PosterUrl");
+            if (parentBackdrop) retainedFields.Add("BackdropUrl");
+            if (parentLogo) retainedFields.Add("LogoUrl");
+            if (seasonPoster) retainedFields.Add("SeasonPosterUrl");
+            if (episodePoster) retainedFields.Add("ThumbnailUrl");
+            if (episodeBackdrop) retainedFields.Add("EpisodeBackdropUrl");
+            if (episodeLogo) retainedFields.Add("EpisodeLogoUrl");
+            if (parentPeople) retainedFields.Add("People");
+            if (episodePeople) retainedFields.Add("EpisodePeople");
+            preserved = MetadataProvenance.Retain(preserved, previous, retainedFields, "NativeLockOrPreservationPolicy");
             output ??= items.ToArray();
             output[index] = preserved;
         }
@@ -305,8 +357,62 @@ public sealed class MetadataEnrichmentService(
         return library.GetItemById(library.GetNewItemId(parent ? "siphon:series:" + item.ContentKey : "siphon:media:" + item.Key, type));
     }
 
-    private bool SeasonLocked(ManagedItem item)
-        => library.GetItemById(library.GetNewItemId("siphon:season:" + item.ContentKey + ":season:" + item.Season.GetValueOrDefault().ToString(CultureInfo.InvariantCulture), typeof(Season)))?.IsLocked == true;
+    private BaseItem? NativeSeason(ManagedItem item)
+        => library.GetItemById(library.GetNewItemId("siphon:season:" + item.ContentKey + ":season:" + item.Season.GetValueOrDefault().ToString(CultureInfo.InvariantCulture), typeof(Season)));
+
+    private ManagedItem? Previous(ManagedItem item)
+    {
+        var previous = state.FindByKey(item.Key);
+        return previous is not null && previous.ContentKey == item.ContentKey && previous.Type == item.Type
+            && previous.Season == item.Season && previous.Episode == item.Episode ? previous : null;
+    }
+
+    private static bool IsFallbackImage(string? child, string? parent)
+        => string.IsNullOrWhiteSpace(child) || string.Equals(child, parent, StringComparison.Ordinal);
+
+    private bool MissingChildImage(ManagedItem item, string? url)
+        => IsFallbackImage(url, item.PosterUrl) || (Previous(item) is { } previous && IsFallbackImage(url, previous.PosterUrl));
+
+    private bool CanUpdateChildImage(ManagedItem item, BaseItem? native, PluginConfiguration config, bool season)
+    {
+        var current = season ? item.SeasonPosterUrl : item.ThumbnailUrl;
+        if (!MetadataPolicy.Wants(config, "Images", MissingChildImage(item, current))) return false;
+        var previous = Previous(item) ?? item;
+        return native is null || MetadataPolicy.CanUpdateImage(native, config, ImageType.Primary,
+            missingManagedValue: IsFallbackImage(season ? previous.SeasonPosterUrl : previous.ThumbnailUrl, previous.PosterUrl), inheritedFrom: Native(item, true));
+    }
+
+    private bool NeedsSeasonPoster(ManagedItem item, PluginConfiguration config)
+    {
+        if (item.Season is not >= 0) return false;
+        var native = NativeSeason(item);
+        if (!string.IsNullOrEmpty(config.MetadataAddonId))
+        {
+            // A selected source owns every field except genuinely absent season artwork, even on full refresh.
+            if (!MissingChildImage(item, item.SeasonPosterUrl)) return false;
+            var previous = Previous(item) ?? item;
+            if (native?.HasImage(ImageType.Primary) == true
+                && (!IsFallbackImage(previous.SeasonPosterUrl, previous.PosterUrl)
+                    || !MetadataPolicy.IsManagedImage(native, ImageType.Primary, Native(item, true)))) return false;
+        }
+        return CanUpdateChildImage(item, native, config, true);
+    }
+
+    private ManagedItem WithSeasonPoster(ManagedItem item, string? poster, PluginConfiguration config, MetadataObservation observation)
+        => !MissingChildImage(item, poster) && NeedsSeasonPoster(item, config)
+            ? MetadataProvenance.Set(item with { SeasonPosterUrl = poster }, "SeasonPosterUrl", observation) : item;
+
+    private ManagedItem MergeEpisode(ManagedItem item, MetadataValues values, PluginConfiguration config)
+    {
+        var applyThumbnail = !MissingChildImage(item, values.Poster) && CanUpdateChildImage(item, Native(item), config, false);
+        var merged = MetadataPolicy.Merge(item, values, config, true) with { ThumbnailUrl = applyThumbnail ? values.Poster : item.ThumbnailUrl };
+        if (!applyThumbnail)
+            merged = MetadataProvenance.Retain(merged, item, ["ThumbnailUrl"], "NativeLockOrPreservationPolicy");
+        else
+            merged = MetadataProvenance.Set(merged, "ThumbnailUrl", values.Provenance.GetValueOrDefault("Poster")
+                ?? new MetadataFieldProvenance([new("Unknown", null, null)]));
+        return merged;
+    }
 
     private Dictionary<string, string> LibraryLanguages()
     {
@@ -323,6 +429,7 @@ public sealed class MetadataEnrichmentService(
 
     private bool NeedsEpisode(ManagedItem item, PluginConfiguration config, bool tmdb, bool force)
     {
+        if (item.Season is not >= 0 || item.Episode is not > 0) return false;
         var native = Native(item);
         if (native?.IsLocked == true) return false;
         bool Needs(string field, bool missing, bool nativeMissing)
@@ -330,7 +437,7 @@ public sealed class MetadataEnrichmentService(
         return Needs("Name", string.IsNullOrWhiteSpace(item.Name), string.IsNullOrWhiteSpace(native?.Name))
             || Needs("Overview", string.IsNullOrWhiteSpace(item.Description), string.IsNullOrWhiteSpace(native?.Overview))
             || Needs("ReleaseDate", string.IsNullOrWhiteSpace(item.Released), native?.PremiereDate is null)
-            || Needs("Images", string.IsNullOrWhiteSpace(item.ThumbnailUrl), native?.HasImage(ImageType.Primary) != true)
+            || CanUpdateChildImage(item, native, config, false)
             || Needs("Runtime", !item.EpisodeRunTimeTicks.HasValue, native?.RunTimeTicks is null)
             || (tmdb && Needs("Ratings", !item.EpisodeCommunityRating.HasValue, native?.CommunityRating is null))
             || (tmdb && MetadataPolicy.Wants(config, "People", force || item.EpisodePeople.Length == 0)
@@ -343,11 +450,13 @@ public sealed class MetadataEnrichmentService(
         if (provider == "Imdb") return value is { Length: >= 9 and <= 12 } && value.StartsWith("tt", StringComparison.Ordinal) && value.AsSpan(2).ContainsAnyExceptInRange('0', '9') == false ? value : null;
         return value is { Length: > 0 and <= 10 } && int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var numeric) && numeric > 0 ? numeric.ToString(CultureInfo.InvariantCulture) : null;
     }
-    private static void AddId(Dictionary<string, string> ids, string provider, string? value)
+    private static bool AddId(Dictionary<string, string> ids, string provider, string? value)
     {
-        if (value is null || ids.ContainsKey(provider)) return;
+        if (value is null || ids.ContainsKey(provider)) return false;
         var candidate = new Dictionary<string, string> { [provider] = value };
-        if (Id(candidate, provider) is { } valid) ids.Add(provider, valid);
+        if (Id(candidate, provider) is not { } valid) return false;
+        ids.Add(provider, valid);
+        return true;
     }
     private static MetadataProviderClient.ProviderFailure MissingId() => new("MissingIdentifier");
     private static string Language(string? language) => language is null ? string.Empty : "&language=" + Uri.EscapeDataString(language);
@@ -378,7 +487,7 @@ public sealed class MetadataEnrichmentService(
         var people = cast.Where(person => !string.IsNullOrWhiteSpace(person?.Name)).Take(100).Select(person => new ManagedPerson(person.Name!, "Actor", person.Character, TmdbImage(imageBase, person.ProfilePath)))
             .Concat(crew.Where(person => !string.IsNullOrWhiteSpace(person?.Name) && person.Job is "Director" or "Writer" or "Screenplay" or "Producer").Take(50)
                 .Select(person => new ManagedPerson(person.Name!, person.Job == "Screenplay" ? "Writer" : person.Job!, null, TmdbImage(imageBase, person.ProfilePath)))).DistinctBy(person => (person.Name, person.Type)).ToArray();
-        return new()
+        return new MetadataValues
         {
             Name = Clean(record.Title ?? record.Name),
             Overview = Clean(record.Overview),
@@ -392,7 +501,7 @@ public sealed class MetadataEnrichmentService(
             Locations = record.ProductionCountries.Select(country => Clean(country?.Name)).OfType<string>().Distinct().Take(100).ToArray(),
             People = people,
             Status = record.Status switch { "Returning Series" => "Continuing", "Ended" or "Canceled" => "Ended", "Planned" or "In Production" => "Unreleased", _ => null }
-        };
+        }.Observed(record);
     }
     private static MetadataValues TvdbValues(TvdbRecord record, string? language, bool episode = false)
     {
@@ -400,7 +509,7 @@ public sealed class MetadataEnrichmentService(
         var name = record.Translations?.NameTranslations.FirstOrDefault(value => value?.Language == lang)?.Name;
         var overview = record.Translations?.OverviewTranslations.FirstOrDefault(value => value?.Language == lang)?.Overview;
         var date = episode ? record.Aired : record.FirstAired ?? record.FirstRelease?.Date;
-        return new()
+        return new MetadataValues
         {
             Name = Clean(name) ?? Clean(record.Name),
             Overview = Clean(overview) ?? Clean(record.Overview),
@@ -411,9 +520,9 @@ public sealed class MetadataEnrichmentService(
             Genres = record.Genres.Select(genre => Clean(genre?.Name)).OfType<string>().Distinct().Take(100).ToArray(),
             Status = record.Status?.Name switch { "Continuing" => "Continuing", "Ended" => "Ended", "Upcoming" => "Unreleased", _ => null }
             // TVDB score is popularity, not a user rating. Never expose it as CommunityRating.
-        };
+        }.Observed(record);
     }
-    private static MetadataValues ParentValues(ManagedItem item) => new()
+    private static MetadataValues ParentValues(ManagedItem item) => new MetadataValues
     {
         Name = item.Type == "series" ? item.SeriesName : item.Name,
         Overview = item.Type == "series" ? item.SeriesDescription : item.Description,
@@ -428,8 +537,8 @@ public sealed class MetadataEnrichmentService(
         Locations = item.ProductionLocations,
         People = item.People,
         Status = item.SeriesStatus
-    };
-    internal static ManagedItem WithParent(ManagedItem item, ManagedItem parent) => item with
+    }.FromParent(item);
+    internal static ManagedItem WithParent(ManagedItem item, ManagedItem parent) => MetadataProvenance.CopyParent(item with
     {
         SeriesName = parent.SeriesName,
         SeriesDescription = parent.SeriesDescription,
@@ -444,5 +553,5 @@ public sealed class MetadataEnrichmentService(
         ProductionLocations = parent.ProductionLocations,
         People = parent.People,
         SeriesStatus = parent.SeriesStatus
-    };
+    }, parent);
 }

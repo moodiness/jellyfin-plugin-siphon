@@ -23,13 +23,34 @@ public sealed class Plugin : BasePlugin<Configuration.PluginConfiguration>, IHas
     {
         Instance = this;
         _configurationAccessor = configurationAccessor;
+        var previousPlayback = CapturePlayback(Configuration);
         ConfigurationChanged += (_, _) =>
         {
             registry.Invalidate();
-            resolver.Invalidate();
-            sessions.Invalidate();
+            var currentPlayback = CapturePlayback(Configuration);
+            if (currentPlayback.Transport != previousPlayback.Transport)
+            {
+                resolver.Invalidate();
+                sessions.Invalidate();
+            }
+            else
+            {
+                bool Changed(Guid userId) => currentPlayback.Profiles.GetValueOrDefault(userId, currentPlayback.Shared)
+                    != previousPlayback.Profiles.GetValueOrDefault(userId, previousPlayback.Shared);
+                resolver.Invalidate(Changed);
+                sessions.Invalidate(Changed);
+            }
+            previousPlayback = currentPlayback;
         };
     }
+
+    private static PlaybackConfiguration CapturePlayback(Configuration.PluginConfiguration config)
+        => new(Protocol.AddonRegistry.PlaybackKey(config, Guid.Empty),
+            config.UserProfiles.Where(profile => profile.OverrideAddons)
+                .ToDictionary(profile => profile.UserId, profile => Protocol.AddonRegistry.PlaybackKey(config, profile.UserId)),
+            config.PublicBaseUrl + "\n" + string.Join('\n', config.AllowedPrivateHosts.Order(StringComparer.OrdinalIgnoreCase)));
+
+    private sealed record PlaybackConfiguration(string Shared, Dictionary<Guid, string> Profiles, string Transport);
 
     /// <summary>Gets the loaded plugin instance.</summary>
     public static Plugin? Instance { get; private set; }

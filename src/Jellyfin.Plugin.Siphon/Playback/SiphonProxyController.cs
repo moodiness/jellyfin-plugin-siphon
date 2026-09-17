@@ -20,7 +20,9 @@ public sealed class SiphonProxyController(
     StreamResolver resolver,
     ProxySessionStore sessions,
     ISafeHttpClient http,
-    ConfigurationAccessor configuration) : ControllerBase
+    ConfigurationAccessor configuration,
+    PlaybackAccess access,
+    PlaybackDownloadService downloads) : ControllerBase
 {
     private static readonly SemaphoreSlim GlobalSlots = new(64, 64);
     private static readonly SemaphoreSlim ResolutionGate = new(4, 4);
@@ -41,6 +43,19 @@ public sealed class SiphonProxyController(
     public Task Source(string token) => ExecuteAsync(token, 2);
     [HttpGet("image/{token}")]
     public Task Image(string token, [FromQuery] string? type = null) => ExecuteImageAsync(token, type);
+
+    [HttpGet("download/{token}")]
+    [HttpHead("download/{token}")]
+    public async Task Download(string token)
+    {
+        var session = sessions.Get(token);
+        if (session is not { Download: true } || !access.AllowsLease(session, download: true))
+        {
+            Response.StatusCode = 404;
+            return;
+        }
+        await downloads.RelayAsync(HttpContext, session.Source, HttpContext.RequestAborted).ConfigureAwait(false);
+    }
 
 
     private async Task ExecuteAsync(string token, int tokenKind)
@@ -75,7 +90,15 @@ public sealed class SiphonProxyController(
                     return;
                 }
 
-                var selectionKey = sourceId is null ? key : key + "|" + sourceId;
+                var current = access.CurrentUser();
+                var userId = sourceId is null ? current?.Id ?? Guid.Empty : access.SourceOwner(key, sourceId);
+                if (userId == Guid.Empty || !access.CanPlay(userId) || (User.Identity?.IsAuthenticated == true && current is null) || (current is not null && current.Id != userId)
+                    || access.FindVideo(key, userId, sourceId) is null)
+                {
+                    Response.StatusCode = 404;
+                    return;
+                }
+                var selectionKey = userId.ToString("N") + "|" + (sourceId is null ? key : key + "|" + sourceId);
 
                 session = sessions.GetDefault(selectionKey);
                 if (session is null)
@@ -91,7 +114,7 @@ public sealed class SiphonProxyController(
                         session = sessions.GetDefault(selectionKey);
                         if (session is null)
                         {
-                            var sources = await resolver.GetSourcesAsync(item, ct).ConfigureAwait(false);
+                            var sources = await resolver.GetSourcesAsync(item, userId, ct).ConfigureAwait(false);
                             var selected = sourceId is null ? sources.FirstOrDefault() : sources.FirstOrDefault(source => source.Id == sourceId);
                             if (selected is null)
                             {
@@ -114,7 +137,7 @@ public sealed class SiphonProxyController(
                 session = sessions.Get(token);
             }
 
-            if (session is null || state.FindByKey(session.ItemKey) is null)
+            if (session is null || session.Download || state.FindByKey(session.ItemKey) is null || !access.AllowsLease(session))
             {
                 Response.StatusCode = 404;
                 return;
@@ -168,7 +191,8 @@ public sealed class SiphonProxyController(
 
         try
         {
-            if (token.Length > 4096 || type is { Length: > 32 } || !tokens.TryReadItem(token, out var key) || state.FindByKey(key) is not { } item)
+            if (token.Length > 4096 || type is { Length: > 32 } || !tokens.TryReadItem(token, out var key)
+                || (state.FindByKey(key) ?? state.FindByContentKey(key)) is not { } item)
             {
                 Response.StatusCode = 404;
                 return;
@@ -178,7 +202,7 @@ public sealed class SiphonProxyController(
             var image = variant switch
             {
                 null or "" or "poster" => item.PosterUrl,
-                "season" => item.SeasonPosterUrl ?? item.PosterUrl,
+                "season" => item.SeasonPosterUrl,
                 "primary" => item.Type == "series" ? item.ThumbnailUrl : item.PosterUrl,
                 "thumbnail" => item.ThumbnailUrl,
                 "backdrop" => item.BackdropUrl,
@@ -252,6 +276,11 @@ public sealed class SiphonProxyController(
 
     private async Task ProxyAsync(ProxySession session, CancellationToken ct)
     {
+        if (session.Source.P2p is not null)
+        {
+            await downloads.RelayP2pAsync(HttpContext, session.Source, attachment: false, ct).ConfigureAwait(false);
+            return;
+        }
         using var readDeadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var headers = new Dictionary<string, string>(session.Source.RequestHeaders, StringComparer.OrdinalIgnoreCase);
         headers.Remove("Range");
@@ -394,7 +423,7 @@ public sealed class SiphonProxyController(
             await Response.Body.WriteAsync(prefix.AsMemory(0, prefixLength), ct).ConfigureAwait(false);
             var chunk = new byte[64 * 1024];
             int count;
-            while ((count = await ReadUpstreamAsync(body, chunk, readDeadline).ConfigureAwait(false)) != 0)
+            while ((count = await PlaybackDownloadService.ReadUpstreamAsync(body, chunk, readDeadline, configuration.Current.AddonTimeoutSeconds).ConfigureAwait(false)) != 0)
             {
                 await Response.Body.WriteAsync(chunk.AsMemory(0, count), ct).ConfigureAwait(false);
             }
@@ -408,7 +437,7 @@ public sealed class SiphonProxyController(
         var chunk = new byte[16 * 1024];
         while (true)
         {
-            var count = await ReadUpstreamAsync(body, chunk, readDeadline).ConfigureAwait(false);
+            var count = await PlaybackDownloadService.ReadUpstreamAsync(body, chunk, readDeadline, configuration.Current.AddonTimeoutSeconds).ConfigureAwait(false);
             if (count == 0)
             {
                 break;
@@ -442,27 +471,13 @@ public sealed class SiphonProxyController(
         var length = 0;
         while (length < buffer.Length)
         {
-            var count = await ReadUpstreamAsync(body, buffer[length..], deadline).ConfigureAwait(false);
+            var count = await PlaybackDownloadService.ReadUpstreamAsync(body, buffer[length..], deadline, configuration.Current.AddonTimeoutSeconds).ConfigureAwait(false);
             if (count == 0) break;
             length += count;
         }
         return length;
     }
 
-    private async ValueTask<int> ReadUpstreamAsync(Stream body, Memory<byte> buffer, CancellationTokenSource deadline)
-    {
-        // Only upstream inactivity expires the lease's request: an entire film may run
-        // for hours, and downstream backpressure must not consume its read deadline.
-        deadline.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(configuration.Current.AddonTimeoutSeconds, 1, 120)));
-        try
-        {
-            return await body.ReadAsync(buffer, deadline.Token).ConfigureAwait(false);
-        }
-        finally
-        {
-            deadline.CancelAfter(Timeout.InfiniteTimeSpan);
-        }
-    }
 
     private void ProtectBytes()
     {

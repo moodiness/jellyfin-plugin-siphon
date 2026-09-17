@@ -137,6 +137,8 @@ public sealed class SourceBindingStore
 
     private static string EndpointDigest(ResolvedStream source)
     {
+        if (source.P2p is { } torrent)
+            return AddonRegistry.Digest(torrent.InfoHash + "\n" + torrent.FileIndex + "\n" + torrent.FileName + "\n" + string.Join('\n', torrent.Trackers));
         // A filename is stable content identity; only discard recognized signing parameters when
         // the endpoint also has a media path or retains a content-identifying query. In particular,
         // /get?file=A&token=... and /get?file=B&token=... must never become the same endpoint.

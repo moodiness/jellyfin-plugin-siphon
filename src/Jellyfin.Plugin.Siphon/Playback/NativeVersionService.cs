@@ -23,25 +23,27 @@ public sealed class NativeVersionService(
     IMediaStreamRepository mediaStreams,
     ItemMetadataMapper metadata,
     StreamResolver resolver,
+    PlaybackAccess access,
     Subtitles.ManagedSubtitleStore? subtitles = null)
 {
     public const string SourceProvider = "SiphonSource";
     public const string VersionProvider = "SiphonVersion";
     public const string SourceNameProvider = "SiphonSourceName";
     public const string SourceOrderProvider = "SiphonSourceOrder";
+    public const string OwnerProvider = "SiphonSourceOwner";
     private const string ItemProvider = "Siphon";
 
     public static bool IsManaged(BaseItem item)
         => item is Movie or Episode && !string.IsNullOrEmpty(item.GetProviderId(ItemProvider));
 
-    public async Task<IReadOnlyList<NativeStreamVersion>> GetVersionsAsync(Video item, CancellationToken ct)
+    public async Task<IReadOnlyList<NativeStreamVersion>> GetVersionsAsync(Video item, Guid userId, CancellationToken ct)
     {
-        if (!IsManaged(item) || item.GetProviderId(ItemProvider) is not { } itemKey
+        if (userId == Guid.Empty || access.GetVideo(item.Id, userId) is null || !IsManaged(item) || item.GetProviderId(ItemProvider) is not { } itemKey
             || state.FindByKey(itemKey) is not { } requested) return [];
 
         // Addon I/O must never hold the catalog/configuration mutation gate.
         var settings = configuration.Current;
-        var streams = await resolver.GetSourcesAsync(requested, ct).ConfigureAwait(false);
+        var streams = await resolver.GetSourcesAsync(requested, userId, ct).ConfigureAwait(false);
         await configuration.MutationGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -57,9 +59,7 @@ public sealed class NativeVersionService(
             if (primary is null) return [];
             var primaryId = primary.Id.ToString("N");
             var versions = existing.Where(version => version.Id == primary.Id
-                || !string.IsNullOrEmpty(version.GetProviderId(SourceProvider))
-                || version.GetProviderId(VersionProvider) == primaryId
-                || version.PrimaryVersionId == primary.Id).ToList();
+                || version.GetProviderId(OwnerProvider) == userId.ToString("N")).ToList();
             var changed = new HashSet<Video>();
             var created = new List<Video>();
 
@@ -75,16 +75,12 @@ public sealed class NativeVersionService(
                 changed.Add(primary);
             }
 
-            if (string.IsNullOrEmpty(primary.GetProviderId(SourceProvider)) && streams.Count > 0)
+            // Canonical identity must never inherit one user's provider or credential-bearing source.
+            if (SetMarker(primary, SourceProvider, null) | SetMarker(primary, SourceNameProvider, null)
+                | SetMarker(primary, SourceOrderProvider, null) | SetMarker(primary, OwnerProvider, null))
             {
-                // Commit this assignment before creating siblings. Even an interrupted request cannot
-                // bind the canonical item to a different stream on the next upstream reorder.
-                primary.SetProviderId(SourceProvider, streams[0].Id);
-                primary.SetProviderId(SourceNameProvider, streams[0].Name);
-                primary.SetProviderId(SourceOrderProvider, "0");
-                primary.Path = SourcePath(managed.Key, streams[0].Id);
-                Save([primary], ct);
-                changed.Remove(primary);
+                primary.Path = configuration.Current.PublicBaseUrl.TrimEnd('/') + "/Siphon/s/" + tokens.SignItem(managed.Key);
+                changed.Add(primary);
             }
 
             var bySource = new Dictionary<string, Video>(StringComparer.Ordinal);
@@ -120,6 +116,7 @@ public sealed class NativeVersionService(
                     {
                         version = primary is Movie ? new Movie { Id = id } : new Episode { Id = id };
                         version.SetProviderId(SourceProvider, stream.Id);
+                        version.SetProviderId(OwnerProvider, userId.ToString("N"));
                         ApplyMetadata(version, primary, managed);
                         created.Add(version);
                     }
@@ -135,7 +132,7 @@ public sealed class NativeVersionService(
 
             foreach (var version in versions)
             {
-                if (!active.Contains(version.Id) && SetMarker(version, SourceOrderProvider, "-1")) changed.Add(version);
+                if (version.Id != primary.Id && !active.Contains(version.Id) && SetMarker(version, SourceOrderProvider, "-1")) changed.Add(version);
                 if (version.Id != primary.Id)
                 {
                     if (SetMarker(version, VersionProvider, primaryId)) changed.Add(version);
@@ -258,10 +255,12 @@ public sealed class NativeVersionService(
         var sourceId = version.GetProviderId(SourceProvider);
         var sourceName = version.GetProviderId(SourceNameProvider);
         var sourceOrder = version.GetProviderId(SourceOrderProvider);
+        var sourceOwner = version.GetProviderId(OwnerProvider);
         metadata.Apply(version, managed, managed.Key, version is Movie ? managed.ProviderIds : managed.EpisodeProviderIds);
         SetMarker(version, SourceProvider, sourceId);
         SetMarker(version, SourceNameProvider, sourceName);
         SetMarker(version, SourceOrderProvider, sourceOrder);
+        SetMarker(version, OwnerProvider, sourceOwner);
         if (!string.IsNullOrEmpty(sourceId)) version.Path = SourcePath(managed.Key, sourceId);
         version.SetParent(primary.GetParent() as Folder
             ?? throw new InvalidOperationException("The Siphon title no longer has a library parent."));

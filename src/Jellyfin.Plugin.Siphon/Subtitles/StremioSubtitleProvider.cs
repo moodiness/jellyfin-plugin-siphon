@@ -26,6 +26,7 @@ public sealed class StremioSubtitleProvider : ISubtitleProvider, IDisposable
     private readonly Lazy<Dictionary<string, string>> _languages;
     private readonly SubtitleTicketStore _tickets;
     private readonly SemaphoreSlim _requests = new(16, 16);
+    private readonly PlaybackAccess? _access;
 
     /// <summary>Initializes the Jellyfin subtitle provider.</summary>
     public StremioSubtitleProvider(
@@ -34,9 +35,11 @@ public sealed class StremioSubtitleProvider : ISubtitleProvider, IDisposable
         StreamResolver resolver,
         ISafeHttpClient http,
         ConfigurationAccessor configuration,
-        ILocalizationManager localization)
+        ILocalizationManager localization,
+        PlaybackAccess access)
         : this(locator, registry, resolver, http, configuration, localization, TimeProvider.System, 4096, TimeSpan.FromMinutes(5))
     {
+        _access = access;
     }
 
     internal StremioSubtitleProvider(
@@ -88,6 +91,8 @@ public sealed class StremioSubtitleProvider : ISubtitleProvider, IDisposable
         var item = _locator.Find(request.MediaPath, out var sourceId);
         if (item is null || item.Type is not ("movie" or "series"))
             return [];
+        var userId = _access?.CurrentUser()?.Id ?? Guid.Empty;
+        if (_access is not null && (userId == Guid.Empty || _access.FindVideo(item.Key, userId, sourceId) is null)) return [];
 
         var requestedLanguage = CanonicalLanguage(request.Language);
         if (requestedLanguage is null)
@@ -104,7 +109,7 @@ public sealed class StremioSubtitleProvider : ISubtitleProvider, IDisposable
         if (identities.Length == 0)
             return [];
 
-        var addons = await _registry.GetEnabledAsync(cancellationToken).ConfigureAwait(false);
+        var addons = await _registry.GetEnabledForUserAsync(userId, cancellationToken).ConfigureAwait(false);
         var requests = addons.Take(64)
             .Select(addon => (Addon: addon, Identities: identities.Where(identity => AddonRegistry.Supports(addon.Manifest, "subtitles", identity.Type, identity.VideoId)).ToArray()))
             .Where(requested => requested.Identities.Length > 0)
@@ -112,7 +117,7 @@ public sealed class StremioSubtitleProvider : ISubtitleProvider, IDisposable
         if (requests.Length == 0)
             return [];
 
-        var extras = await ResolveExtrasAsync(item, sourceId, cancellationToken).ConfigureAwait(false);
+        var extras = await ResolveExtrasAsync(item, sourceId, userId, cancellationToken).ConfigureAwait(false);
         var output = new List<RemoteSubtitleInfo>[requests.Length];
         await Parallel.ForEachAsync(
             Enumerable.Range(0, requests.Length),
@@ -134,7 +139,7 @@ public sealed class StremioSubtitleProvider : ISubtitleProvider, IDisposable
                     {
                         var uri = StremioClient.ResourceUri(addon.Configuration.ManifestUrl, "subtitles", identity.Type, identity.VideoId, extras);
                         var subtitles = await GetSubtitlesResponseAsync(uri, token).ConfigureAwait(false);
-                        if (!IsInstallationCurrent(addon.Configuration.Id, manifestDigest)) break;
+                        if (!IsInstallationCurrent(addon.Configuration.Id, manifestDigest, userId)) break;
                         foreach (var subtitle in subtitles)
                         {
                             if (found.Count >= 64 || !TrySubtitleUri(subtitle.Url, out var subtitleUri))
@@ -151,7 +156,8 @@ public sealed class StremioSubtitleProvider : ISubtitleProvider, IDisposable
                                 item.Key,
                                 subtitle.Id,
                                 subtitleUri,
-                                language));
+                                language)
+                            { UserId = userId });
                             found.Add(new RemoteSubtitleInfo
                             {
                                 Id = id,
@@ -206,11 +212,11 @@ public sealed class StremioSubtitleProvider : ISubtitleProvider, IDisposable
         }
     }
 
-    private async Task<IReadOnlyDictionary<string, string>?> ResolveExtrasAsync(ManagedItem item, string? sourceId, CancellationToken cancellationToken)
+    private async Task<IReadOnlyDictionary<string, string>?> ResolveExtrasAsync(ManagedItem item, string? sourceId, Guid userId, CancellationToken cancellationToken)
     {
         try
         {
-            var streams = await _resolver.GetSourcesAsync(item, cancellationToken).ConfigureAwait(false);
+            var streams = await _resolver.GetSourcesAsync(item, userId, cancellationToken).ConfigureAwait(false);
             var source = sourceId is null
                 ? streams.FirstOrDefault()
                 : streams.FirstOrDefault(stream => stream.Id == sourceId);
@@ -302,15 +308,17 @@ public sealed class StremioSubtitleProvider : ISubtitleProvider, IDisposable
 
     private bool IsCandidateCurrent(SubtitleCandidate candidate)
     {
-        if (!IsInstallationCurrent(candidate.InstallationId, candidate.ManifestDigest))
+        if (!IsInstallationCurrent(candidate.InstallationId, candidate.ManifestDigest, candidate.UserId)
+            || (_access is not null && (_access.CurrentUser()?.Id != candidate.UserId
+                || _access.FindVideo(candidate.ItemKey, candidate.UserId) is null)))
             return false;
 
         var item = _locator.Find(candidate.ItemPath, out _);
         return item is not null && string.Equals(item.Key, candidate.ItemKey, StringComparison.Ordinal);
     }
 
-    private bool IsInstallationCurrent(string installationId, string manifestDigest) =>
-        _configuration.Current.Addons.Any(addon => addon.Enabled && addon.Id == installationId
+    private bool IsInstallationCurrent(string installationId, string manifestDigest, Guid userId) =>
+        _registry.GetConfiguredForUser(userId).Any(addon => addon.Enabled && addon.Id == installationId
             && AddonRegistry.Digest(addon.ManifestUrl) == manifestDigest);
 
     private string? CanonicalLanguage(string? value)

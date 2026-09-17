@@ -14,7 +14,7 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.Siphon.Subtitles;
 
 /// <summary>Uses Jellyfin's subtitle validation and writer, with per-version local storage for remote media.</summary>
-public sealed class NativeSubtitleManager(ISubtitleManager inner, ManagedSubtitleStore storage) : ISubtitleManager
+public sealed class NativeSubtitleManager(ISubtitleManager inner, ManagedSubtitleStore storage, PlaybackAccess access, NativeVersionService versions) : ISubtitleManager
 {
     public event EventHandler<SubtitleDownloadFailureEventArgs> SubtitleDownloadFailure
     {
@@ -22,8 +22,8 @@ public sealed class NativeSubtitleManager(ISubtitleManager inner, ManagedSubtitl
         remove => inner.SubtitleDownloadFailure -= value;
     }
 
-    public Task<RemoteSubtitleInfo[]> SearchSubtitles(Video video, string language, bool? isPerfectMatch, bool isAutomated, CancellationToken cancellationToken)
-        => inner.SearchSubtitles(video, language, isPerfectMatch, isAutomated, cancellationToken);
+    public async Task<RemoteSubtitleInfo[]> SearchSubtitles(Video video, string language, bool? isPerfectMatch, bool isAutomated, CancellationToken cancellationToken)
+        => await inner.SearchSubtitles(await ResolveVideo(video, cancellationToken).ConfigureAwait(false), language, isPerfectMatch, isAutomated, cancellationToken).ConfigureAwait(false);
     public Task<RemoteSubtitleInfo[]> SearchSubtitles(SubtitleSearchRequest request, CancellationToken cancellationToken)
         => inner.SearchSubtitles(request, cancellationToken);
     public Task<SubtitleResponse> GetRemoteSubtitles(string id, CancellationToken cancellationToken) => inner.GetRemoteSubtitles(id, cancellationToken);
@@ -31,27 +31,43 @@ public sealed class NativeSubtitleManager(ISubtitleManager inner, ManagedSubtitl
 
     public async Task DownloadSubtitles(Video video, string subtitleId, CancellationToken cancellationToken)
     {
+        video = await ResolveVideo(video, cancellationToken).ConfigureAwait(false);
         await inner.DownloadSubtitles(StorageItem(video), subtitleId, cancellationToken).ConfigureAwait(false);
         if (NativeVersionService.IsManaged(video)) await storage.RefreshAsync(video, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task DownloadSubtitles(Video video, LibraryOptions libraryOptions, string subtitleId, CancellationToken cancellationToken)
     {
+        video = await ResolveVideo(video, cancellationToken).ConfigureAwait(false);
         await inner.DownloadSubtitles(StorageItem(video), libraryOptions, subtitleId, cancellationToken).ConfigureAwait(false);
         if (NativeVersionService.IsManaged(video)) await storage.RefreshAsync(video, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task UploadSubtitle(Video video, SubtitleResponse response)
     {
+        video = await ResolveVideo(video, CancellationToken.None).ConfigureAwait(false);
         await inner.UploadSubtitle(StorageItem(video), response).ConfigureAwait(false);
         if (NativeVersionService.IsManaged(video)) await storage.RefreshAsync(video, CancellationToken.None).ConfigureAwait(false);
     }
 
     public async Task DeleteSubtitles(BaseItem item, int index)
     {
+        if (item is Video managed && NativeVersionService.IsManaged(managed))
+            item = await ResolveVideo(managed, CancellationToken.None).ConfigureAwait(false);
         await inner.DeleteSubtitles(item, index).ConfigureAwait(false);
         if (item is Video video && NativeVersionService.IsManaged(video))
             await storage.RefreshAsync(video, CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private async Task<Video> ResolveVideo(Video video, CancellationToken ct)
+    {
+        if (!NativeVersionService.IsManaged(video)) return video;
+        var user = access.CurrentUser();
+        if (user is null || access.GetVideo(video.Id, user.Id) is null)
+            throw new UnauthorizedAccessException("Subtitle item is unavailable.");
+        if (video.PrimaryVersionId.HasValue) return video;
+        var available = await versions.GetVersionsAsync(video, user.Id, ct).ConfigureAwait(false);
+        return available.FirstOrDefault()?.Item ?? throw new InvalidOperationException("No subtitle source is available.");
     }
 
     private static Video StorageItem(Video video) => !NativeVersionService.IsManaged(video) ? video : new SubtitleStorageView(video)

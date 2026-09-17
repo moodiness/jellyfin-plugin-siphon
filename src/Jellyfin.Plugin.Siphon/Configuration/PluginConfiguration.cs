@@ -16,6 +16,23 @@ public sealed class PluginConfiguration : BasePluginConfiguration
     /// <summary>Gets or sets the URL clients can use to reach this Jellyfin server.</summary>
     public string PublicBaseUrl { get; set; } = string.Empty;
 
+    /// <summary>Gets or sets whether Jellyfin Web shows Siphon catalogs in its top navigation.</summary>
+    public bool ShowCatalogShortcuts { get; set; }
+
+    /// <summary>Playback credentials may vary by user; catalogues and metadata remain shared.</summary>
+    [XmlArrayItem("UserProfile")]
+    public UserAddonProfile[] UserProfiles { get; set; } = [];
+
+    public string DefaultSearchMode { get; set; } = "All";
+    public bool HideUnreleased { get; set; }
+    public int UnreleasedBufferDays { get; set; }
+
+    public bool EnableIntroDb { get; set; }
+    public int IntroDbCacheHours { get; set; } = 24;
+
+    [XmlArrayItem("Segment")]
+    public string[] IntroDbSegments { get; set; } = ["intro", "recap", "outro", "post-credits"];
+
     /// <summary>P2P is opt-in and uses the server's public network identity.</summary>
     public bool EnableP2p { get; set; }
     public int P2pMaxConcurrentStreams { get; set; } = 2;
@@ -26,6 +43,12 @@ public sealed class PluginConfiguration : BasePluginConfiguration
     public int P2pMetadataTimeoutSeconds { get; set; } = 90;
     public bool P2pEnableDht { get; set; } = true;
     public int P2pListenPort { get; set; }
+
+    /// <summary>Users must also opt in individually before release notifications are emitted.</summary>
+    public bool EnableCalendarNotifications { get; set; }
+
+    /// <summary>Selected metadata addon installation; empty keeps automatic addon selection.</summary>
+    public string MetadataAddonId { get; set; } = string.Empty;
 
     /// <summary>Gets or sets the optional TMDB application read-access token.</summary>
     public string TmdbReadAccessToken { get; set; } = string.Empty;
@@ -109,6 +132,16 @@ public sealed class ConfiguredAddon
     public List<CatalogSubscription> Catalogs { get; set; } = [];
 }
 
+/// <summary>An explicit per-user set of playback and subtitle providers.</summary>
+public sealed class UserAddonProfile
+{
+    public Guid UserId { get; set; }
+    public bool OverrideAddons { get; set; }
+
+    [XmlArrayItem("Addon")]
+    public ConfiguredAddon[] Addons { get; set; } = [];
+}
+
 /// <summary>A catalogue selected for synchronisation.</summary>
 public sealed class CatalogSubscription
 {
@@ -119,6 +152,9 @@ public sealed class CatalogSubscription
     public bool Enabled { get; set; } = true;
 
     public int? MaxItems { get; set; }
+
+    /// <summary>Library, Collection, or Both; identity and ownership do not depend on presentation.</summary>
+    public string Presentation { get; set; } = "Library";
 
     [XmlArrayItem("Extra")]
     public List<ExtraParameter> Extras { get; set; } = [];

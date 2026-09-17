@@ -7,6 +7,8 @@ namespace Jellyfin.Plugin.Siphon.Playback;
 public sealed record ProxySession(string Token, ResolvedStream Source, string ItemKey)
 {
     internal string RootToken { get; init; } = Token;
+    public bool Download { get; init; }
+    public DateTimeOffset? DownloadExpiresAtUtc { get; init; }
 }
 
 /// <summary>Bounded server-only leases. Tokens contain no resource or credential information.</summary>
@@ -23,12 +25,14 @@ public sealed class ProxySessionStore(ConfigurationAccessor configuration)
     private static bool SameHeaders(IReadOnlyDictionary<string, string> first, IReadOnlyDictionary<string, string> second)
         => first.Count == second.Count && first.All(pair => second.TryGetValue(pair.Key, out var value) && pair.Value == value);
 
-    public ProxySession Create(ManagedItem item, ResolvedStream source)
+    public ProxySession Create(ManagedItem item, ResolvedStream source, bool download = false)
     {
         lock (_gate)
         {
             var existing = _sessions.Values.FirstOrDefault(e => e.Session.RootToken == e.Session.Token && e.Session.ItemKey == item.Key
+                && e.Session.Source.UserId == source.UserId && e.Session.Download == download
                 && e.Session.Source.Id == source.Id && e.Session.Source.Url == source.Url
+                && (!download || e.Session.DownloadExpiresAtUtc > DateTimeOffset.UtcNow)
                 && SameHeaders(e.Session.Source.RequestHeaders, source.RequestHeaders) && e.Expires > DateTimeOffset.UtcNow);
             if (existing is not null)
             {
@@ -36,9 +40,10 @@ public sealed class ProxySessionStore(ConfigurationAccessor configuration)
                 return existing.Session;
             }
 
-            return Add(new ProxySession(NewToken(), source, item.Key));
+            return Add(new ProxySession(NewToken(), source, item.Key) { Download = download, DownloadExpiresAtUtc = download ? DateTimeOffset.UtcNow.AddMinutes(5) : null });
         }
     }
+
 
     internal ProxySession? GetDefault(string key)
     {
@@ -52,7 +57,17 @@ public sealed class ProxySessionStore(ConfigurationAccessor configuration)
     {
         lock (_gate)
         {
-            _defaults[selectionKey ?? session.ItemKey] = (session.Token, DateTimeOffset.UtcNow.AddSeconds(45));
+            _defaults[selectionKey ?? session.Source.UserId.ToString("N") + "|" + session.ItemKey] = (session.Token, DateTimeOffset.UtcNow.AddSeconds(45));
+        }
+    }
+
+    public void InvalidateDefaults(string itemKey, Guid userId)
+    {
+        lock (_gate)
+        {
+            foreach (var key in _defaults.Where(pair => _sessions.TryGetValue(pair.Value.Token, out var entry)
+                && entry.Session.ItemKey == itemKey && entry.Session.Source.UserId == userId).Select(pair => pair.Key).ToArray())
+                _defaults.Remove(key);
         }
     }
 
@@ -70,7 +85,7 @@ public sealed class ProxySessionStore(ConfigurationAccessor configuration)
                 return null;
             }
 
-            if (entry.Expires <= DateTimeOffset.UtcNow || !_sessions.TryGetValue(entry.Session.RootToken, out var root) || root.Expires <= DateTimeOffset.UtcNow)
+            if (entry.Session.DownloadExpiresAtUtc <= DateTimeOffset.UtcNow || entry.Expires <= DateTimeOffset.UtcNow || !_sessions.TryGetValue(entry.Session.RootToken, out var root) || root.Expires <= DateTimeOffset.UtcNow)
             {
                 Remove(token);
                 return null;
@@ -117,7 +132,7 @@ public sealed class ProxySessionStore(ConfigurationAccessor configuration)
             }
 
             // Credentials apply only to the original authority, never arbitrary playlist hosts.
-            var headers = root.Session.Source.Url.GetLeftPart(UriPartial.Authority).Equals(uri.GetLeftPart(UriPartial.Authority), StringComparison.OrdinalIgnoreCase)
+            var headers = root.Session.Source.P2p is null && root.Session.Source.Url.GetLeftPart(UriPartial.Authority).Equals(uri.GetLeftPart(UriPartial.Authority), StringComparison.OrdinalIgnoreCase)
                 ? root.Session.Source.RequestHeaders : new Dictionary<string, string>();
             var childSession = Add(new ProxySession(NewToken(), parent.Source with { Url = uri, RequestHeaders = headers, FileName = null, Size = null }, parent.ItemKey) { RootToken = parent.RootToken });
             children[uri] = childSession.Token;
@@ -160,6 +175,16 @@ public sealed class ProxySessionStore(ConfigurationAccessor configuration)
         }
     }
 
+    public void Invalidate(Func<Guid, bool> changedUser)
+    {
+        lock (_gate)
+        {
+            var roots = _sessions.Values.Where(entry => entry.Session.Token == entry.Session.RootToken
+                && changedUser(entry.Session.Source.UserId)).Select(entry => entry.Session.Token).ToArray();
+            foreach (var token in roots) Remove(token);
+        }
+    }
+
     public void Release(string token)
     {
         lock (_gate)
@@ -170,7 +195,7 @@ public sealed class ProxySessionStore(ConfigurationAccessor configuration)
 
     public string GetUrl(ProxySession session)
     {
-        var extension = Path.GetExtension(session.Source.Url.AbsolutePath).ToLowerInvariant();
+        var extension = session.Source.P2p is null ? Path.GetExtension(session.Source.Url.AbsolutePath).ToLowerInvariant() : string.Empty;
         if (extension.Length == 0 && session.Source.FileName is not null)
         {
             extension = Path.GetExtension(session.Source.FileName).ToLowerInvariant();

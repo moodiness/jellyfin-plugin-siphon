@@ -12,7 +12,7 @@ using MediaBrowser.Model.MediaInfo;
 namespace Jellyfin.Plugin.Siphon.Playback;
 
 /// <summary>Keeps Jellyfin's native source processing while restoring the addon's version order.</summary>
-public sealed class NativeMediaSourceManager(IMediaSourceManager inner, ILibraryManager library) : IMediaSourceManager
+public sealed class NativeMediaSourceManager(IMediaSourceManager inner, ILibraryManager library, PlaybackAccess access) : IMediaSourceManager
 {
     private static readonly string SourceTokenPrefix = typeof(SiphonMediaSourceProvider).FullName!
         .GetMD5().ToString("N", CultureInfo.InvariantCulture) + "_";
@@ -23,16 +23,25 @@ public sealed class NativeMediaSourceManager(IMediaSourceManager inner, ILibrary
         if (!NativeVersionService.IsManaged(item)) return sources;
 
         var video = (Video)item;
-        // The first authorized detail request must succeed before lazy version materialization.
-        // This synchronous DTO path only reads native library state; it never resolves addon streams.
-        if (string.IsNullOrEmpty(video.GetProviderId(NativeVersionService.SourceProvider))
-            && string.IsNullOrEmpty(video.GetProviderId(NativeVersionService.VersionProvider))
-            && !video.PrimaryVersionId.HasValue)
+        user ??= access.CurrentUser();
+        IReadOnlyList<MediaSourceInfo> selected = user is null || access.GetVideo(video.Id, user.Id) is null ? []
+            : SelectSources(sources, GetActiveVersions(video, user.Id), video, user, playback: false);
+        if (selected.Count > 0) return selected;
+        // Native DTO generation indexes this collection before the result filter can
+        // discover a user's versions. Return metadata only, never another user's source.
+        return [new MediaSourceInfo
         {
-            return sources;
-        }
-
-        return SelectSources(sources, GetActiveVersions(video), video, null, playback: false);
+            Id = item.Id.ToString("N"),
+            Name = "Siphon",
+            Protocol = MediaProtocol.Http,
+            IsRemote = true,
+            MediaStreams = [],
+            RunTimeTicks = item.RunTimeTicks,
+            SupportsDirectPlay = false,
+            SupportsDirectStream = false,
+            SupportsTranscoding = false,
+            SupportsProbing = false
+        }];
     }
 
     public async Task<IReadOnlyList<MediaSourceInfo>> GetPlaybackMediaSources(
@@ -43,6 +52,8 @@ public sealed class NativeMediaSourceManager(IMediaSourceManager inner, ILibrary
         CancellationToken cancellationToken)
     {
         var managed = NativeVersionService.IsManaged(item);
+        user ??= access.CurrentUser();
+        if (managed && (user is null || access.GetVideo(item.Id, user.Id) is null)) return [];
         var sources = await inner.GetPlaybackMediaSources(
             item, user, managed ? false : allowMediaProbe, enablePathSubstitution, cancellationToken).ConfigureAwait(false);
         if (!managed) return sources;
@@ -50,7 +61,7 @@ public sealed class NativeMediaSourceManager(IMediaSourceManager inner, ILibrary
         // The provider materializes versions during the inner call. Read the resulting native group,
         // not the pre-call fallback, and preserve its permission/track processing and prefixed token.
         var video = library.GetItemById(item.Id) as Video ?? (Video)item;
-        return SelectSources(sources, GetActiveVersions(video), video, user, playback: true);
+        return SelectSources(sources, GetActiveVersions(video, user!.Id), video, user, playback: true);
     }
 
     public async Task<MediaSourceInfo> GetMediaSource(
@@ -60,14 +71,22 @@ public sealed class NativeMediaSourceManager(IMediaSourceManager inner, ILibrary
         bool enablePathSubstitution,
         CancellationToken cancellationToken)
     {
-        if (!NativeVersionService.IsManaged(item) || !string.IsNullOrEmpty(liveStreamId))
+        if (!NativeVersionService.IsManaged(item))
         {
             return await inner.GetMediaSource(item, mediaSourceId, liveStreamId, enablePathSubstitution, cancellationToken).ConfigureAwait(false);
         }
 
         var video = library.GetItemById(item.Id) as Video ?? (Video)item;
-        var sources = SelectSources(inner.GetStaticMediaSources(video, enablePathSubstitution),
-            GetActiveVersions(video), video, null, playback: false);
+        var user = access.CurrentUser();
+        if (user is null || access.GetVideo(video.Id, user.Id) is null)
+            throw new ResourceNotFoundException("The selected Siphon source is unavailable.");
+        if (!Guid.TryParse(mediaSourceId, out var requestedId) || access.GetVideo(requestedId, user.Id) is not { } requested
+            || requested.GetProviderId("Siphon") != video.GetProviderId("Siphon"))
+            throw new ResourceNotFoundException("The selected Siphon source is unavailable.");
+        if (!string.IsNullOrEmpty(liveStreamId))
+            return await inner.GetMediaSource(item, mediaSourceId, liveStreamId, enablePathSubstitution, cancellationToken).ConfigureAwait(false);
+        var sources = SelectSources(inner.GetStaticMediaSources(video, enablePathSubstitution, user),
+            GetActiveVersions(video, user.Id), video, user, playback: false);
         // Opening already persisted this exact version's real tracks. Seeking, remuxing and
         // subtitle extraction must use that probed VOD source, not another unopened placeholder.
         return sources.FirstOrDefault(source => string.Equals(source.Id, mediaSourceId, StringComparison.OrdinalIgnoreCase)
@@ -75,7 +94,7 @@ public sealed class NativeMediaSourceManager(IMediaSourceManager inner, ILibrary
             ?? throw new ResourceNotFoundException("The selected Siphon source is no longer available.");
     }
 
-    private Dictionary<Guid, VersionSource> GetActiveVersions(Video item)
+    private Dictionary<Guid, VersionSource> GetActiveVersions(Video item, Guid userId)
     {
         var result = new Dictionary<Guid, VersionSource>();
         var primary = item;
@@ -99,7 +118,7 @@ public sealed class NativeMediaSourceManager(IMediaSourceManager inner, ILibrary
             return result;
         }
 
-        AddActiveVersion(primary, result);
+        if (primary.GetProviderId(NativeVersionService.OwnerProvider) == userId.ToString("N")) AddActiveVersion(primary, result);
         var belongsToGroup = item.Id == primary.Id;
         foreach (var alternate in library.GetLinkedAlternateVersions(primary))
         {
@@ -112,7 +131,7 @@ public sealed class NativeMediaSourceManager(IMediaSourceManager inner, ILibrary
             }
 
             belongsToGroup |= alternate.Id == item.Id;
-            AddActiveVersion(alternate, result);
+            if (alternate.GetProviderId(NativeVersionService.OwnerProvider) == userId.ToString("N")) AddActiveVersion(alternate, result);
         }
 
         if (!belongsToGroup) result.Clear();

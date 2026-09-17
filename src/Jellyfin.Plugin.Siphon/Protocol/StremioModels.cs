@@ -33,7 +33,6 @@ public sealed class StremioMeta
     public Dictionary<string, string> ProviderIds { get; init; } = new(StringComparer.OrdinalIgnoreCase);
     public string? Description { get; init; }
     public string? Poster { get; init; }
-    public string?[] SeasonPosters { get; init; } = [];
     public string? Background { get; init; }
     public string? Logo { get; init; }
     public float? CommunityRating { get; init; }
@@ -63,7 +62,12 @@ public sealed record StremioVideo(string Id, string Name, int? Season, int? Epis
     public string[] ProductionLocations { get; init; } = [];
     public ManagedPerson[] People { get; init; } = [];
 }
-public sealed record StremioStream(string? Url, string Name, string Description, IReadOnlyDictionary<string, string> RequestHeaders, string? FileName, long? Size, IReadOnlyList<string>? CountryWhitelist, bool UnsupportedHeaders);
+public sealed record StremioStream(string? Url, string Name, string Description, IReadOnlyDictionary<string, string> RequestHeaders, string? FileName, long? Size, IReadOnlyList<string>? CountryWhitelist, bool UnsupportedHeaders)
+{
+    public string? InfoHash { get; init; }
+    public int? FileIndex { get; init; }
+    public string[] Sources { get; init; } = [];
+}
 
 /// <summary>Bounded, tolerant parsing; malformed array members are skipped, not coerced.</summary>
 public static class StremioJson
@@ -212,10 +216,10 @@ public static class StremioJson
     {
         var ids = Field(e, "ids");
         var explicitIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        Add("Imdb", FirstField(ids, "imdb", "Imdb", "imdb_id", "imdbId"), FirstField(e, "imdb_id", "imdbId"));
-        Add("Tmdb", FirstField(ids, "tmdb", "Tmdb", "tmdb_id", "tmdbId", "moviedb", "moviedb_id"), FirstField(e, "tmdb_id", "tmdbId", "moviedb_id", "moviedbId"));
-        Add("Tvdb", FirstField(ids, "tvdb", "Tvdb", "tvdb_id", "tvdbId"), FirstField(e, "tvdb_id", "tvdbId"));
-        Add("MyAnimeList", FirstField(ids, "mal", "myanimelist", "MyAnimeList", "mal_id"), FirstField(e, "mal_id", "malId", "myanimelist_id", "myanimelistId"));
+        Add("Imdb", FirstField(ids, "imdb", "Imdb", "imdb_id", "imdbId"), FirstField(e, "imdb_id", "imdbId", "_imdbId"));
+        Add("Tmdb", FirstField(ids, "tmdb", "Tmdb", "tmdb_id", "tmdbId", "moviedb", "moviedb_id"), FirstField(e, "tmdb_id", "tmdbId", "moviedb_id", "moviedbId", "_tmdbId"));
+        Add("Tvdb", FirstField(ids, "tvdb", "Tvdb", "tvdb_id", "tvdbId"), FirstField(e, "tvdb_id", "tvdbId", "_tvdbId"));
+        Add("MyAnimeList", FirstField(ids, "mal", "myanimelist", "MyAnimeList", "mal_id"), FirstField(e, "mal_id", "malId", "myanimelist_id", "myanimelistId", "_malId"));
         return ContentIdentity.ProviderIds(id, explicitIds);
 
         void Add(string provider, JsonElement canonical, JsonElement alias)
@@ -260,7 +264,8 @@ public static class StremioJson
         var type = Text(e, "type");
         if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(type) || MetadataText(e, "name", maximum: 512) is not { } name) return null;
         var videos = new List<StremioVideo>();
-        var videoElements = Array(Field(e, "videos")).ToArray();
+        var videoField = Field(e, "videos");
+        var videoElements = Array(videoField).ToArray();
         foreach (var v in videoElements)
             if (Text(v, "id") is { } videoId && !string.IsNullOrWhiteSpace(videoId)) videos.Add(new(videoId, MetadataText(v, "title", "name", 512) ?? "", Number(Field(v, "season")), Number(Field(v, "episode", "number")), MetadataText(v, "released", "firstAired", 64))
             {
@@ -285,8 +290,6 @@ public static class StremioJson
             ProviderIds = ExternalIds(e, id),
             Description = MetadataText(e, "description", "overview", 16384),
             Poster = MetadataText(e, "poster", maximum: 8192),
-            SeasonPosters = Array(Field(Field(e, "app_extras"), "seasonPosters")).Take(10000)
-                .Select(poster => MetadataText(poster, 8192)).ToArray(),
             Background = MetadataText(e, "background", maximum: 8192),
             Logo = MetadataText(e, "logo", maximum: 8192),
             CommunityRating = Rating(e),
@@ -300,7 +303,10 @@ public static class StremioJson
             ReleaseInfo = MetadataText(e, "releaseInfo", "release_info", 32),
             Year = MetadataText(year, 4) ?? Number(year)?.ToString(CultureInfo.InvariantCulture),
             Videos = videos,
-            VideosComplete = videos.Count == videoElements.Length && videos.All(v => v.Season is >= 0 and <= 9999 && v.Episode is >= 1 and <= 9999)
+            VideosComplete = (videoField.ValueKind == JsonValueKind.Array
+                || videoField.ValueKind == JsonValueKind.Undefined && type is "movie" or "anime.movie")
+                && videos.Count == videoElements.Length
+                && videos.All(v => v.Season is >= 0 and <= 9999 && v.Episode is >= 1 and <= 9999)
         };
     }
     public static StremioCatalogPage Catalog(JsonElement root)
@@ -321,7 +327,7 @@ public static class StremioJson
         var result = new List<StremioStream>();
         foreach (var e in RequiredArray(root, "streams"))
         {
-            if (Text(e, "url") is not { Length: > 0 } url) continue;
+            var url = Text(e, "url");
             var hints = Field(e, "behaviorHints", "behavior_hints");
             var proxy = Field(hints, "proxyHeaders", "proxy_headers");
             var request = Field(proxy, "request");
@@ -333,7 +339,14 @@ public static class StremioJson
             var response = Field(proxy, "response");
             unsupported |= response.ValueKind == JsonValueKind.Object && response.EnumerateObject().Any();
             var size = Field(hints, "videoSize", "video_size");
-            result.Add(new(url, Text(e, "name") ?? "", Text(e, "description", "title") ?? "", headers, Text(hints, "filename"), size.ValueKind == JsonValueKind.Number && size.TryGetInt64(out var n) && n >= 0 ? n : null, Strings(Field(hints, "countryWhitelist", "country_whitelist")), unsupported));
+            var fileIndex = Field(e, "fileIdx");
+            result.Add(new(url, Text(e, "name") ?? "", Text(e, "description", "title") ?? "", headers, Text(hints, "filename"), size.ValueKind == JsonValueKind.Number && size.TryGetInt64(out var n) && n >= 0 ? n : null, Strings(Field(hints, "countryWhitelist", "country_whitelist")), unsupported)
+            {
+                InfoHash = Text(e, "infoHash"),
+                FileIndex = fileIndex.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null ? null
+                    : fileIndex.ValueKind == JsonValueKind.Number && fileIndex.TryGetInt32(out var index) ? index : -1,
+                Sources = Strings(Field(e, "sources"))?.ToArray() ?? []
+            });
         }
         return result;
     }
