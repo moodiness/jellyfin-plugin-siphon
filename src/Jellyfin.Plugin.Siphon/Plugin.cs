@@ -35,7 +35,7 @@ public sealed class Plugin : BasePlugin<Configuration.PluginConfiguration>, IHas
     public override string Name => "Siphon";
 
     /// <inheritdoc />
-    public override string Description => "Brings Stremio addon catalogs, metadata, subtitles and playback to a native Jellyfin media library.";
+    public override string Description => "Brings Stremio catalogs, metadata, subtitles and stream versions to native Jellyfin libraries.";
 
     /// <inheritdoc />
     public override Guid Id => PluginId;
@@ -70,6 +70,9 @@ public sealed class Plugin : BasePlugin<Configuration.PluginConfiguration>, IHas
         yield return new PluginPageInfo
         {
             Name = "siphon",
+            DisplayName = "Siphon",
+            EnableInMainMenu = true,
+            MenuIcon = "settings",
             EmbeddedResourcePath = "Jellyfin.Plugin.Siphon.Web.siphon.html"
         };
     }

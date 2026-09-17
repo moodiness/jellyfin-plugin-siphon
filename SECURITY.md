@@ -4,7 +4,7 @@
 
 | Version | Supported |
 | --- | --- |
-| 1.0.x, 1.1.x and 1.2.x / Jellyfin 12.1.x | Yes |
+| 1.0.x, 1.1.x, 1.2.x and 1.3.x / Jellyfin 12.1.x | Yes |
 | Other Jellyfin major versions | No |
 
 Siphon is a Jellyfin plugin and must be installed only on a compatible Jellyfin server. Upgrade to the latest Siphon release compatible with your Jellyfin version before reporting an issue.
@@ -25,16 +25,23 @@ If GitHub private reporting is unavailable, contact the repository owner through
 
 ## Security boundaries
 
-Siphon is designed around these boundaries:
+The current source implements the following boundaries. Unreleased changes documented in the README are not yet part of the published archive:
 
 - upstream media and subtitle requests are made by the server, not directly by clients;
 - clients receive opaque, expiring capability tokens rather than upstream URLs or addon headers;
 - HTTP(S) only; torrent engines, debrid services, and external-player handoffs are not implemented;
 - DNS resolution and redirects are checked against SSRF policy, including HTTPS downgrade and cross-origin credential handling;
-- private destinations require exact hostname exceptions configured by an administrator;
-- channel items are persisted by Jellyfin while Siphon keeps catalog state in its private plugin data directory; Siphon does not manage user media files;
-- addon responses, subtitles, playlists, headers, and proxy sessions are size- and concurrency-bounded;
-- Siphon does not store provider API keys or debrid credentials.
+- private destinations require exact hostname exceptions configured by an administrator; exception-approved connections are not pooled, so later requests cannot reuse them after an exception is removed;
+- catalog media are native Jellyfin items, while Siphon keeps catalog state and backing directories in its private plugin data directory; personal library paths are preserved;
+- addon responses, subtitles, playlists, headers, and proxy sessions are size- and concurrency-bounded; upstream body reads also have an idle deadline, without imposing a total playback-duration limit;
+- media ranges retain their original byte representation; unexpectedly encoded responses are rejected, and HLS resources remain capability-proxied even behind misleading filenames;
+- TMDB, TVDB, Fanart, and MDBList integrations are individually opt-in and use fixed HTTPS provider origins; storing a credential alone does not enable outbound enrichment, while testing saved credentials makes an explicit provider request;
+- provider authentication POST bodies are bounded, and redirects cannot replay their credentials; provider failures are exposed as safe status codes rather than raw upstream responses;
+- diagnostics and cleanup endpoints require administrator elevation; exported diagnostics omit credentials, private URLs, hosts, and headers;
+- the self-connection diagnostic probes only the saved Jellyfin address, without credentials, cookies, redirects, or a proxy, and checks the returned server identity; its local-address access does not relax addon or media SSRF policy;
+- missing-item cleanup requires confirmed complete catalog absence, applies a configurable grace period, and protects favorites and resume positions across users and native versions by default; deletion rechecks state and protections and refuses stale previews or unavailable protection data;
+- optional provider credentials and potentially sensitive addon URLs are stored in Jellyfin's plugin configuration;
+- administrator settings mask credentials in the interface, but this is not encryption of the configuration or its backups.
 
 These controls do not make an untrusted Jellyfin administrator trustworthy. Limit administrator access, protect Jellyfin configuration backups, and review private-host exceptions.
 

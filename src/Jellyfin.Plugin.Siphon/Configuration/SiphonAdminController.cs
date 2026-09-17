@@ -21,6 +21,7 @@ public sealed class SiphonAdminController(StremioClient client, ISiphonStateStor
     }
 
     [HttpPost("Addons/Validate")]
+    [RequestSizeLimit(128 * 1024)]
     public async Task<ActionResult<ManifestResponse>> ValidateAddon([FromBody] ValidateRequest request, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(request.ManifestUrl) || request.ManifestUrl.Length > 16384)
@@ -33,7 +34,10 @@ public sealed class SiphonAdminController(StremioClient client, ISiphonStateStor
             var manifest = await client.GetManifestAsync(request.ManifestUrl, cancellationToken).ConfigureAwait(false);
             return new ManifestResponse(manifest.Id, manifest.Name, manifest.Description, manifest.Catalogs.Select(catalog =>
                 new CatalogResponse(catalog.Type, catalog.Id, catalog.Name, catalog.GetExtras().Select(extra =>
-                    new ExtraResponse(extra.Name, extra.IsRequired, extra.Options, extra.OptionsLimit)).ToArray())).ToArray());
+                    new ExtraResponse(extra.Name, extra.IsRequired, extra.Options, extra.OptionsLimit, extra.Default)).ToArray())).ToArray(),
+                manifest.Types.ToArray(), manifest.Resources.Select(resource => new ResourceResponse(resource.Name,
+                    resource.IsObject ? resource.Types?.ToArray() : manifest.Types.ToArray(),
+                    (resource.IsObject ? resource.IdPrefixes : manifest.IdPrefixes)?.ToArray(), resource.IsObject)).ToArray());
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -43,7 +47,7 @@ public sealed class SiphonAdminController(StremioClient client, ISiphonStateStor
         {
             if (TryGetBlockedPrivateLiteralHost(request.ManifestUrl, policy, out var host))
             {
-                return BadRequest(new { Message = $"The private addon host '{host}' is blocked. Under Server connection and limits, add exactly '{host}' to Allowed private hosts, save, then retry." });
+                return BadRequest(new ValidationError("PrivateHostBlocked", $"The private addon host '{host}' is blocked. Add it to Allowed private hosts under Connection & limits, save, then retry.", host));
             }
 
             return BadRequest(new { Message = "The addon could not be validated. Check its manifest URL and network access." });
@@ -75,8 +79,12 @@ public sealed class SiphonAdminController(StremioClient client, ISiphonStateStor
     }
 
     public sealed record ValidateRequest(string ManifestUrl);
+    public sealed record ValidationError(string Code, string Message, string? Host = null);
     public sealed record StatusResponse(int ItemCount, int MovieCount, int EpisodeCount);
-    public sealed record ManifestResponse(string Id, string Name, string Description, IReadOnlyList<CatalogResponse> Catalogs);
+    public sealed record ManifestResponse(string Id, string Name, string Description, IReadOnlyList<CatalogResponse> Catalogs,
+        IReadOnlyList<string> Types, IReadOnlyList<ResourceResponse> Resources);
+    /// <summary>Effective restrictions use the same object-versus-global rules as AddonRegistry.Supports. Null object types support no types; null prefixes mean unrestricted.</summary>
+    public sealed record ResourceResponse(string Name, IReadOnlyList<string>? Types, IReadOnlyList<string>? IdPrefixes, bool IsObject);
     public sealed record CatalogResponse(string Type, string Id, string Name, IReadOnlyList<ExtraResponse> Extras);
-    public sealed record ExtraResponse(string Name, bool IsRequired, IReadOnlyList<string> Options, int? OptionsLimit);
+    public sealed record ExtraResponse(string Name, bool IsRequired, IReadOnlyList<string> Options, int? OptionsLimit, string? Default);
 }
