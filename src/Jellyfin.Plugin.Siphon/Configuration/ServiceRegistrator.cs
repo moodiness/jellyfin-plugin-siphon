@@ -68,6 +68,10 @@ public sealed class ServiceRegistrator : MediaBrowser.Controller.Plugins.IPlugin
         serviceCollection.AddSingleton<ISearchProvider>(services => services.GetRequiredService<Search.SiphonSearchProvider>());
         serviceCollection.AddSingleton<Playback.PlaybackAccess>();
         serviceCollection.AddSingleton<Playback.PlaybackDownloadService>();
+        serviceCollection.AddSingleton<Downloads.IDownloadTransfer, Downloads.DownloadTransferService>();
+        serviceCollection.AddSingleton<Downloads.DownloadQueueStore>();
+        serviceCollection.AddSingleton<Downloads.DownloadQueueService>();
+        serviceCollection.AddSingleton<Microsoft.Extensions.Hosting.IHostedService>(services => services.GetRequiredService<Downloads.DownloadQueueService>());
         serviceCollection.AddSingleton<P2p.P2pStreamService>();
         serviceCollection.AddSingleton<Microsoft.Extensions.Hosting.IHostedService>(services => services.GetRequiredService<P2p.P2pStreamService>());
         serviceCollection.AddSingleton<MediaSegments.IntroDbClient>();
@@ -77,6 +81,9 @@ public sealed class ServiceRegistrator : MediaBrowser.Controller.Plugins.IPlugin
         serviceCollection.AddSingleton<Calendar.CalendarNotificationStore>();
         serviceCollection.AddSingleton<Calendar.CalendarNotificationService>();
         serviceCollection.AddSingleton<Microsoft.Extensions.Hosting.IHostedService>(services => services.GetRequiredService<Calendar.CalendarNotificationService>());
+        serviceCollection.AddSingleton<Notifications.NotificationWebhookStore>();
+        serviceCollection.AddSingleton<Notifications.NotificationWebhookService>();
+        serviceCollection.AddSingleton<Microsoft.Extensions.Hosting.IHostedService>(services => services.GetRequiredService<Notifications.NotificationWebhookService>());
         serviceCollection.AddSingleton<Playback.StreamResolver>();
         serviceCollection.AddSingleton<Playback.SourceBindingStore>();
         serviceCollection.AddSingleton<Playback.ProxySessionStore>();

@@ -200,6 +200,8 @@
                             <div class="inputContainer"><label class="inputLabel" for="siphonUnreleasedBufferDays">Extra days after announced release</label><input is="emby-input" id="siphonUnreleasedBufferDays" type="number" min="0" max="30" step="1" required><p class="siphon-help">A date filter, not a stream availability check. Unknown dates are not proof of release. The additional buffer delays inclusion after the announced date; existing personal media are unaffected.</p></div>
                             <div class="checkboxContainer"><label class="emby-checkbox-label"><input is="emby-checkbox" id="siphonEnableCalendarNotifications" type="checkbox"><span>Allow personal release notifications</span></label></div>
                             <p class="siphon-help">Users must also opt in. Announced releases, new dated episodes and date changes are not verified playable sources; enabling notifications does not send an initial backlog.</p>
+                            <div class="checkboxContainer"><label class="emby-checkbox-label"><input is="emby-checkbox" id="siphonEnableNotificationWebhooks" type="checkbox"><span>Allow opt-in external notification webhooks</span></label></div>
+                            <p class="siphon-help">Each user must enable personal notifications and configure their own destination in My Siphon. Signed events can reveal followed titles to that destination. HTTPS is required unless an exact private host is explicitly trusted. Disabling this prevents external delivery; the private inbox is retained.</p>
                         </section>
                         <section class="siphon-section">
                             <h2>Per-user playback addons</h2>
@@ -237,6 +239,19 @@
                             <div class="siphon-actions"><button id="siphonP2pRefresh" type="button" class="siphon-text-button">Refresh P2P status</button><button id="siphonP2pCleanup" type="button" class="siphon-text-button" data-saved-action>Clean inactive P2P cache…</button></div>
                             <p id="siphonP2pStatus" class="siphon-result" role="status" aria-live="polite">Open this tab to load engine status.</p>
                             <dl id="siphonP2pFacts" class="siphon-facts"></dl>
+                        </section>
+                        <section class="siphon-section">
+                            <h2>Private offline downloads</h2>
+                            <div class="checkboxContainer"><label class="emby-checkbox-label"><input is="emby-checkbox" id="siphonEnableDownloadQueue" type="checkbox"><span>Enable the persistent server download queue</span></label></div>
+                            <p class="siphon-help">Users queue an exact version in My Siphon. Jobs continue without an open browser and recover after server restart. Completed files remain private and require current Jellyfin download permissions. HTTP and P2P retain the selected file; finite HLS is prepared as an offline video with Jellyfin's FFmpeg. Live streams and unsupported DRM are rejected.</p>
+                            <div class="siphon-grid">
+                                <div class="inputContainer"><label class="inputLabel" for="siphonDownloadMaxConcurrentJobs">Concurrent download jobs</label><input is="emby-input" id="siphonDownloadMaxConcurrentJobs" type="number" min="1" max="8" step="1" required></div>
+                                <div class="inputContainer"><label class="inputLabel" for="siphonDownloadMaxStorageMiB">Total download storage (MiB)</label><input is="emby-input" id="siphonDownloadMaxStorageMiB" type="number" min="128" max="1048576" step="1" required></div>
+                                <div class="inputContainer"><label class="inputLabel" for="siphonDownloadMaxFileMiB">Per-job storage budget (MiB)</label><input is="emby-input" id="siphonDownloadMaxFileMiB" type="number" min="16" max="1048576" step="1" required><p class="siphon-help">Includes temporary HLS resources and remux output, not just the final file. Must fit within total download storage. P2P also uses its separately bounded torrent cache.</p></div>
+                                <div class="inputContainer"><label class="inputLabel" for="siphonDownloadMaxJobsPerUser">Retained jobs per user</label><input is="emby-input" id="siphonDownloadMaxJobsPerUser" type="number" min="1" max="100" step="1" required></div>
+                                <div class="inputContainer"><label class="inputLabel" for="siphonDownloadRetentionDays">Retain finished jobs (days)</label><input is="emby-input" id="siphonDownloadRetentionDays" type="number" min="1" max="365" step="1" required></div>
+                            </div>
+                            <p class="siphon-help">Disabling the queue stops background transfers. Changing an owner's provider profile or download permissions revokes access. Delete completed files from the personal Downloads tab to free storage sooner. Siphon never cleans unrelated folders.</p>
                         </section>
                     </section>
                     <section id="siphonPanelConnection" role="tabpanel" aria-labelledby="siphonTabConnection" hidden>
@@ -510,8 +525,8 @@
         var statusTimer = null;
         var statusLoading = false;
         var textFields = ['PublicBaseUrl', 'TmdbReadAccessToken', 'TvdbApiKey', 'FanartApiKey', 'MdbListApiKey', 'TvdbSubscriberPin', 'MetadataLanguage', 'MetadataUpdateMode', 'MetadataAddonId', 'DefaultSearchMode'];
-        var numberFields = ['MaxItemsPerCatalog', 'MaxEpisodesPerSeries', 'AddonTimeoutSeconds', 'MaxConcurrentRequests', 'MissingItemRetentionDays', 'MetadataCacheHours', 'UnreleasedBufferDays', 'IntroDbCacheHours', 'P2pMaxConcurrentStreams', 'P2pMaxCacheMiB', 'P2pDownloadLimitKiB', 'P2pUploadLimitKiB', 'P2pIdleMinutes', 'P2pMetadataTimeoutSeconds', 'P2pListenPort'];
-        var booleanFields = ['ShowCatalogShortcuts', 'RemoveMissingItems', 'ProtectFavorites', 'ProtectResumePositions', 'EnableTmdbMetadata', 'EnableTvdbMetadata', 'EnableFanartMetadata', 'EnableMdbListMetadata', 'HideUnreleased', 'EnableIntroDb', 'EnableP2p', 'P2pEnableDht', 'EnableCalendarNotifications'];
+        var numberFields = ['MaxItemsPerCatalog', 'MaxEpisodesPerSeries', 'AddonTimeoutSeconds', 'MaxConcurrentRequests', 'MissingItemRetentionDays', 'MetadataCacheHours', 'UnreleasedBufferDays', 'IntroDbCacheHours', 'P2pMaxConcurrentStreams', 'P2pMaxCacheMiB', 'P2pDownloadLimitKiB', 'P2pUploadLimitKiB', 'P2pIdleMinutes', 'P2pMetadataTimeoutSeconds', 'P2pListenPort', 'DownloadMaxConcurrentJobs', 'DownloadMaxStorageMiB', 'DownloadMaxFileMiB', 'DownloadMaxJobsPerUser', 'DownloadRetentionDays'];
+        var booleanFields = ['ShowCatalogShortcuts', 'RemoveMissingItems', 'ProtectFavorites', 'ProtectResumePositions', 'EnableTmdbMetadata', 'EnableTvdbMetadata', 'EnableFanartMetadata', 'EnableMdbListMetadata', 'HideUnreleased', 'EnableIntroDb', 'EnableP2p', 'P2pEnableDht', 'EnableCalendarNotifications', 'EnableDownloadQueue', 'EnableNotificationWebhooks'];
         var metadataFields = { Name: 'Title', Overview: 'Synopsis', ReleaseDate: 'Release date & year', Genres: 'Genres', Ratings: 'Ratings & certification', People: 'Cast & crew', Images: 'Artwork', Runtime: 'Runtime', ProductionLocations: 'Production locations', Status: 'Series status' };
         var providers = [
             { name: 'Tmdb', credential: 'TmdbReadAccessToken' },
@@ -1252,7 +1267,7 @@
                 var row = node('li', undefined, sources);
                 node('strong', source.Name || 'Stream version', row);
                 node('p', (source.Kind === 'P2p' ? 'P2P — server uploads and exposes its IP to peers' : 'HTTP source') + (source.Size == null ? '' : ' · ' + bytes(source.Size)), row).className = 'siphon-help';
-                if (source.CanDownload === false && source.DownloadUnavailableReason) node('p', source.DownloadUnavailableReason === 'HlsDownloadUnsupported' ? 'HLS playlist — not available as a video-file download.' : source.DownloadUnavailableReason, row).className = 'siphon-help';
+                if (source.CanDownload === false && source.DownloadUnavailableReason) node('p', source.DownloadUnavailableReason, row).className = 'siphon-help';
             });
             if (!(result.Sources || []).length) node('p', 'No accepted sources for your current playback profile. Inspect addon outcomes below; an empty user override intentionally supplies no providers.', parent);
             node('h3', 'Addon outcomes', parent);
@@ -2098,7 +2113,7 @@
                 savedConfiguration = JSON.stringify(loaded);
                 config = loaded;
                 config.Addons = config.Addons || [];
-                var defaults = { DefaultSearchMode: 'All', UnreleasedBufferDays: 0, IntroDbCacheHours: 24, IntroDbSegments: ['intro', 'recap', 'outro', 'post-credits'], P2pMaxConcurrentStreams: 2, P2pMaxCacheMiB: 20480, P2pDownloadLimitKiB: 4096, P2pUploadLimitKiB: 256, P2pIdleMinutes: 5, P2pMetadataTimeoutSeconds: 90, P2pListenPort: 0, P2pEnableDht: true };
+                var defaults = { DefaultSearchMode: 'All', UnreleasedBufferDays: 0, IntroDbCacheHours: 24, IntroDbSegments: ['intro', 'recap', 'outro', 'post-credits'], P2pMaxConcurrentStreams: 2, P2pMaxCacheMiB: 20480, P2pDownloadLimitKiB: 4096, P2pUploadLimitKiB: 256, P2pIdleMinutes: 5, P2pMetadataTimeoutSeconds: 90, P2pListenPort: 0, P2pEnableDht: true, DownloadMaxConcurrentJobs: 2, DownloadMaxStorageMiB: 51200, DownloadMaxFileMiB: 10240, DownloadMaxJobsPerUser: 20, DownloadRetentionDays: 7 };
                 Object.keys(defaults).forEach(function (key) { if (config[key] == null) config[key] = defaults[key]; });
                 config.UserProfiles = config.UserProfiles || [];
                 config.UserProfiles.forEach(function (profile) { profile.Addons = profile.Addons || []; });
@@ -2284,6 +2299,7 @@
             });
         });
         get('SiphonConfigForm').addEventListener('input', function (event) {
+            if (event.target.id === 'siphonDownloadMaxFileMiB' || event.target.id === 'siphonDownloadMaxStorageMiB') get('siphonDownloadMaxFileMiB').setCustomValidity('');
             if (!['siphonManifestUrl', 'siphonCatalogSearch', 'siphonCatalogFilter', 'siphonProfileUser', 'siphonInspectItem'].includes(event.target.id) && !event.target.hasAttribute('data-transient')) { markDirty(); credentialsState(); metadataControlsState(); }
         });
         get('SiphonConfigForm').addEventListener('submit', function (event) {
@@ -2293,6 +2309,7 @@
             var port = Number(get('siphonP2pListenPort').value);
             var streams = Number(get('siphonP2pMaxConcurrentStreams').value);
             get('siphonP2pListenPort').setCustomValidity(port !== 0 && (port < 1024 || port + streams - 1 > 65535) ? 'Choose zero, or a port from 1024 leaving room for every concurrent stream below 65536.' : '');
+            get('siphonDownloadMaxFileMiB').setCustomValidity(Number(get('siphonDownloadMaxFileMiB').value) > Number(get('siphonDownloadMaxStorageMiB').value) ? 'The per-job budget must fit within total download storage.' : '');
             var invalid = get('SiphonConfigForm').querySelector('input:invalid, select:invalid, textarea:invalid');
             if (invalid) { revealInvalid(invalid); message('Check the highlighted setting before saving.', 'error'); return; }
             work(async function () {

@@ -100,13 +100,13 @@ public sealed class PlaybackDownloadService(ISafeHttpClient http, P2pStreamServi
         => source.P2p is null && (source.Url.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase)
             || source.Url.AbsolutePath.EndsWith(".m3u", StringComparison.OrdinalIgnoreCase)
             || source.FileName?.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase) == true)
-            ? "HLS video downloads require remuxing and are not supported. Choose a progressive file version." : null;
+            ? "HLS needs offline preparation. Use Queue offline when server downloads are enabled." : null;
 
     private static async Task RejectHls(HttpContext context, CancellationToken ct)
     {
         context.Response.StatusCode = StatusCodes.Status415UnsupportedMediaType;
         if (!HttpMethods.IsHead(context.Request.Method))
-            await context.Response.WriteAsJsonAsync(new { Code = "HlsDownloadUnsupported", Message = "HLS video downloads require remuxing. Choose a progressive file version." }, ct).ConfigureAwait(false);
+            await context.Response.WriteAsJsonAsync(new { Code = "HlsRequiresOfflinePreparation", Message = "HLS needs offline preparation. Use the server download queue." }, ct).ConfigureAwait(false);
     }
 
     public async Task RelayP2pAsync(HttpContext context, ResolvedStream source, bool attachment, CancellationToken ct)
