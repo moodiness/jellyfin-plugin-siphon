@@ -6,6 +6,7 @@
     "overview": "Stremio addons in Jellyfin",
     "owner": "moodiness",
     "category": "General",
+    "imageUrl": "https://raw.githubusercontent.com/moodiness/jellyfin-plugin-siphon/main/assets/siphon.png",
     "versions": [
       {
         "version": "1.4.1.0",

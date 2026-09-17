@@ -21,5 +21,7 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <InternalsVisibleTo Include="Jellyfin.Plugin.Siphon.Tests" />
     <EmbeddedResource Include="Web\siphon.html" />
+    <EmbeddedResource Include="..\..\assets\siphon.png" LogicalName="Jellyfin.Plugin.Siphon.Assets.siphon.png" />
+    <Content Include="..\..\assets\siphon.png" Link="siphon.png" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
