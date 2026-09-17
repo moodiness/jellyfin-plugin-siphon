@@ -8,7 +8,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.Siphon.Playback;
 
-public sealed class StreamResolver(StremioClient client, AddonRegistry registry, ConfigurationAccessor configuration, ILogger<StreamResolver> logger)
+public sealed class StreamResolver(StremioClient client, AddonRegistry registry, ConfigurationAccessor configuration, ILogger<StreamResolver> logger, SourceBindingStore bindings)
 {
     private readonly ConcurrentDictionary<string, CacheEntry> _cache = new(StringComparer.Ordinal);
     private sealed record CacheEntry(DateTimeOffset Expires, Lazy<Task<IReadOnlyList<ResolvedStream>>> Value);
@@ -24,7 +24,7 @@ public sealed class StreamResolver(StremioClient client, AddonRegistry registry,
         var key = item.Key + ":" + AddonRegistry.Digest(fingerprint.ToString());
         if (_cache.Count > 512) _cache.Clear();
         var now = DateTimeOffset.UtcNow;
-        CacheEntry Create() => new(now.AddSeconds(45), new(() => Resolve(identities), LazyThreadSafetyMode.ExecutionAndPublication));
+        CacheEntry Create() => new(now.AddSeconds(45), new(() => Resolve(item.Key, identities), LazyThreadSafetyMode.ExecutionAndPublication));
         var entry = _cache.AddOrUpdate(key, _ => Create(), (_, old) => old.Expires > now ? old : Create());
         try
         {
@@ -35,19 +35,19 @@ public sealed class StreamResolver(StremioClient client, AddonRegistry registry,
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch { _cache.TryRemove(new KeyValuePair<string, CacheEntry>(key, entry)); throw; }
     }
-    private async Task<IReadOnlyList<ResolvedStream>> Resolve(IReadOnlyList<StreamIdentity> identities)
+    private async Task<IReadOnlyList<ResolvedStream>> Resolve(string itemKey, IReadOnlyList<StreamIdentity> identities)
     {
         var addons = (await registry.GetEnabledAsync(CancellationToken.None).ConfigureAwait(false))
             .Select(addon => (Addon: addon, Identity: identities.FirstOrDefault(identity => AddonRegistry.Supports(addon.Manifest, "stream", identity.Type, identity.VideoId))))
             .Where(request => request.Identity is not null).ToArray();
-        var output = new List<ResolvedStream>?[addons.Length];
+        var output = new IReadOnlyList<ResolvedStream>?[addons.Length];
         await Parallel.ForEachAsync(Enumerable.Range(0, addons.Length), new ParallelOptions { MaxDegreeOfParallelism = Math.Clamp(configuration.Current.MaxConcurrentRequests, 1, 16) }, async (i, ct) =>
         {
             var (addon, resourceIdentity) = addons[i];
             try
             {
                 var streams = await client.GetStreamsAsync(addon.Configuration.ManifestUrl, resourceIdentity!.Type, resourceIdentity.VideoId, ct).ConfigureAwait(false);
-                var results = new List<ResolvedStream>();
+                var candidates = new List<(string Identity, ResolvedStream Stream)>();
                 foreach (var stream in streams.Take(256))
                 {
                     if (!Uri.TryCreate(stream.Url, UriKind.Absolute, out var url) || (url.Scheme != "http" && url.Scheme != "https") || url.UserInfo.Length != 0 || url.Fragment.Length != 0) continue;
@@ -55,16 +55,19 @@ public sealed class StreamResolver(StremioClient client, AddonRegistry registry,
                     var headers = new ReadOnlyDictionary<string, string>(new Dictionary<string, string>(stream.RequestHeaders, StringComparer.OrdinalIgnoreCase));
                     var identity = new StringBuilder(addon.Configuration.Id).Append('\n').Append(stream.Name).Append('\n').Append(stream.FileName ?? url.AbsoluteUri);
                     identity.Append('\n').Append(stream.Size);
+                    var sourceId = AddonRegistry.Digest(identity.ToString());
+                    // Durable endpoint bindings retain legacy IDs while keeping disappeared mirrors'
+                    // ordinals reserved across upstream reorder, signed-URL rotation and restart.
                     var name = string.Join(" · ", new[] { string.IsNullOrWhiteSpace(addon.Configuration.DisplayName) ? addon.Manifest.Name : addon.Configuration.DisplayName, stream.Name, stream.Description }.Where(s => !string.IsNullOrWhiteSpace(s)));
                     // Addon-controlled display text must not echo credential-bearing URLs.
                     name = SafeDisplay(name);
-                    results.Add(new(AddonRegistry.Digest(identity.ToString()), name, url, headers, stream.FileName, stream.Size));
+                    candidates.Add((identity.ToString(), new(sourceId, name, url, headers, stream.FileName, stream.Size)));
                 }
-                output[i] = results;
+                output[i] = bindings.Bind(itemKey, candidates);
             }
             catch (Exception) { logger.LogWarning("Siphon streams unavailable for installation {InstallationId}", addon.Configuration.Id); }
         }).ConfigureAwait(false);
-        return Array.AsReadOnly(output.Where(x => x is not null).SelectMany(x => x!).DistinctBy(x => x.Id).ToArray());
+        return Array.AsReadOnly(output.Where(x => x is not null).SelectMany(x => x!).ToArray());
     }
     private static string SafeDisplay(string value)
     {

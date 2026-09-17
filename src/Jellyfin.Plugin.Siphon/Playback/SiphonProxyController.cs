@@ -1,7 +1,9 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using Jellyfin.Plugin.Siphon.Configuration;
+using Jellyfin.Plugin.Siphon.Identity;
 using Jellyfin.Plugin.Siphon.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
@@ -38,7 +40,7 @@ public sealed class SiphonProxyController(
     [HttpHead("source/{token}")]
     public Task Source(string token) => ExecuteAsync(token, 2);
     [HttpGet("image/{token}")]
-    public Task Image(string token) => ExecuteImageAsync(token);
+    public Task Image(string token, [FromQuery] string? type = null) => ExecuteImageAsync(token, type);
 
 
     private async Task ExecuteAsync(string token, int tokenKind)
@@ -153,7 +155,7 @@ public sealed class SiphonProxyController(
             GlobalSlots.Release();
         }
     }
-    private async Task ExecuteImageAsync(string token)
+    private async Task ExecuteImageAsync(string token, string? type)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
         deadline.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(configuration.Current.AddonTimeoutSeconds, 1, 120)));
@@ -166,13 +168,28 @@ public sealed class SiphonProxyController(
 
         try
         {
-            if (token.Length > 4096 || !tokens.TryReadItem(token, out var key) || state.FindByKey(key) is not { } item)
+            if (token.Length > 4096 || type is { Length: > 32 } || !tokens.TryReadItem(token, out var key) || state.FindByKey(key) is not { } item)
             {
                 Response.StatusCode = 404;
                 return;
             }
 
-            if (!Uri.TryCreate(item.PosterUrl, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
+            var variant = type?.ToLowerInvariant();
+            var image = variant switch
+            {
+                null or "" or "poster" => item.PosterUrl,
+                "season" => item.SeasonPosterUrl ?? item.PosterUrl,
+                "primary" => item.Type == "series" ? item.ThumbnailUrl : item.PosterUrl,
+                "thumbnail" => item.ThumbnailUrl,
+                "backdrop" => item.BackdropUrl,
+                "logo" => item.LogoUrl,
+                "episode-backdrop" => item.EpisodeBackdropUrl,
+                "episode-logo" => item.EpisodeLogoUrl,
+                { } value when value.StartsWith("person-", StringComparison.Ordinal) => CreditPhoto(item.People, value.AsSpan(7)),
+                { } value when value.StartsWith("episode-person-", StringComparison.Ordinal) => CreditPhoto(item.EpisodePeople, value.AsSpan(15)),
+                _ => null
+            };
+            if (!Uri.TryCreate(image, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
             {
                 Response.StatusCode = 404;
                 return;
@@ -227,6 +244,10 @@ public sealed class SiphonProxyController(
             GlobalSlots.Release();
         }
     }
+
+    private static string? CreditPhoto(ManagedPerson[] people, ReadOnlySpan<char> index)
+        => int.TryParse(index, NumberStyles.None, CultureInfo.InvariantCulture, out var position)
+            && (uint)position < (uint)people.Length ? people[position].PhotoUrl : null;
 
 
     private async Task ProxyAsync(ProxySession session, CancellationToken ct)

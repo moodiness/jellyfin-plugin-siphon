@@ -51,6 +51,45 @@ public sealed class MetadataPolicyTests
     }
 
     [Fact]
+    public async Task MapperHonorsGlobalAndPerFieldNativeLocksWithoutUnlocking()
+    {
+        var config = new PluginConfiguration { MetadataUpdateMode = "RefreshSelected", MetadataRefreshFields = ["Name", "Overview", "People", "Images", "Ratings", "Runtime"] };
+        var mapper = new ItemMetadataMapper(new ConfigurationAccessor(() => config), null!, null!, null!, null!);
+        var locked = new Movie { Name = "Manual name", Overview = "Manual plot", IsLocked = true, DateLastSaved = DateTime.UtcNow, CommunityRating = 8f };
+        var item = EpisodeItem() with { Type = "movie", Name = "Provider name", Description = "Provider plot", CommunityRating = 2f, PosterUrl = "https://images.example/new.jpg" };
+        mapper.Apply(locked, item, item.Key, item.ProviderIds);
+        await mapper.SavePeopleAsync([(locked, item with { People = [new("New actor", "Actor")] }, false)], CancellationToken.None);
+        Assert.True(locked.IsLocked);
+        Assert.Equal("Manual name", locked.Name);
+        Assert.Equal("Manual plot", locked.Overview);
+        Assert.Equal(8f, locked.CommunityRating);
+        Assert.False(locked.HasImage(ImageType.Primary, 0));
+
+        var partial = new Movie { Name = "Manual name", Overview = "Old plot", DateLastSaved = DateTime.UtcNow, LockedFields = [MetadataField.Name, MetadataField.Cast] };
+        mapper.Apply(partial, item, item.Key, item.ProviderIds);
+        await mapper.SavePeopleAsync([(partial, item with { People = [new("New actor", "Actor")] }, false)], CancellationToken.None);
+        Assert.Equal("Manual name", partial.Name);
+        Assert.Equal("Provider plot", partial.Overview);
+        Assert.Contains(MetadataField.Cast, partial.LockedFields);
+    }
+
+    [Fact]
+    public void MapperPreservesNativeProbedRuntimeAndInitializesNewUnselectedTitle()
+    {
+        var config = new PluginConfiguration { MetadataUpdateMode = "RefreshSelected", MetadataRefreshFields = ["Runtime"] };
+        var mapper = new ItemMetadataMapper(new ConfigurationAccessor(() => config), null!, null!, null!, null!);
+        var movie = new Movie { Name = "Manual name", DateLastSaved = DateTime.UtcNow, Container = "mkv", RunTimeTicks = 100 };
+        movie.ProviderIds["SiphonSource"] = "source";
+        var item = EpisodeItem() with { Type = "movie", Name = "Movie title", RunTimeTicks = TimeSpan.TicksPerMinute * 100 };
+        mapper.Apply(movie, item, item.Key, []);
+        Assert.Equal(100, movie.RunTimeTicks);
+        Assert.Equal("Manual name", movie.Name);
+        var episode = new Episode { DateLastSaved = DateTime.MinValue };
+        mapper.Apply(episode, EpisodeItem(), "episode", []);
+        Assert.Equal("Episode title", episode.Name);
+    }
+
+    [Fact]
     public void ProviderIdentifiersRejectUntrustedPathComponentsAndDoNotGuess()
     {
         Assert.Null(MetadataEnrichmentService.Id(new Dictionary<string, string> { ["Tmdb"] = "123/credits" }, "Tmdb"));
