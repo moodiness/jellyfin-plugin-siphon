@@ -162,7 +162,7 @@ public sealed class ProxyBehaviorTests : IDisposable
         var http = new MemoryOrigin(content, type, body, classificationStatus);
         var client = new StremioClient(http, config);
         var registry = new AddonRegistry(client, config, NullLogger<AddonRegistry>.Instance);
-        var resolver = new StreamResolver(client, registry, config, NullLogger<StreamResolver>.Instance);
+        var resolver = new StreamResolver(client, registry, config, NullLogger<StreamResolver>.Instance, new SourceBindingStore(Paths()));
         var sessions = new ProxySessionStore(config);
         var session = sessions.Create(Item(), new ResolvedStream(new string('A', 64), "Film", new Uri(url), new Dictionary<string, string>(), null, null));
         return new Fixture(new SiphonProxyController(tokens, store, resolver, sessions, http, config), session, store, client);

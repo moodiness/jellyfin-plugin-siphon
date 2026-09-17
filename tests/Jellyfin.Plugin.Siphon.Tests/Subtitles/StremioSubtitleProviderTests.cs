@@ -249,6 +249,7 @@ public sealed class StremioSubtitleProviderTests
         internal Clock Clock { get; } = new();
         internal StremioSubtitleProvider Provider { get; }
         private readonly StremioClient _client;
+        private readonly string _directory = Path.Combine(Path.GetTempPath(), "siphon-subtitles-" + Guid.NewGuid().ToString("N"));
         internal ManagedItem Item { get => State.Item!; set => State.Item = value; }
 
         internal Fixture(int capacity = 4096)
@@ -268,7 +269,8 @@ public sealed class StremioSubtitleProviderTests
             var accessor = new ConfigurationAccessor(() => Configuration);
             _client = new StremioClient(Http, accessor);
             var registry = new AddonRegistry(_client, accessor, NullLogger<AddonRegistry>.Instance);
-            var resolver = new StreamResolver(_client, registry, accessor, NullLogger<StreamResolver>.Instance);
+            var resolver = new StreamResolver(_client, registry, accessor, NullLogger<StreamResolver>.Instance,
+                new SourceBindingStore(Path.Combine(_directory, "source-bindings.json")));
             var localization = DispatchProxy.Create<ILocalizationManager, LocalizationProxy>();
             Provider = new StremioSubtitleProvider(State, registry, resolver, Http, accessor, localization, Clock, capacity, TimeSpan.FromMinutes(5));
         }
@@ -281,7 +283,12 @@ public sealed class StremioSubtitleProviderTests
             ContentType = Item.Type == "movie" ? VideoContentType.Movie : VideoContentType.Episode
         };
         internal Task<IEnumerable<RemoteSubtitleInfo>> Search(string language = "eng") => Provider.Search(Request(language), CancellationToken.None);
-        public void Dispose() { Provider.Dispose(); _client.Dispose(); }
+        public void Dispose()
+        {
+            Provider.Dispose();
+            _client.Dispose();
+            if (Directory.Exists(_directory)) Directory.Delete(_directory, true);
+        }
     }
 
     public class LocalizationProxy : DispatchProxy
@@ -318,6 +325,7 @@ public sealed class StremioSubtitleProviderTests
         internal string Subtitles { get; set; } = Fixture.DefaultSubtitles;
         internal byte[] Download { get; set; } = Encoding.UTF8.GetBytes(Srt);
         internal string DownloadType { get; set; } = "text/plain";
+        internal string? DownloadCharset { get; set; }
         internal bool UnknownLength { get; set; }
         internal Action? BeforeDownload { get; set; }
         internal ConcurrentQueue<Uri> Requests { get; } = new();
@@ -341,6 +349,7 @@ public sealed class StremioSubtitleProviderTests
             else throw new InvalidOperationException("Unexpected request.");
             HttpContent content = UnknownLength ? new UnknownLengthContent(bytes) : new ByteArrayContent(bytes);
             content.Headers.ContentType = new MediaTypeHeaderValue(mediaType);
+            if (uri.Host == "captions.example") content.Headers.ContentType.CharSet = DownloadCharset;
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
         }
     }
