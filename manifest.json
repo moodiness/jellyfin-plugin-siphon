@@ -8,12 +8,12 @@
     "category": "General",
     "versions": [
       {
-        "version": "1.4.0.0",
+        "version": "1.4.1.0",
         "targetAbi": "12.1.0.0",
-        "sourceUrl": "https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.4.0/siphon-1.4.0.0.zip",
-        "checksum": "ff24b6b0a6f97875442e77034f70ba0a",
+        "sourceUrl": "https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.4.1/siphon-1.4.1.0.zip",
+        "checksum": "e101f313b6be10534423544a13d25ac2",
         "timestamp": "2026-09-17T00:00:00Z",
-        "changelog": "Add per-catalog native libraries, cached metadata enrichment, incremental and followed-series synchronization, protected cleanup, stable native stream versions, accurate audio and subtitle handling, tabbed administration, diagnostics, and HTTP/proxy security fixes."
+        "changelog": "Fix media-detail loading during catalog and metadata synchronization by separating synchronization from native library writes. Clarify addon-defined catalog filters without changing their parameter names or values."
       }
     ]
   }
