@@ -90,7 +90,7 @@ public sealed class ProxySessionStore(ConfigurationAccessor configuration)
 
         lock (_gate)
         {
-            if (!_sessions.ContainsKey(parent.RootToken))
+            if (!_sessions.TryGetValue(parent.RootToken, out var root))
             {
                 throw new InvalidDataException("Expired playlist lease.");
             }
@@ -117,8 +117,8 @@ public sealed class ProxySessionStore(ConfigurationAccessor configuration)
             }
 
             // Credentials apply only to the original authority, never arbitrary playlist hosts.
-            var headers = parent.Source.Url.GetLeftPart(UriPartial.Authority).Equals(uri.GetLeftPart(UriPartial.Authority), StringComparison.OrdinalIgnoreCase)
-                ? parent.Source.RequestHeaders : new Dictionary<string, string>();
+            var headers = root.Session.Source.Url.GetLeftPart(UriPartial.Authority).Equals(uri.GetLeftPart(UriPartial.Authority), StringComparison.OrdinalIgnoreCase)
+                ? root.Session.Source.RequestHeaders : new Dictionary<string, string>();
             var childSession = Add(new ProxySession(NewToken(), parent.Source with { Url = uri, RequestHeaders = headers, FileName = null, Size = null }, parent.ItemKey) { RootToken = parent.RootToken });
             children[uri] = childSession.Token;
             return childSession;

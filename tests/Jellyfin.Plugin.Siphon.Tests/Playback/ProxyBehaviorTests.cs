@@ -41,11 +41,14 @@ public sealed class ProxyBehaviorTests : IDisposable
         Assert.Empty(((MemoryStream)context.Response.Body).ToArray());
     }
 
-    [Fact]
-    public async Task NonzeroRangeCannotExposeAnExtensionlessPlaylist()
+    [Theory]
+    [InlineData("opaque")]
+    [InlineData("misleading.mp4")]
+    [InlineData("misleading.ts")]
+    public async Task NonzeroRangeCannotExposeAnUnclassifiedPlaylist(string path)
     {
         var content = Encoding.UTF8.GetBytes("#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nhttps://secret.example/path/segment.ts?token=private\n#EXT-X-ENDLIST\n");
-        using var fixture = CreateFixture(content, "https://upstream.example/opaque", "application/octet-stream");
+        using var fixture = CreateFixture(content, "https://upstream.example/" + path, "application/octet-stream");
         var context = NewContext("GET", "bytes=20-90");
         fixture.Controller.ControllerContext = new ControllerContext { HttpContext = context };
         await fixture.Controller.Media(fixture.Session.Token);
@@ -74,6 +77,23 @@ public sealed class ProxyBehaviorTests : IDisposable
     }
 
     [Fact]
+    public void NestedPlaylistReturnsToOriginalAuthorityWithoutLosingCredentials()
+    {
+        var sessions = new ProxySessionStore(new ConfigurationAccessor(() => new PluginConfiguration { PublicBaseUrl = "https://jellyfin.example" }));
+        var source = new ResolvedStream(new string('A', 64), "Film", new Uri("https://origin.example/master.m3u8"),
+            new Dictionary<string, string> { ["Authorization"] = "fixture-credential" }, null, null);
+        var root = sessions.Create(Item(), source);
+        var playlist = sessions.CreateChild(root, new Uri("https://cdn.example/variant.m3u8"));
+        var segment = sessions.CreateChild(playlist, new Uri("https://cdn.example/segment.ts"));
+        var key = sessions.CreateChild(playlist, new Uri("https://origin.example/decryption.key"));
+
+        Assert.Empty(playlist.Source.RequestHeaders);
+        Assert.Empty(segment.Source.RequestHeaders);
+        Assert.Equal("fixture-credential", key.Source.RequestHeaders["Authorization"]);
+        Assert.Equal(key.Token, sessions.CreateChild(root, key.Source.Url).Token);
+    }
+
+    [Fact]
     public void SourceCapabilitiesCannotBeForgedFromAnItemCapability()
     {
         var capabilities = new CapabilityTokenService(new SiphonSecretStore(Paths()));
@@ -86,19 +106,66 @@ public sealed class ProxyBehaviorTests : IDisposable
         Assert.False(capabilities.TryReadSource(source[..^4] + "abcd", out _, out _));
     }
 
-    private Fixture CreateFixture(byte[] content, string url, string type = "video/mp4")
+    [Fact]
+    public async Task StalledImageBodyTimesOutWithoutWaitingForTheClientToDisconnect()
     {
-        var config = new ConfigurationAccessor(() => new PluginConfiguration { PublicBaseUrl = "https://jellyfin.example" });
+        using var fixture = CreateFixture([], "https://upstream.example/poster.png", "image/png", new StalledImage(), 1);
+        await fixture.Store.SaveAsync([Item() with { PosterUrl = "https://upstream.example/poster.png" }], CancellationToken.None);
+        var token = new CapabilityTokenService(new SiphonSecretStore(Paths())).SignItem(Item().Key);
+        var context = NewContext("GET", "");
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = context };
+        await fixture.Controller.Image(token).WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(502, context.Response.StatusCode);
+        Assert.Empty(((MemoryStream)context.Response.Body).ToArray());
+    }
+
+    [Theory]
+    [InlineData("video/mp4", 0)]
+    [InlineData("video/mp4", 512)]
+    [InlineData("application/vnd.apple.mpegurl", 512)]
+    public async Task StalledPlaybackBodyTimesOutWithoutWaitingForTheClientToDisconnect(string type, int prefixLength)
+    {
+        var prefix = Encoding.UTF8.GetBytes("#EXTM3U\n#" + new string('x', 502) + "\n")[..prefixLength];
+        if (type == "video/mp4") Array.Clear(prefix);
+        using var fixture = CreateFixture([], "https://upstream.example/opaque", type, new StalledPlayback(prefix), 1);
+        var context = NewContext("GET", "");
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = context };
+
+        await fixture.Controller.Media(fixture.Session.Token).WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(502, context.Response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.ServiceUnavailable)]
+    [InlineData(HttpStatusCode.PartialContent)]
+    public async Task FailedRangeClassificationDoesNotForwardPotentialPlaylistSecrets(HttpStatusCode status)
+    {
+        var content = Encoding.UTF8.GetBytes("#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nhttps://origin.example/segment.ts?credential=fixture\n");
+        using var fixture = CreateFixture(content, "https://upstream.example/opaque", "application/octet-stream",
+            classificationStatus: status);
+        var context = NewContext("GET", "bytes=20-90");
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = context };
+
+        await fixture.Controller.Media(fixture.Session.Token);
+
+        Assert.Equal(502, context.Response.StatusCode);
+        Assert.Empty(((MemoryStream)context.Response.Body).ToArray());
+    }
+
+    private Fixture CreateFixture(byte[] content, string url, string type = "video/mp4", Stream? body = null, int timeoutSeconds = 30, HttpStatusCode? classificationStatus = null)
+    {
+        var config = new ConfigurationAccessor(() => new PluginConfiguration { PublicBaseUrl = "https://jellyfin.example", AddonTimeoutSeconds = timeoutSeconds });
         var tokens = new CapabilityTokenService(new SiphonSecretStore(Paths()));
         var store = new SiphonStateStore(Paths());
         store.SaveAsync([Item()], CancellationToken.None).GetAwaiter().GetResult();
-        var http = new MemoryOrigin(content, type);
+        var http = new MemoryOrigin(content, type, body, classificationStatus);
         var client = new StremioClient(http, config);
         var registry = new AddonRegistry(client, config, NullLogger<AddonRegistry>.Instance);
         var resolver = new StreamResolver(client, registry, config, NullLogger<StreamResolver>.Instance);
         var sessions = new ProxySessionStore(config);
         var session = sessions.Create(Item(), new ResolvedStream(new string('A', 64), "Film", new Uri(url), new Dictionary<string, string>(), null, null));
-        return new Fixture(new SiphonProxyController(tokens, store, resolver, sessions, http), session, store, client);
+        return new Fixture(new SiphonProxyController(tokens, store, resolver, sessions, http, config), session, store, client);
     }
 
     private ManagedItem Item() => new()
@@ -134,10 +201,12 @@ public sealed class ProxyBehaviorTests : IDisposable
         protected override object? Invoke(MethodInfo? method, object?[]? args) => method?.Name == "get_DataPath" ? DataPath : throw new NotSupportedException();
     }
 
-    private sealed class MemoryOrigin(byte[] data, string contentType) : ISafeHttpClient
+    private sealed class MemoryOrigin(byte[] data, string contentType, Stream? body, HttpStatusCode? classificationStatus) : ISafeHttpClient
     {
         public Task<HttpResponseMessage> SendAsync(Uri uri, HttpMethod method, IReadOnlyDictionary<string, string>? headers, CancellationToken cancellationToken)
         {
+            if (classificationStatus.HasValue && headers?.GetValueOrDefault("Range") == "bytes=0-511")
+                return Task.FromResult(new HttpResponseMessage(classificationStatus.Value) { Content = new ByteArrayContent([]) });
             var start = 0;
             var end = data.Length - 1;
             var ranged = headers?.TryGetValue("Range", out var range) == true;
@@ -151,13 +220,34 @@ public sealed class ProxyBehaviorTests : IDisposable
             var response = new HttpResponseMessage(ranged ? HttpStatusCode.PartialContent : HttpStatusCode.OK)
             {
                 RequestMessage = new HttpRequestMessage(method, uri),
-                Content = new ByteArrayContent(data[start..(end + 1)])
+                Content = body is null ? new ByteArrayContent(data[start..(end + 1)]) : new StreamContent(body)
             };
             response.Content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
             response.Headers.AcceptRanges.Add("bytes");
             response.Headers.TryAddWithoutValidation("Set-Cookie", "secret=value");
             if (ranged) response.Content.Headers.ContentRange = new ContentRangeHeaderValue(start, end, data.Length);
             return Task.FromResult(response);
+        }
+    }
+
+    private sealed class StalledImage : MemoryStream
+    {
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return 0;
+        }
+    }
+
+    private sealed class StalledPlayback(byte[] prefix) : MemoryStream(prefix, writable: false)
+    {
+        public override bool CanSeek => false;
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (Position < Length) return await base.ReadAsync(buffer, cancellationToken);
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return 0;
         }
     }
 
