@@ -41,25 +41,33 @@ public sealed class LibraryMaterializer(
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        await configuration.MutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await configuration.SynchronizationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var owned = await LoadManagedItemsAsync(cancellationToken).ConfigureAwait(false);
-            var retained = state.GetItems();
-            if (retained.Count > 0 && string.IsNullOrWhiteSpace(configuration.Current.PublicBaseUrl))
+            await configuration.MutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
             {
-                logger.LogWarning("Configure PublicBaseUrl and synchronize Siphon to populate its media library");
-                return;
+                var owned = await LoadManagedItemsAsync(cancellationToken).ConfigureAwait(false);
+                var retained = state.GetItems();
+                if (retained.Count > 0 && string.IsNullOrWhiteSpace(configuration.Current.PublicBaseUrl))
+                {
+                    logger.LogWarning("Configure PublicBaseUrl and synchronize Siphon to populate its media library");
+                    return;
+                }
+                var hashes = PublicationHashes(retained);
+                var changed = PublicationChanges(hashes, includeUnknown: false);
+                await MaterializeAsync(retained, owned.Items, owned.TopParents, owned.CatalogRoots, cancellationToken, null,
+                    changedKeys: changed).ConfigureAwait(false);
+                await SavePublicationAsync(hashes, changed, cancellationToken).ConfigureAwait(false);
             }
-            var hashes = PublicationHashes(retained);
-            var changed = PublicationChanges(hashes, includeUnknown: false);
-            await MaterializeAsync(retained, owned.Items, owned.TopParents, owned.CatalogRoots, cancellationToken, null,
-                changedKeys: changed).ConfigureAwait(false);
-            await SavePublicationAsync(hashes, changed, cancellationToken).ConfigureAwait(false);
+            finally
+            {
+                configuration.MutationGate.Release();
+            }
         }
         finally
         {
-            configuration.MutationGate.Release();
+            configuration.SynchronizationGate.Release();
         }
     }
 

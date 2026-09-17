@@ -135,28 +135,6 @@ public sealed class CatalogCleanupTests
     }
 
     [Fact]
-    public async Task CleanupWaitsForSynchronizationMutationGate()
-    {
-        var configuration = new ConfigurationAccessor(Configuration);
-        var state = new MemoryState([Missing("missing", Now.AddDays(-8))]);
-        var cleanup = new CatalogCleanupService(configuration, state, null!, new UnavailableDatabase(), new Clock(Now));
-        await configuration.MutationGate.WaitAsync();
-        Task<CleanupPreview> pending;
-        try
-        {
-            pending = cleanup.PreviewAsync(0, 50, CancellationToken.None);
-            Assert.False(pending.IsCompleted);
-        }
-        finally
-        {
-            configuration.MutationGate.Release();
-        }
-        var preview = await pending;
-        Assert.Equal(1, preview.TotalEligible);
-        Assert.Equal(0, state.Saves);
-    }
-
-    [Fact]
     public void SharedOrDisabledOwnershipCannotBecomeEligible()
     {
         var item = Missing("shared", Now.AddDays(-30)) with { Owners = ["installation:subscription", "other:subscription"] };

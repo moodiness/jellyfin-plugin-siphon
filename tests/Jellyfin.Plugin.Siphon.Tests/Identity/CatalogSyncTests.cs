@@ -4,9 +4,14 @@ using Jellyfin.Plugin.Siphon.Configuration;
 using Jellyfin.Plugin.Siphon.Identity;
 using Jellyfin.Plugin.Siphon.Infrastructure;
 using Jellyfin.Plugin.Siphon.Metadata;
+using Jellyfin.Plugin.Siphon.Playback;
 using Jellyfin.Plugin.Siphon.Protocol;
 using MediaBrowser.Common.Configuration;
+using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.Persistence;
+using MediaBrowser.Model.Entities;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -333,22 +338,90 @@ public sealed class CatalogSyncTests
         });
     }
 
-    [Theory]
-    [InlineData(SyncKind.Catalogs)]
-    [InlineData(SyncKind.FullRefresh)]
-    [InlineData(SyncKind.FollowedSeries)]
-    public async Task NativeTasksShareTheMutationGateWithoutReleasingAnotherOwnersLease(SyncKind kind)
+    [Fact]
+    public async Task CatalogFetchAllowsColdVersionsButSerializesSnapshotOperations()
     {
-        var configuration = new ConfigurationAccessor(() => new PluginConfiguration());
-        await configuration.MutationGate.WaitAsync();
+        var config = new PluginConfiguration
+        {
+            PublicBaseUrl = "https://jellyfin.example",
+            ProtectFavorites = false,
+            ProtectResumePositions = false,
+            Addons = [new ConfiguredAddon
+            {
+                Id = "installation",
+                ManifestUrl = "https://example.org/manifest.json",
+                Catalogs = [new CatalogSubscription { Key = "subscription", Type = "movie", Id = "all" }]
+            }]
+        };
+        var configuration = new ConfigurationAccessor(() => config);
+        var origin = new PendingCatalogOrigin();
+        using var client = new StremioClient(origin, configuration);
+        var registry = new AddonRegistry(client, configuration, NullLogger<AddonRegistry>.Instance);
+        var managed = Item("movie:original", "movie", "original") with { MissingSinceUtc = DateTimeOffset.UtcNow.AddDays(-8) };
+        var state = new StateBoundary([managed]);
+        var movie = new Movie { Id = Guid.NewGuid(), Name = managed.Name, PresentationUniqueKey = managed.Key };
+        movie.SetProviderId("Siphon", managed.Key);
+        var library = DispatchProxy.Create<ILibraryManager, VersionLibraryProxy>();
+        ((VersionLibraryProxy)(object)library).Movie = movie;
+        var persistence = DispatchProxy.Create<IItemPersistenceService, VersionPersistenceProxy>();
+        var applicationPaths = DispatchProxy.Create<IApplicationPaths, PathsProxy>();
+        var directory = Path.Combine(Path.GetTempPath(), "siphon-concurrent-sync-" + Guid.NewGuid().ToString("N"));
+        ((PathsProxy)(object)applicationPaths).DataPath = directory;
+        var paths = new SiphonPaths(applicationPaths);
+        var diagnostics = new SyncDiagnostics(paths, NullLogger<SyncDiagnostics>.Instance);
+        var tokens = new CapabilityTokenService(new SiphonSecretStore(paths));
+        var resolver = new StreamResolver(client, registry, configuration, NullLogger<StreamResolver>.Instance,
+            new SourceBindingStore(Path.Combine(directory, "sources.json")));
+        var metadata = new ItemMetadataMapper(configuration, tokens, library, null!, persistence);
+        var versions = new NativeVersionService(configuration, tokens, state, library, persistence, null!, metadata, resolver);
+        var cleanup = new CatalogCleanupService(configuration, state, null!, null!);
+        var enrichment = new MetadataEnrichmentService(configuration, null!, library, null!, state);
+        var sync = new CatalogSyncService(configuration, registry, client, state, null!, NullLogger<CatalogSyncService>.Instance,
+            cleanup, enrichment, diagnostics);
+        using var cancellation = new CancellationTokenSource();
+        var synchronizing = sync.SynchronizeAsync(new Progress<double>(), cancellation.Token);
+        Task<IReadOnlyList<NativeStreamVersion>>? opening = null;
+        Task<CleanupPreview>? preview = null;
         try
         {
-            var sync = new CatalogSyncService(configuration, null!, null!, null!, null!, NullLogger<CatalogSyncService>.Instance,
-                null!, null!, null!);
-            await Assert.ThrowsAsync<InvalidOperationException>(() => sync.SynchronizeAsync(new Progress<double>(), CancellationToken.None, kind));
-            Assert.Equal(0, configuration.MutationGate.CurrentCount);
+            await origin.CatalogStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            preview = cleanup.PreviewAsync(0, 50, CancellationToken.None);
+            opening = versions.GetVersionsAsync(movie, cancellation.Token);
+            var available = await opening.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(movie.Id, Assert.Single(available).Item.Id);
+            Assert.False(synchronizing.IsCompleted);
+            Assert.False(preview.IsCompleted);
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                sync.SynchronizeAsync(new Progress<double>(), CancellationToken.None, SyncKind.FollowedSeries));
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                sync.SynchronizeAsync(new Progress<double>(), CancellationToken.None));
+
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => synchronizing);
+            var afterCancellation = await preview.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal("SynchronizationUnconfirmed", Assert.Single(afterCancellation.Items).Reason);
+            Assert.Equal(managed, Assert.Single(state.GetItems()));
+
+            origin.ReleaseCatalog.TrySetResult();
+            await Assert.ThrowsAsync<SnapshotCapturedException>(() =>
+                sync.SynchronizeAsync(new Progress<double>(), CancellationToken.None));
+            Assert.Equal(managed.Key, Assert.Single(state.GetItems()).Key);
         }
-        finally { configuration.MutationGate.Release(); }
+        finally
+        {
+            cancellation.Cancel();
+            origin.ReleaseCatalog.TrySetResult();
+            try { await synchronizing; }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+            if (opening is not null)
+            {
+                try { await opening; }
+                catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+            }
+            if (preview is not null) await preview;
+            diagnostics.Dispose();
+            if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+        }
     }
 
     [Fact]
@@ -410,7 +483,6 @@ public sealed class CatalogSyncTests
             else if (expectCommit == false)
                 await Assert.ThrowsAsync<InvalidOperationException>(() => sync.SynchronizeAsync(new Progress<double>(), cancellationToken, kind));
             else await sync.SynchronizeAsync(new Progress<double>(), cancellationToken, kind);
-            Assert.Equal(1, configuration.MutationGate.CurrentCount);
             inspectDiagnostics?.Invoke(diagnostics);
             return state.GetItems();
         }
@@ -437,6 +509,51 @@ public sealed class CatalogSyncTests
             "GetItemById" => null,
             _ => throw new NotSupportedException()
         };
+    }
+
+    public class VersionLibraryProxy : DispatchProxy
+    {
+        public Movie Movie { get; set; } = null!;
+        protected override object? Invoke(MethodInfo? method, object?[]? args) => method?.Name switch
+        {
+            "GetNewItemId" => Movie.Id,
+            "GetItemById" => args![0] is Guid id && id == Movie.Id ? Movie : null,
+            "GetItemList" => new List<BaseItem> { Movie },
+            "GetLinkedAlternateVersions" => new List<Video>(),
+            "GetPeople" => new List<PersonInfo>(),
+            "RegisterItem" => null,
+            _ => throw new NotSupportedException(method?.Name)
+        };
+    }
+
+    public class VersionPersistenceProxy : DispatchProxy
+    {
+        protected override object? Invoke(MethodInfo? method, object?[]? args)
+            => method?.Name == "SaveItems" ? null : throw new NotSupportedException(method?.Name);
+    }
+
+    private sealed class PendingCatalogOrigin : ISafeHttpClient
+    {
+        public TaskCompletionSource CatalogStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseCatalog { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<HttpResponseMessage> SendAsync(Uri uri, HttpMethod method,
+            IReadOnlyDictionary<string, string>? headers, CancellationToken cancellationToken)
+        {
+            string body;
+            if (uri.AbsolutePath == "/manifest.json")
+                body = """{"id":"fixture","name":"Fixture","resources":["catalog","stream"],"types":["movie"],"catalogs":[{"type":"movie","id":"all"}]}""";
+            else if (uri.AbsolutePath == "/stream/movie/original.json")
+                body = """{"streams":[{"url":"https://media.example/feature.mp4","name":"Source"}]}""";
+            else if (uri.AbsolutePath == "/catalog/movie/all.json")
+            {
+                CatalogStarted.TrySetResult();
+                await ReleaseCatalog.Task.WaitAsync(cancellationToken);
+                body = """{"metas":[{"id":"original","type":"movie","name":"Original"}]}""";
+            }
+            else throw new InvalidOperationException("Unexpected fixture request.");
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) };
+        }
     }
 
     private sealed class SnapshotCapturedException : Exception { }
