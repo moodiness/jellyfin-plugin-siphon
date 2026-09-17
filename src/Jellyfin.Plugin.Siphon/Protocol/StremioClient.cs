@@ -60,7 +60,7 @@ public sealed class StremioClient(ISafeHttpClient http, ConfigurationAccessor co
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw new OperationCanceledException(ct); }
         catch (StremioException) { throw; }
-        catch (OperationCanceledException) { throw new StremioException("Addon request timed out."); }
+        catch (OperationCanceledException) { throw new StremioException("Addon request timed out.", isTimeout: true); }
         catch (Exception) { throw new StremioException("Addon request failed or returned invalid JSON."); }
         finally { if (acquired) _requests.Release(); }
     }

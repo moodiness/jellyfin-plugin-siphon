@@ -338,4 +338,7 @@ public static class StremioJson
         return result;
     }
 }
-public sealed class StremioException(string message) : Exception(message);
+public sealed class StremioException(string message, bool isTimeout = false) : Exception(message)
+{
+    public bool IsTimeout { get; } = isTimeout;
+}

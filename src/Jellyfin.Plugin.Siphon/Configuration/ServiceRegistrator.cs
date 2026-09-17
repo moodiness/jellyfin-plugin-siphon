@@ -33,9 +33,15 @@ public sealed class ServiceRegistrator : MediaBrowser.Controller.Plugins.IPlugin
         serviceCollection.AddSingleton<Infrastructure.ISiphonStateStore>(services => services.GetRequiredService<Infrastructure.SiphonStateStore>());
         serviceCollection.AddSingleton<Infrastructure.CapabilityTokenService>();
         serviceCollection.AddSingleton<Infrastructure.SsrfPolicy>();
-        serviceCollection.AddSingleton<Infrastructure.ISafeHttpClient, Infrastructure.SafeHttpClient>();
+        serviceCollection.AddSingleton<Infrastructure.SafeHttpClient>();
+        serviceCollection.AddSingleton<Infrastructure.ISafeHttpClient>(services => services.GetRequiredService<Infrastructure.SafeHttpClient>());
         serviceCollection.AddSingleton<Protocol.StremioClient>();
         serviceCollection.AddSingleton<Protocol.AddonRegistry>();
+        serviceCollection.AddSingleton<Infrastructure.SyncDiagnostics>();
+        serviceCollection.AddSingleton<SelfConnectionProbe>();
+        serviceCollection.AddSingleton<Infrastructure.MetadataResponseCache>();
+        serviceCollection.AddSingleton<Metadata.MetadataProviderClient>();
+        serviceCollection.AddSingleton<Metadata.MetadataEnrichmentService>();
         serviceCollection.AddSingleton<Identity.LibraryMaterializer>();
         serviceCollection.AddSingleton<Infrastructure.SiphonItemLocator>();
         serviceCollection.AddSingleton<Microsoft.Extensions.Hosting.IHostedService>(services => services.GetRequiredService<Identity.LibraryMaterializer>());
