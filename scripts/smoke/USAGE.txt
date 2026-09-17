@@ -1,0 +1,135 @@
+SIPHON OWNED JELLYFIN INTEGRATION
+
+Prerequisites
+- Python 3.10 or newer on Linux, macOS or a Linux WSL environment.
+- Docker Engine/Desktop with Linux containers, at least 4 GiB available RAM,
+  permission to bind loopback ports and mount the operating-system temp directory.
+- OpenSSL with req -addext support (OpenSSL 3 recommended on macOS).
+- .NET SDK selected by global.json when building from source. Supplying --package
+  bypasses the build, not the archive installation or native plugin-load assertion.
+- For ui/full: Node.js 22+, npm and either the pinned Chromium browser (default):
+    npm ci --prefix scripts/smoke --ignore-scripts --no-audit --no-fund
+    cd scripts/smoke && npx playwright install chromium
+  Linux CI uses npx playwright install --with-deps chromium. Browser dependencies
+  are development-only; no JavaScript dependencies enter the plugin package.
+  Or install only the npm dependencies and pass --chromium-executable PATH to use
+  an explicitly selected installed Chromium/Chrome binary. There is no automatic
+  fallback and no user profile reuse. Evidence includes browser.version() and
+  whether the binary was explicit or pinned.
+- Initial network access for image pulls, SDK dependencies and the real historical
+  GitHub release. Runtime addon, media, IntroDB and receiver requests stay inside
+  an owned internal Docker network. A fixed-upstream Nginx ingress alone joins
+  the default bridge to expose loopback-only host ports; neither Jellyfin nor the
+  fixture container receives an external route. No external addon or user
+  credential is needed.
+
+Commands (from repository root)
+  python3 scripts/smoke/run.py install
+  python3 scripts/smoke/run.py playback
+  python3 scripts/smoke/run.py exports
+  python3 scripts/smoke/run.py notifications
+  python3 scripts/smoke/run.py segments
+  python3 scripts/smoke/run.py ui --screenshots artifacts/smoke-ui
+  python3 scripts/smoke/run.py upgrade
+  python3 scripts/smoke/run.py full --evidence artifacts/smoke-evidence.json --screenshots artifacts/smoke-ui
+  python3 scripts/smoke/run.py full --chromium-executable "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --evidence artifacts/smoke-evidence.json --screenshots artifacts/smoke-ui
+
+Each command creates a fresh runtime. Without --package it first builds Release
+and runs the repository's real packaging script into its owned temp directory.
+To reuse a previously verified package:
+  python3 scripts/smoke/run.py full --package artifacts/siphon-1.6.0.0.zip
+Use --image to supply another image tag or immutable digest. The actual server
+must report 12.1.x; an incompatible server is not silently accepted.
+
+Scenario contracts
+Every scenario installs the actual ZIP into a stopped, private /config/plugins
+folder, starts Jellyfin, completes the native startup API, creates an administrator
+and two ordinary native users, configures a generated catalog, runs its native
+scheduled task and verifies publication. It checks elevated health observations,
+source versus published build version, redaction and unchanged upstream counters.
+
+install: Installation/bootstrap/catalog/health baseline only.
+playback: Addon search creates a native preview; import retains its identity.
+  A series search hit deliberately omits its poster; full addon metadata supplies
+  a locally generated poster served by the native image endpoint. Series adoption
+  retains identity and publishes episodes; DELETE removes discovery-only items
+  and episodes, while removing manual ownership retains shared-catalog content.
+  One user's explicit personal provider replaces the shared provider used by the
+  other user. Native PlaybackInfo and selected-version progressive bytes are
+  checked, HLS is opened/probed by Jellyfin and decoded by its bundled FFmpeg,
+  and an existing playback lease is refused after native permission revocation.
+exports: Direct capability, direct authenticated and native selected-version
+  exports are byte-identical. Private queue completion and owner isolation are
+  checked. Existing direct/queued links are refused after permission revocation.
+  A slow job is paused, prioritized, persisted across a server restart, resumed
+  and cancelled. Finite HLS selects French audio and English subtitles; ffprobe
+  verifies only these tracks and FFmpeg decodes the result. An unadvertised
+  language is refused. A native series batch chooses each exact source, checks
+  owner-bound/single-use preview grants, waits outside the UTC window and runs
+  after the window is disabled.
+notifications: Each Json/Discord/Slack/Ntfy adapter reaches the owned receiver
+  and its exact-body signature is verified. The real one-minute per-user test
+  limit is observed, so this scenario takes several minutes. Native favorites,
+  a changed addon series and the actual catalog/notification workers produce a
+  NewEpisode inbox event and signed webhook; another user cannot see the inbox.
+segments: A generated movie has controlled IntroDB timing data delivered over
+  TLS at a container-only api.introdb.app alias. Native PlaybackInfo/LiveStreams
+  probes the generated file and persists the selected version's runtime; the
+  harness never writes ignored runtime DTO fields. Native MediaSegments for that
+  selected version must expose the intro; post-credit material remains a chapter
+  outside skip segments.
+ui: Real Chromium login, personal preference save/reload, memory-only portal
+  sessions, keyboard tab movement/focus, French/English changes, native Jellyfin
+  administrator login and embedded plugin health refresh. Both surfaces are
+  checked and optionally screenshotted at 390px and 1280px widths. No route mocks
+  or injected ApiClient/session are used.
+upgrade: Runs the real published 1.4.1.0 DLL first and imports native items. The
+  real Jellyfin 12.1 POST /UserItems/{itemId}/UserData?userId= endpoint seeds
+  playback position, play count, favorite, last-played and played fields. This is
+  persisted history/resume seeding, NOT completed-playback simulation; actual
+  media probing/streaming is exercised separately by playback/segments. It
+  favorites a series, creates a manual collection, saves native user language
+  settings, and stops Jellyfin. It then
+  replaces only the owned plugin binary directory with the current package,
+  restarts against the same config/data and verifies stable native identities,
+  favorites/resume/play count, collection membership, addon configuration and
+  native personal settings. 1.4.1 did not have Siphon personal preferences or
+  playback profiles; those states are not fabricated as historical upgrade data.
+full: Real historical upgrade followed by all current playback/export/notification/
+  segment/browser paths. CI runs this command, not source-text shell checks.
+
+Historical artifact
+By default the runner resolves the public v1.4.1 release through GitHub's API and
+fetches siphon-1.4.1.0.zip. The verified published SHA-256 is pinned:
+  7b7ee5f591272133bd2662e6df518c6d0c722f32339e1b563126cc240347ce60
+An offline copy can be supplied with --previous-package; the same exact checksum,
+plugin ID, version and ABI checks apply. It never creates a synthetic old state,
+rewrites current metadata to claim an old version or substitutes another release.
+A missing historical binary is an explicit unavailable result, not upgrade success.
+
+Ownership, evidence and failure
+- Unique mkdtemp paths, container names and an internal Docker network; random
+  ports are published only on 127.0.0.1. Runtime and tool containers have CPU,
+  memory and process limits; startup and scenario waits have deadlines.
+- All video/audio/subtitles/posters are locally generated test patterns, sine
+  waves and short original text. No downloaded or copyrighted media fixture is needed.
+- The trust certificate and fixture DNS aliases exist only inside the owned
+  containers. Host DNS/trust stores are never modified.
+- SIGINT/SIGTERM and ordinary failures trigger cleanup of owned containers,
+  network, generated media, native accounts, data and credentials. SIGKILL or
+  daemon/host failure cannot run cleanup; names all begin siphon-smoke- and the
+  runner reports cleanup failures rather than claiming success. Never delete
+  unrelated Docker objects to recover an interrupted run.
+- JSON evidence records per-step outcomes/durations, archive/media hashes,
+  version distinctions and assertion summaries. It never includes account
+  passwords, API tokens, signed links, signing secrets or webhook bodies.
+  Browser raw errors, network traces and server logs are deliberately not exported.
+  Safe browser-stage codes identify failing phases. Optional successful viewport
+  screenshots contain only generated local accounts/data and no credentials.
+- Exit 0: every selected scenario assertion passed.
+  Exit 1: failed assertion, runtime error or cleanup failure.
+  Exit 77: explicit unavailable dependency/image/browser/history; NOT a pass.
+  Exit 130: interrupted with cleanup attempted.
+- These scripts are regression scenarios, not a claim of broad client/format
+  compatibility. Unsupported native external-reference media formats are covered
+  separately by tests/Jellyfin.Plugin.Siphon.Tests/Playback/native_reader_smoke.py.
