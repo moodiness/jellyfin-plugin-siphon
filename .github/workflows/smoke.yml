@@ -10,7 +10,7 @@ on:
       - 'Directory.Build.props'
       - '.github/workflows/smoke.yml'
   push:
-    branches: [main, feat/v1.6-operations-and-controls]
+    branches: [main]
   workflow_dispatch:
     inputs:
       scenario:
