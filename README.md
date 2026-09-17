@@ -4,7 +4,7 @@ Siphon brings **Stremio addons into Jellyfin**: catalogs, metadata, subtitles, a
 
 Siphon targets **Jellyfin 12.1** and .NET 10. It does not include a torrent engine, debrid client, or external-player integration.
 
-**Siphon 1.4.1.0 (unreleased)** fixes media-detail loading during synchronization and clarifies addon-defined catalog filters. The manual installation instructions below refer to the latest published release.
+**Siphon 1.4.1.0** fixes media-detail loading during synchronization and clarifies addon-defined catalog filters.
 
 ## Features
 
@@ -46,9 +46,9 @@ The repository manifest points to the release archive and includes its Jellyfin 
 
 ## Manual installation
 
-1. Download `siphon-1.4.0.0.zip` from the [v1.4.0 release](https://github.com/moodiness/jellyfin-plugin-siphon/releases/tag/v1.4.0).
+1. Download `siphon-1.4.1.0.zip` from the [v1.4.1 release](https://github.com/moodiness/jellyfin-plugin-siphon/releases/tag/v1.4.1).
 2. Verify the archive against `SHA256SUMS`.
-3. Create a versioned folder named `Jellyfin.Plugin.Siphon_1.4.0.0` inside Jellyfin's plugin directory and extract the archive contents into that folder. The folder must contain `Jellyfin.Plugin.Siphon.dll` and `meta.json`.
+3. Create a versioned folder named `Jellyfin.Plugin.Siphon_1.4.1.0` inside Jellyfin's plugin directory and extract the archive contents into that folder. The folder must contain `Jellyfin.Plugin.Siphon.dll` and `meta.json`.
 4. Restart Jellyfin.
 5. Configure Siphon from the plugin dashboard.
 
