@@ -6,9 +6,11 @@ Siphon brings **Stremio addons into Jellyfin**: catalogs, metadata, subtitles, a
 
 Siphon targets **Jellyfin 12.1** and .NET 10. The current source includes an opt-in, bounded MonoTorrent engine. It is not a debrid client or an external-player integration.
 
-**Latest published release: 1.4.1.0. Prepared source version: 1.5.0.0.** Preparing the source or merging its pull requests does not publish a release; the repository manifest continues to advertise the last published archive until the release workflow runs.
+**Latest published release: 1.4.1.0. Prepared source version: 1.6.0.0.** The 1.5.0.0 pull requests are merged; neither merging source nor preparing a newer candidate publishes a release. The repository manifest continues to advertise the last published archive until the release workflow runs.
 
 **Siphon 1.5.0.0 (not yet published)** adds isolated per-user playback/subtitle addons and search preferences; durable native collections and playlists; catalog collections; selected-version resumable downloads; selective orphan-history recovery; field provenance and per-title source diagnostics; a followed-series calendar and opt-in notifications; all IntroDB timing types; and real, bounded P2P playback. It also includes native addon Search, targeted synchronization, a twenty-run decision history, provider quota/cooldown tracking, shared response caching, the supplied Siphon icon, and authoritative addon metadata with an optional missing-season-only TMDB supplement. These changes are not included in the published 1.4.1.0 package.
+
+**Siphon 1.6.0.0 (not yet published)** adds a private, persistent server download queue, real finite-HLS offline exports, and opt-in signed notification webhooks. Both background downloads and external delivery are disabled by default. This candidate extends the merged 1.5 functionality; it is not included in the published 1.4.1.0 package.
 
 ## Features
 
@@ -29,7 +31,9 @@ Siphon targets **Jellyfin 12.1** and .NET 10. The current source includes an opt
 - Assign playback and subtitle addons per Jellyfin user without changing shared catalog or metadata ownership.
 - Choose personal local-only or addon-inclusive search, with optional unreleased-title filtering.
 - Download the exact progressive or P2P version with byte-range resume and current-user permission checks.
+- Queue an exact native version for private server-side HTTP/P2P downloading or finite-HLS export, with restart recovery and bounded storage.
 - Follow dated episodes in a personal calendar and receive opt-in, persistent release/date-change notifications.
+- Deliver opted-in calendar events to a per-user webhook with a one-time signing secret, encrypted settings and durable bounded retries.
 - Project IntroDB intro, recap, end-credit and post-credit timings into native segments and chapters.
 - Inspect recorded field provenance and source outcomes, or preview and selectively restore proven orphaned Siphon history.
 - Stream supported torrents through an opt-in engine with connection, cache, rate and lifetime limits.
@@ -62,9 +66,9 @@ The repository manifest points to the release archive and includes its Jellyfin 
 
 ## Manual installation
 
-1. For the prepared 1.5.0.0 source, build `siphon-1.5.0.0.zip` using the commands below or download the matching CI artifact. Once published, it will be available from the [v1.5.0 release](https://github.com/moodiness/jellyfin-plugin-siphon/releases/tag/v1.5.0). The current stable download remains the [v1.4.1 release](https://github.com/moodiness/jellyfin-plugin-siphon/releases/tag/v1.4.1).
+1. For the prepared 1.6.0.0 source, build `siphon-1.6.0.0.zip` using the commands below or download the matching CI artifact. The intended release tag is `v1.6.0`; no download at that tag exists until publication. The current stable download remains the [v1.4.1 release](https://github.com/moodiness/jellyfin-plugin-siphon/releases/tag/v1.4.1).
 2. Verify the archive against `SHA256SUMS`.
-3. For 1.5.0.0, create a versioned folder named `Jellyfin.Plugin.Siphon_1.5.0.0` inside Jellyfin's plugin directory and extract the archive contents into that folder. The folder must contain `Jellyfin.Plugin.Siphon.dll` and `meta.json`. Use the matching versioned folder when installing an older release; do not leave two copies of the plugin installed.
+3. For 1.6.0.0, create a versioned folder named `Jellyfin.Plugin.Siphon_1.6.0.0` inside Jellyfin's plugin directory and extract the archive contents into that folder. The folder must contain `Jellyfin.Plugin.Siphon.dll` and `meta.json`. Use the matching versioned folder when installing an older release; do not leave two copies of the plugin installed.
 4. Restart Jellyfin.
 5. Configure Siphon from the plugin dashboard.
 
@@ -101,7 +105,7 @@ Each catalog's **Presentation** selects **Library**, **Collection**, or **Both**
 - Addon discovery exposes additional results through **Show more**; discovering an addon does not install or enable it.
 - **Tasks** groups catalog synchronization, followed-series refresh, targeted catalog/series refresh, run history, and a confirmed **Full refresh** action. Each **Native schedule** link opens Jellyfin's existing Scheduled Tasks editor. Siphon displays the actual triggers and does not maintain a second scheduler.
 - **Diagnostics** tests the saved Jellyfin address and addon manifests, shows synchronization outcomes, and exports a report without keys, private URLs, hosts, or headers. Tests require saved settings.
-- **Users & defaults** manages server search defaults, notification availability, and per-user addon overrides. **Playback & P2P** manages IntroDB timing types and the opt-in torrent engine. **Open my Siphon portal** opens the authenticated, non-admin personal interface.
+- **Users & defaults** manages server search defaults, calendar/webhook availability, and per-user addon overrides. **Playback & P2P** manages IntroDB timing types, the opt-in torrent engine and private offline-download limits. **Open my Siphon portal** opens the authenticated, non-admin personal interface.
 - Connection timeout remains an advanced network safeguard. There is no additional delay setting for local addons and no total playback-duration limit.
 
 ### Incremental synchronization and followed series
@@ -134,7 +138,7 @@ Unprotected previews expire after 24 hours and are limited to 300 titles. Previe
 
 Under **Users & defaults**, select a Jellyfin user and choose inherited shared playback addons or an explicit replacement list. The replacement applies to both streams and addon subtitles. An **empty override means no providers**, never fallback to shared credentials. Deleting the override restores inheritance. Catalog synchronization, addon discovery/search catalogs, and the selected metadata addon remain shared administrative settings.
 
-Users open **My Siphon** at `/Siphon/User` (under the server's configured base path) and sign in with their own Jellyfin account. The portal keeps its session token in memory, not in download URLs or browser storage; reloading requires another sign-in. It exposes personal preferences, calendar, notifications and source diagnostics, not administrative configuration or addon secrets.
+Users open **My Siphon** at `/Siphon/User` (under the server's configured base path) and sign in with their own Jellyfin account. The portal keeps its session token in memory, not in download URLs or browser storage; reloading requires another sign-in. It exposes personal preferences, calendar, notifications, webhook settings, source diagnostics and private downloads, not administrative configuration or addon secrets.
 
 Search can inherit the server default, search **Local library only**, or include addon discovery. Unreleased filtering affects Siphon search results, including native fallback searches and hints, before pagination; it does not hide personal media. Dates are announced metadata, not evidence of a playable stream. Unknown release dates remain visible. The administrator can configure a release buffer of 0–30 days.
 
@@ -143,6 +147,18 @@ Search can inherit the server default, search **Local library only**, or include
 The personal **Release calendar** uses dated, accessible native episodes from series that the current user follows through favorites, watched episodes or playback progress. It does not substitute another user's follows or call addon providers just to display the calendar. Entries link to native Jellyfin episodes; an announced release is not a source-availability check.
 
 Notifications require both the administrator's **Enable calendar notifications** setting and the user's opt-in. The portal inbox records newly discovered dated episodes, date changes, and announced releases. Initial opt-in establishes a baseline rather than sending an old backlog. Read state and deduplication survive restarts; inaccessible items are not shown. Storage is bounded, and unavailable/oversized observations are not treated as an empty calendar that would replay the backlog. This is a Siphon inbox, not a promise of push notifications from every Jellyfin client.
+
+### Signed external notification webhooks
+
+External delivery additionally requires the administrator's **Enable notification webhooks** setting and the user's saved webhook opt-in under **My Siphon → Notifications**. It sends calendar-event metadata, including series/episode titles and announced dates, to the destination the user chooses. This is not a browser-push or vendor-specific mobile-push integration.
+
+Save the destination, generate a signing secret and copy it to the receiver, then use **Send test**. Secrets are shown only when generated; ordinary status reads never reveal them. Tests are explicit synthetic events, and a failed send is reported as failure. Tests are limited to one per user per minute and eight server-wide per minute. URLs require HTTPS unless an administrator permits the exact hostname; embedded credentials, fragments, redirects and disallowed private destinations are rejected.
+
+Each POST carries `X-Siphon-Event-Id` (a UUID) and `X-Siphon-Signature` (`sha256=` followed by lowercase hexadecimal HMAC-SHA256). Base64-decode the generated secret to obtain the 32-byte key, verify the **exact received UTF-8 request body** with a constant-time comparison, and deduplicate by event ID. The version-1 JSON payload contains `Type`, `EventId`, `CreatedUtc`, `Test`, and, for `calendar.notification`, `Kind`, `Episode`, `PreviousAnnouncedReleaseUtc` and `AvailabilityNote`. Synthetic events use `Type: webhook.test` and `Test: true`. Reading an inbox item does not change a retry's payload.
+
+Delivery is bounded, at-least-once rather than guaranteed: at most five attempts, with 30/120/480/1920-second backoffs and a 24-hour expiry. Network failures, HTTP 408/429 and 5xx are retryable; other HTTP failures are terminal. Pending state, attempts and event IDs survive restart. Setup, reconfiguration and secret rotation establish a baseline instead of sending an existing inbox backlog. Opt-out and lost item/account access stop further eligible delivery; an already-transmitted request cannot be recalled.
+
+Settings, secrets and delivery state are encrypted together with AES-GCM in the private plugin data directory, using a domain-separated key derived from Siphon's signing key. Protect that key and backups: encryption does not hide data from the Jellyfin administrator. Storage is capped at 1,024 users, 200 pending deliveries per user, 10,000 total pending deliveries and a 16 MiB encrypted document.
 
 ### Protected cleanup
 
@@ -261,9 +277,27 @@ Live-TV catalogs using Stremio's `tv` type are not imported. HTTP(S) support doe
 
 In **My Siphon → My sources**, search native Jellyfin or enter an item ID/details URL. Diagnostics show your ordered versions, each addon's outcome and timing, rejection counts, and cache creation/expiry. **Refresh my item sources** invalidates only that title for your profile. It does not refresh all metadata or another user's cache. Upstream URLs, headers, private tracker data and addon credentials remain server-side.
 
-Choose **Download this version** for a progressive or P2P source. The short-lived, download-scoped link supports `HEAD`, byte ranges and validators; current account, library and download permissions are checked again when it is used. It never contains the user's Jellyfin session token. Jellyfin's native download path also uses the selected managed version. This is a streamed file download, not a persistent server download queue.
+Choose **Download this version** for a progressive or P2P source. The short-lived, download-scoped link supports `HEAD`, byte ranges and validators; current account, library and download permissions are checked again when it is used. It never contains the user's Jellyfin session token. Jellyfin's native download path also uses the selected managed version. This direct action streams the file immediately; use **Queue offline** for durable server preparation.
 
-**HLS playback is supported, but offline HLS downloads are not.** They return an explicit unsupported-media response rather than saving a playlist as if it were a movie. Select a progressive version when an offline file is needed.
+### Persistent private offline downloads
+
+An administrator first enables **Private offline downloads** under **Playback & P2P**. A user with native Jellyfin download permission selects **Queue offline** on a specific version, then opens **Downloads** to follow progress, cancel, retry, delete or save a completed file. Closing the portal does not cancel work. The queue is private to the authenticated account; even an administrator cannot select another user's bound native version or impersonate its queue with a `userId` query parameter.
+
+Defaults are **2 concurrent jobs**, **51,200 MiB shared storage**, **10,240 MiB per job**, **20 retained jobs per user** and **7-day retention**. A job's budget includes temporary files and its result, not just the final video's size. HLS staging can therefore require substantially more space than the finished file. P2P also uses the independently bounded torrent cache. The portal shows only the user's retained bytes against the shared server limit, not other users' files or free capacity.
+
+The private ledger stores stable native/source identities and configuration digests, not upstream URLs or request credentials. A worker re-resolves the exact selected source; disappearance or changed authority fails rather than silently selecting a different version. Interrupted running jobs return to the queue after restart. HTTP appends only when a strong ETag, known total length and exact returned range identify the same representation; absent/changed validators safely restart. P2P partial reuse is bound to the exact torrent file. HLS restages rather than appending an incomplete container.
+
+Disabling the queue pauses work and withholds file access. Explicit cancellation survives restart; retry is deliberate. Current account, library, download rights and playback/transport configuration are rechecked during work and file reads. Cancelled writers stop before their reservations can be reused. Completed files use five-minute, in-memory capability links with `GET`, `HEAD` and byte-range support; links expire on restart and reject authenticated foreign users. Retention/delete operations touch only owned private artifacts.
+
+### Finite HLS offline exports
+
+**Queue offline** exports supported finite HLS to a real Matroska file using Jellyfin's configured **FFmpeg and FFprobe**. It selects one coherent video variant, preserves its matching audio renditions, assembles segmented WebVTT subtitle renditions with timestamp-map handling, and supports identity AES-128. Encoded audio/video are copied, not re-encoded. ADTS AAC receives a bounded fragmented-MP4 preparation pass when codec configuration is missing, so Matroska output remains strictly byte-bounded without needing a seekable child-process output.
+
+All playlists, segments and keys are fetched through Siphon's checked HTTP transport and staged under generated local filenames. Probe/remux inputs permit only local file/crypto protocols and restricted demuxer formats; every subprocess output is copied through the same storage budget. Cancellation, idle deadlines, quotas and process deadlines stop and reap owned children. Keep the native media tools patched; these restrictions are not an operating-system sandbox.
+
+Limits are 4,096 HLS requests, 32 playlists, 128 parsed variants/renditions, 2 MiB per playlist, 256 MiB per resource, 48 hours of declared media duration, and 8 MiB/100,000 cues per subtitle rendition. Transfers have a 24-hour total deadline, reads a 60-second idle deadline, media preparation/remux processes a 30-minute deadline, and probing a one-minute deadline. Byte-range resources require a strong ETag and stable total length.
+
+Live/EVENT/low-latency HLS, gaps, nested masters, alternate VIDEO groups, playlist variables/content steering, unsupported DRM/SAMPLE-AES and fragmented-MP4 subtitle renditions are rejected rather than silently omitted. Subtitle renditions must be WebVTT. A direct HLS **Download** still returns an explicit preparation-required response; it never saves a playlist as though it were an offline movie.
 
 ### Optional IntroDB timings
 
@@ -288,7 +322,7 @@ dotnet test Jellyfin.Plugin.Siphon.sln -c Release
 python3 scripts/package.py
 ```
 
-The build targets `net10.0` and Jellyfin ABI `12.1.0.0`. Release packaging produces `artifacts/siphon-1.5.0.0.zip`, a repository manifest, and `SHA256SUMS`. The matching release tag is `v1.5.0`; generating these files does not create a tag or publish a release. The release workflow publishes only the plugin ZIP and `SHA256SUMS`, and updates the root `manifest.json` in the repository. Until that publication, do not replace the repository manifest with a local generated manifest: its 1.5.0.0 download URL is not live yet. Jellyfin should use the stable repository manifest URL above, not a release attachment.
+The build targets `net10.0` and Jellyfin ABI `12.1.0.0`. Release packaging produces `artifacts/siphon-1.6.0.0.zip`, a repository manifest, and `SHA256SUMS`. The intended release tag is `v1.6.0`; generating these files does not create a tag or publish a release. The release workflow publishes only the plugin ZIP and `SHA256SUMS`, and updates the root `manifest.json` in the repository. Until publication, do not replace the repository manifest with a local generated manifest: its 1.6.0.0 download URL is not live. Jellyfin should use the stable repository manifest URL above, not a release attachment.
 
 The ZIP includes the supplied `siphon.png` icon, its `meta.json` declaration, MonoTorrent's runtime dependency closure, and dependency licenses. It deliberately excludes Jellyfin's own SDK/server assemblies. The plugin also serves the unchanged embedded image at `/Siphon/Icon`; the repository manifest references `assets/siphon.png`. Local source builds remain unreleased until an explicit versioned release is published.
 

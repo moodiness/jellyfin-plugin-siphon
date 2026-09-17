@@ -75,7 +75,7 @@ def package(output, release_url, timestamp):
         "sourceUrl": release_url.rstrip("/") + "/" + archive.name,
         "checksum": hashlib.md5(content).hexdigest(),
         "timestamp": timestamp,
-        "changelog": "Siphon 1.5.0.0: isolated per-user playback/subtitle addons and search preferences; durable native collections/playlists and catalog collections; selected-version resumable HTTP/P2P downloads; selective orphan-history recovery; recorded field provenance and per-title source diagnostics; followed-series calendar and persistent opt-in notifications; all IntroDB timing types with protected post-credit scenes; opt-in bounded MonoTorrent playback. Includes native addon Search, targeted synchronization, twenty-run decision history, observed provider quotas and durable cooldowns, authoritative addon metadata with optional missing-season-only TMDB artwork, shared response caching, and the unchanged supplied Siphon icon. Offline HLS downloads remain explicitly unsupported."
+        "changelog": "Siphon 1.6.0.0: private persistent server download queue with selected-version HTTP/P2P restart recovery, bounded concurrency/storage/retention and revocable user-bound file links; offline finite-HLS remuxing with local-only Jellyfin FFmpeg, audio/subtitle rendition retention and identity AES-128 support; opt-in per-user signed notification webhooks with encrypted settings, durable bounded retries and stable event IDs. Extends the native 1.5 workflows and unchanged supplied Siphon icon. Live HLS, unsupported DRM and external push-vendor integrations are not implemented."
     }
     manifest = [{k: v for k, v in metadata.items() if k not in ("version", "targetAbi", "timestamp", "imagePath")} | {
         "imageUrl": "https://raw.githubusercontent.com/moodiness/jellyfin-plugin-siphon/main/assets/siphon.png",
@@ -90,7 +90,7 @@ def package(output, release_url, timestamp):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("artifacts"))
-    parser.add_argument("--release-url", default="https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.5.0")
+    parser.add_argument("--release-url", default="https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.6.0")
     parser.add_argument("--timestamp", default="2026-09-17T00:00:00Z")
     args = parser.parse_args()
     package(args.output, args.release_url, args.timestamp)

@@ -6,6 +6,7 @@
 | --- | --- |
 | 1.0.x, 1.1.x, 1.2.x, 1.3.x and 1.4.x / Jellyfin 12.1.x | Yes |
 | 1.5.0.0 / Jellyfin 12.1.x | Prepared source; not yet published |
+| 1.6.0.0 / Jellyfin 12.1.x | Prepared source; not yet published |
 | Other Jellyfin major versions | No |
 
 Siphon is a Jellyfin plugin and must be installed only on a compatible Jellyfin server. Upgrade to the latest Siphon release compatible with your Jellyfin version before reporting an issue.
@@ -51,12 +52,17 @@ The current source, including unreleased changes described in the README, implem
 - the unauthenticated icon endpoint serves only the fixed embedded PNG with cache validators and does not expose configuration or fetch an upstream image;
 - per-user overrides replace, rather than merge with, shared playback/subtitle addons; an empty override cannot fall back to global credentials. Catalogs and metadata remain shared, and the selected metadata addon stays authoritative;
 - source caches, native version identities, subtitle tickets and download/playback capabilities are user-scoped. Current account/access/playback/download permissions and applicable profile changes are checked before protected upstream requests; a user's targeted refresh does not invalidate another user's source cache;
-- download links are short-lived, purpose-scoped capabilities, not Jellyfin session tokens. Progressive and P2P downloads preserve byte ranges and validators; unsupported offline HLS downloads are rejected explicitly;
-- the personal portal exposes only authenticated personal preferences, permitted calendar/inbox entries and safe source diagnostics. Its token is kept in memory; manifest credentials and administrative settings are not returned;
+- download links are short-lived, purpose-scoped capabilities, not Jellyfin session tokens. Direct progressive/P2P downloads preserve ranges and validators; HLS requires the opt-in server queue rather than a misleading playlist download;
+- the personal portal exposes authenticated personal preferences, permitted calendar/inbox entries, safe source diagnostics, private download jobs and the user's own webhook settings. Its session token is kept in memory; addon credentials and administrative settings are not returned;
 - recovery previews do not change native user history. Execution revalidates selected row fingerprints, ownership, configuration and live-history collisions; original orphans and unselected users remain untouched. An IMDb key alone is not proof that an old orphan belonged to Siphon;
 - metadata provenance reports recorded contributors and preservation decisions, not inferred provider success; unknown evidence and native/manual differences remain explicit;
 - IntroDB is an independent, optional timing source. Invalid or out-of-runtime timings are withheld, post-credit scenes are never marked skippable, and other providers' segments/native chapters remain intact;
 - calendar notifications require server enablement and individual opt-in. Durable, bounded observation/inbox state prevents restart backlogs; unavailable visibility data does not become an empty snapshot that would replay old events.
+- durable downloads persist stable native identities, profile/transport digests and representation validators, never resolved URLs or request credentials. Exact-source re-resolution, live permission checks and authenticated foreign-ticket rejection protect restart and completed-file access; there is no fallback to another user's or another version's source;
+- download concurrency, reservations, job counts and retention are bounded. Temporary data and completed output share a per-job budget; interrupted/cancelled children are reaped before reservations are reused. Filesystem cleanup requires ownership markers and rejects symlinks/unowned entries;
+- offline HLS uses generated local paths, checked resource requests, restricted local-only FFmpeg/FFprobe inputs and bounded managed output. Live/unsupported/DRM playlists fail closed. Temporary clear media and AES keys reside in private staging, not an encrypted media vault; protect disk access and backups, and keep native media tools patched;
+- external notifications require separate server and user opt-ins. Endpoints follow SSRF/HTTPS policy and never follow redirects; only current permitted calendar events are eligible. An already-transmitted payload cannot be recalled after revocation;
+- webhook configuration, signing secrets and durable retry state are authenticated-encrypted with AES-GCM and a domain-separated signing-key derivative. This protects a copied state file without its key, not against an administrator or a backup containing both. Receivers must verify the exact-body HMAC and deduplicate stable event IDs; bounded retries are not exactly-once or guaranteed delivery.
 
 ### P2P-specific risks
 
