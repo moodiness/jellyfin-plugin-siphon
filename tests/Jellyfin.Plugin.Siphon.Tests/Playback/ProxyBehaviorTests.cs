@@ -144,8 +144,47 @@ public sealed class ProxyBehaviorTests : IDisposable
         Assert.StartsWith("#EXTM3U", playlist);
         Assert.DoesNotContain("secret.example", playlist);
         Assert.DoesNotContain("private", playlist);
-        Assert.Contains("/Siphon/media/", playlist);
-        Assert.Contains("/stream.ts", playlist);
+        var childReference = playlist.Split('\n').Single(line => line.Length > 0 && !line.StartsWith('#'));
+        var localChild = new Uri(new Uri("http://127.0.0.1:8096/base/Siphon/media/parent/stream.ts"), childReference);
+        var publicChild = new Uri(new Uri("https://jellyfin.example/external/base/Siphon/media/parent/stream.ts"), childReference);
+        Assert.Equal("127.0.0.1", localChild.Host);
+        Assert.Equal("jellyfin.example", publicChild.Host);
+        Assert.StartsWith("/base/Siphon/media/", localChild.AbsolutePath);
+        Assert.StartsWith("/external/base/Siphon/media/", publicChild.AbsolutePath);
+        Assert.EndsWith("/stream.ts", publicChild.AbsolutePath);
+    }
+
+    [Fact]
+    public async Task SignedSourcePlaylistKeepsKeysAndSegmentsOnTheReadersOriginAndBasePath()
+    {
+        var content = Encoding.UTF8.GetBytes("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"https://secret.example/key?token=private\"\n#EXTINF:6,\nhttps://secret.example/segment.ts?token=private\n#EXT-X-ENDLIST\n");
+        using var fixture = CreateFixture(content, "https://upstream.example/master.m3u8", "application/vnd.apple.mpegurl");
+        fixture.Sessions.SetDefault(fixture.Session, fixture.User.Id.ToString("N") + "|" + Item().Key + "|" + fixture.Session.Source.Id);
+        var token = new CapabilityTokenService(new SiphonSecretStore(Paths())).SignSource(Item().Key, fixture.Session.Source.Id);
+        var context = NewContext("GET", "");
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = context };
+
+        await fixture.Controller.Source(token);
+
+        Assert.Equal(200, context.Response.StatusCode);
+        var playlist = Encoding.UTF8.GetString(((MemoryStream)context.Response.Body).ToArray());
+        Assert.DoesNotContain("secret.example", playlist);
+        Assert.DoesNotContain("private", playlist);
+        var lines = playlist.Split('\n');
+        var keyReference = lines.Single(line => line.StartsWith("#EXT-X-KEY", StringComparison.Ordinal)).Split('"')[1];
+        var segmentReference = lines.Single(line => line.Length > 0 && !line.StartsWith('#'));
+        foreach (var prefix in new[] { "http://127.0.0.1:8096/jellyfin", "https://jellyfin.example/proxy/jellyfin" })
+        {
+            var parent = new Uri(prefix + "/Siphon/source/" + token);
+            foreach (var reference in new[] { keyReference, segmentReference })
+            {
+                var child = new Uri(parent, reference);
+                Assert.Equal(parent.Authority, child.Authority);
+                Assert.StartsWith(prefix + "/Siphon/media/", child.AbsoluteUri);
+                var opaque = child.Segments[^2].TrimEnd('/');
+                Assert.NotNull(fixture.Sessions.Get(opaque));
+            }
+        }
     }
 
     [Fact]
@@ -422,7 +461,7 @@ public sealed class ProxyBehaviorTests : IDisposable
         var library = DispatchProxy.Create<ILibraryManager, NativeSourceLifetimeTests.Library>();
         ((NativeSourceLifetimeTests.Library)(object)library).Video = video;
         var access = NativeSourceLifetimeTests.CreateAccess(library, user, authenticated: false);
-        return new Fixture(new SiphonProxyController(tokens, store, resolver, sessions, http, config, access, null!), session, store, client, user);
+        return new Fixture(new SiphonProxyController(tokens, store, resolver, sessions, http, config, access, null!), session, store, client, user, sessions);
     }
 
     private ManagedItem Item() => new()
@@ -508,7 +547,7 @@ public sealed class ProxyBehaviorTests : IDisposable
         }
     }
 
-    private sealed record Fixture(SiphonProxyController Controller, ProxySession Session, SiphonStateStore Store, StremioClient Client, User User) : IDisposable
+    private sealed record Fixture(SiphonProxyController Controller, ProxySession Session, SiphonStateStore Store, StremioClient Client, User User, ProxySessionStore Sessions) : IDisposable
     {
         public void Dispose() { Store.Dispose(); Client.Dispose(); }
     }

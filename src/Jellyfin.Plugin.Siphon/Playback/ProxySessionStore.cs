@@ -194,6 +194,9 @@ public sealed class ProxySessionStore(ConfigurationAccessor configuration)
     }
 
     public string GetUrl(ProxySession session)
+        => configuration.Current.PublicBaseUrl.TrimEnd('/') + "/Siphon/media/" + GetMediaPath(session);
+
+    internal static string GetMediaPath(ProxySession session)
     {
         var extension = session.Source.P2p is null ? Path.GetExtension(session.Source.Url.AbsolutePath).ToLowerInvariant() : string.Empty;
         if (extension.Length == 0 && session.Source.FileName is not null)
@@ -208,7 +211,7 @@ public sealed class ProxySessionStore(ConfigurationAccessor configuration)
             extension = ".ts";
         }
 
-        return configuration.Current.PublicBaseUrl.TrimEnd('/') + "/Siphon/media/" + session.Token + "/stream" + extension;
+        return session.Token + "/stream" + extension;
     }
 
     private ProxySession Add(ProxySession session)

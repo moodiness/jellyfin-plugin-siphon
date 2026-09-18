@@ -59,6 +59,15 @@ playback: Addon search creates a native preview; import retains its identity.
   other user. Native PlaybackInfo and selected-version progressive bytes are
   checked, HLS is opened/probed by Jellyfin and decoded by its bundled FFmpeg,
   and an existing playback lease is refused after native permission revocation.
+  In playback/full, an additional owned-container scenario temporarily advertises
+  an unreachable loopback PublicBaseUrl, verifies TCP refusal inside Jellyfin,
+  and auto-opens the exact selected HTTP and HLS versions via PlaybackInfo.
+  Client Path must retain that public origin while EncoderPath uses local HTTP.
+  Native progressive-to-HLS remux playlists/segments and upstream nested HLS
+  references are traversed, and bundled FFmpeg decodes video/audio from both.
+  Ingress stays unchanged; configuration is restored in finally before remaining
+  scenarios. Evidence contains only routing booleans, playlist/segment counts
+  and decoded durations, never capability URLs or credentials.
 exports: Direct capability, direct authenticated and native selected-version
   exports are byte-identical. Private queue completion and owner isolation are
   checked. Existing direct/queued links are refused after permission revocation.
