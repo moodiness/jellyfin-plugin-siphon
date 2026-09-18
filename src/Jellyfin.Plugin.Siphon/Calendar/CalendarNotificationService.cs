@@ -57,7 +57,11 @@ public sealed class CalendarNotificationService(ConfigurationAccessor configurat
                 state.Revision, _observed.GetValueOrDefault(id).Revision, _observed.GetValueOrDefault(id).NextScanUtc);
             if (_observed.TryGetValue(id, out var observed) && observed.Revision == state.Revision
                 && observed.NextScanUtc > DateTimeOffset.UtcNow) continue;
-            if (!await configuration.SynchronizationGate.WaitAsync(0, ct).ConfigureAwait(false)) break;
+            if (!await configuration.SynchronizationGate.WaitAsync(0, ct).ConfigureAwait(false))
+            {
+                logger.LogInformation("SIPHON_CALENDAR_PROBE gate-busy");
+                break;
+            }
             IReadOnlyList<CalendarNotification> generated;
             try
             {
@@ -86,6 +90,7 @@ public sealed class CalendarNotificationService(ConfigurationAccessor configurat
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception exception)
             {
+                logger.LogInformation("SIPHON_CALENDAR_PROBE failure={FailureType}", exception.GetType().Name);
                 logger.LogWarning(exception, "Siphon calendar observation failed for user {UserId}; cursor not advanced", id);
                 continue;
             }
