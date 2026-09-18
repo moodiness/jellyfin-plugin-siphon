@@ -305,10 +305,12 @@ window.SiphonAdmin = function (page, initiallyVisible) {
             bindText(get('siphonTargetsStatus'), function () { return t('loadingSavedSynchronizationTargets'); });
             bindText(get('siphonCatalogTargetsStatus'), function () { return t('loadingSavedSynchronizationTargets'); });
             renderSeries();
+            refreshSyncFailureLabels();
             try {
                 var result = await request('Siphon/Sync/Targets', 'GET');
                 if (id !== targetsRequest || expected !== generation || !visible) return;
                 targets = result;
+                refreshSyncFailureLabels();
                 function text() { return result.Catalogs.length + t('savedCatalogs') + result.Series.length + t('existingSeriesSaveChangesBeforeRunningA'); }
                 bindText(get('siphonTargetsStatus'), function () { return text; });
                 bindText(get('siphonCatalogTargetsStatus'), function () { return text; });
@@ -386,7 +388,9 @@ window.SiphonAdmin = function (page, initiallyVisible) {
                     var definition = taskDefinitions.find(function (entry) { return entry.kind === run.Kind; });
                     node('strong', function () { return (run.Kind === 'Startup' ? t('startupRestoration') : definition ? definition.name : t('synchronization')) + ' · ' + taskState(run.State); }, row);
                     node('p', function () { return historyScope(run.Scope) + ' · ' + formattedDate(run.StartedAtUtc) + ' · ' + count(run.DecisionCount) + t('decisions'); }, row).className = 'siphon-help';
-                    node('p', function () { return count(run.Added) + t('added') + count(run.Updated) + t('updated') + count(run.Unchanged) + t('unchanged') + count(run.Preserved) + t('preserved') + count(run.Removed) + t('removed'); }, row).className = 'siphon-help';
+                    node('p', function () { return count(run.Added) + t('added') + count(run.Updated) + t('updated') + count(run.Unchanged) + t('unchanged') + count(run.Preserved) + t('preserved') + count(run.Removed) + t('removed') + (syncFailureCount(run) > 0 ? ' · ' + count(syncFailureCount(run)) + ' ' + t('failedSubscriptions') : ''); }, row).className = 'siphon-help';
+                    var failures = syncFailureEntries(run);
+                    if (failures.length) renderSyncFailures(failures, node('ul', undefined, row));
                     var control = button(row, function () { return t('viewTitleDecisions'); }, function () { historySelection = run.Id; loadHistoryDetails(0); });
                     bindText(control, function () { return  t('viewDecisionsFor') + historyScope(run.Scope) + t('started') + formattedDate(run.StartedAtUtc); }, 'aria-label');
                 });
@@ -1542,6 +1546,42 @@ window.SiphonAdmin = function (page, initiallyVisible) {
         function providerError(code) {
             return { get Timeout() { return t('requestTimedOut'); }, get NetworkError() { return t('networkError'); }, get ProviderUnavailable() { return t('providerUnavailable'); }, get RateLimited() { return t('rateLimited'); }, get AuthenticationFailed() { return t('authenticationFailed'); }, get InvalidResponse() { return t('invalidResponse'); }, get NotFound() { return t('noMatchingRecord'); }, get MissingIdentifier() { return t('missingIdentifier'); }, get MissingCredentials() { return t('missingCredentials'); }, get NotConfigured() { return t('notConfigured'); }, get RequestFailed() { return t('requestFailed2'); }, get HttpError() { return t('httpError'); }, get ResponseTooLarge() { return t('responseTooLarge'); }, get Cancelled() { return t('cancelled'); }, get CircuitOpen() { return t('providerPaused'); } }[code] || t('providerError');
         }
+        function syncFailureEntries(run) {
+            var failures = run && run.SubscriptionFailures;
+            if (!failures || typeof failures !== 'object') return [];
+            return Object.keys(failures).filter(function (key) { return /^[0-9a-fA-F]{64}$/.test(key); }).map(function (key) {
+                return { Key: key, Code: failures[key] };
+            });
+        }
+        function syncFailureCount(run) {
+            return Number.isSafeInteger(run && run.FailedSubscriptions) && run.FailedSubscriptions >= 0 ? run.FailedSubscriptions : syncFailureEntries(run).length;
+        }
+        function syncFailureCause(code) {
+            var causes = { get ManifestUnavailable() { return t('manifestUnavailable'); }, get CatalogUnavailable() { return t('catalogUnavailable'); }, get InvalidCatalog() { return t('invalidCatalog'); }, get IncompleteCatalog() { return t('incompleteCatalogRetained'); }, get MetadataUnavailable() { return t('metadataUnavailable'); }, get RequestFailed() { return t('requestFailed2'); }, get SyncFailed() { return t('syncFailed'); }, get Cancelled() { return t('runCancelled'); } };
+            return Object.prototype.hasOwnProperty.call(causes, code) ? causes[code] : t('syncFailed');
+        }
+        function syncFailureTargetLabel(key) {
+            var target = targets && Array.isArray(targets.Catalogs) && targets.Catalogs.find(function (entry) { return entry && entry.Key === key; });
+            var name = target && typeof target.Name === 'string' && target.Name.trim() ? target.Name.trim() : null;
+            return name ? name + ' (' + mediaType(target.Type) + ') · ' + key : t('catalogIdentityFallback', { identity: key });
+        }
+        function refreshSyncFailureLabels() {
+            page.querySelectorAll('[data-sync-failure-key]').forEach(function (label) {
+                bindText(label, function () { return syncFailureTargetLabel(label.dataset.syncFailureKey); });
+            });
+        }
+        function renderSyncFailures(entries, list) {
+            entries.forEach(function (entry) {
+                var row = node('li', undefined, list);
+                node('strong', function () { return syncFailureTargetLabel(entry.Key); }, row).dataset.syncFailureKey = entry.Key;
+                node('p', function () { return syncFailureCause(entry.Code); }, row).className = 'siphon-help';
+            });
+        }
+        function renderSyncFailureStatus(run, entries) {
+            var total = syncFailureCount(run);
+            if (total > entries.length) return t('failedCatalogDetailsTruncated', { shown: count(entries.length), total: count(total) }) + ' ' + t('failedCatalogRetentionNote');
+            return entries.length ? t('failedCatalogRetentionNote') : t('noFailedCatalogSubscriptions');
+        }
         function renderNativeTasks() {
             taskDefinitions.forEach(function (definition) {
                 var task = taskFor(definition);
@@ -1556,9 +1596,12 @@ window.SiphonAdmin = function (page, initiallyVisible) {
         }
         function renderRunStatus(status) {
             var facts = get('siphonRunFacts');
+            var failureList = get('siphonRunFailures');
+            var failureStatus = get('siphonRunFailuresStatus');
             var providerList = get('siphonRunProviders');
             var progress = get('siphonRunProgress');
-            facts.replaceChildren(); providerList.replaceChildren(); progress.hidden = true;
+            facts.replaceChildren(); failureList.replaceChildren(); providerList.replaceChildren(); progress.hidden = true;
+            bindText(failureStatus, function () { return ''; });
             bindText(get('siphonRunTitle'), function () { return t('runDetails'); });
             if (!status) {
                 bindText(get('siphonRunStatus'), function () { return t('runDetailsUnavailableNativeTaskControlsRemain'); });
@@ -1568,9 +1611,13 @@ window.SiphonAdmin = function (page, initiallyVisible) {
             var run = status.CurrentRun || status.LastRun;
             if (!run) {
                 bindText(get('siphonRunStatus'), function () { return running() ? t('theNativeTaskIsActiveWaitingFor') : t('noRunDetailsRecordedYet'); });
+                bindText(failureStatus, function () { return t('noFailedCatalogSubscriptions'); });
                 node('li', function () { return t('noProviderActivityRecordedYet'); }, providerList);
                 return;
             }
+            var failureEntries = syncFailureEntries(run);
+            renderSyncFailures(failureEntries, failureList);
+            bindText(failureStatus, function () { return renderSyncFailureStatus(run, failureEntries); });
             var definition = taskDefinitions.find(function (entry) { return entry.kind === run.Kind; });
             var current = Boolean(status.CurrentRun);
             bindText(get('siphonRunTitle'), function () { return current ? t('currentRun') : t('lastRunSummary'); });

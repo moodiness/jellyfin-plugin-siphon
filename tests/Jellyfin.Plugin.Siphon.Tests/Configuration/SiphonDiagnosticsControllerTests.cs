@@ -318,6 +318,69 @@ public sealed class SiphonDiagnosticsControllerTests : IDisposable
     }
 
     [Fact]
+    public void SubscriptionFailuresSurviveRestartWithoutLeakingIntoLaterRuns()
+    {
+        var paths = Paths();
+        var first = SyncTarget.CatalogIdentity(InstallationId, "first");
+        var second = SyncTarget.CatalogIdentity(InstallationId, "second");
+        using (var diagnostics = Diagnostics(paths))
+        {
+            diagnostics.BeginRun("Catalogs");
+            diagnostics.RecordSubscriptionFailure(first, "RequestFailed");
+            diagnostics.RecordSubscriptionFailure(second, "IncompleteCatalog");
+            diagnostics.RecordSubscriptionFailure(SensitiveValue, "RequestFailed");
+            diagnostics.RecordSubscriptionFailure("https://private.invalid/" + SensitiveValue, SensitiveValue);
+            diagnostics.SetSummary(0, 0, 0, 0, 2, 2);
+            diagnostics.FinishRun("Failed");
+        }
+
+        using var restarted = Diagnostics(paths);
+        var failed = restarted.GetRunStatus().LastRun!;
+        Assert.Equal("Failed", failed.State);
+        Assert.Equal(2, failed.FailedSubscriptions);
+        Assert.Equal(2, failed.SubscriptionFailures!.Count);
+        Assert.Equal("RequestFailed", failed.SubscriptionFailures[first]);
+        Assert.Equal("IncompleteCatalog", failed.SubscriptionFailures[second]);
+        restarted.BeginRun("Catalogs");
+        Assert.Empty(restarted.GetRunStatus().CurrentRun!.SubscriptionFailures!);
+        restarted.FinishRun("Completed");
+        Assert.Empty(restarted.GetRunStatus().LastRun!.SubscriptionFailures!);
+        Assert.Equal(failed.SubscriptionFailures, restarted.GetHistory().Single(run => run.Id == failed.Id).SubscriptionFailures);
+        Assert.DoesNotContain(SensitiveValue, File.ReadAllText(Path.Combine(paths.DataDirectory, "diagnostics.json")));
+    }
+
+    [Fact]
+    public void PersistedUnsafeSubscriptionKeysCannotCollideOrEraseSafeRunHistory()
+    {
+        var paths = Paths();
+        Directory.CreateDirectory(paths.DataDirectory);
+        var first = SyncTarget.CatalogIdentity(InstallationId, "first");
+        var second = SyncTarget.CatalogIdentity(InstallationId, "second");
+        var run = new SyncRunSnapshot("Catalogs", "Failed", DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow,
+            "Finalizing", "Items", 2, 2, 0, 0, 0, 0, 0, 2, 2, [], SubscriptionFailures: new Dictionary<string, string>
+            {
+                [first] = "ManifestUnavailable",
+                [second] = "Bearer " + SensitiveValue,
+                [SensitiveValue] = "RequestFailed",
+                ["https://private.invalid/" + SensitiveValue] = "RequestFailed",
+                ["https://other.invalid/?token=" + SensitiveValue] = "IncompleteCatalog"
+            });
+        var path = Path.Combine(paths.DataDirectory, "diagnostics.json");
+        File.WriteAllText(path, JsonSerializer.Serialize(new { Version = 3, Addons = Array.Empty<InstallationDiagnostic>(), LastRun = run }));
+
+        using var diagnostics = Diagnostics(paths);
+        Assert.Null(diagnostics.GetSnapshot().StorageCode);
+        var restored = Assert.Single(diagnostics.GetHistory());
+        Assert.Equal("Failed", restored.State);
+        Assert.Equal(2, restored.SubscriptionFailures!.Count);
+        Assert.Equal("ManifestUnavailable", restored.SubscriptionFailures[first]);
+        Assert.Equal("SyncFailed", restored.SubscriptionFailures[second]);
+        Assert.DoesNotContain(SensitiveValue, JsonSerializer.Serialize(diagnostics.GetSnapshot()));
+        Assert.DoesNotContain(SensitiveValue, File.ReadAllText(path));
+        Assert.DoesNotContain("https://", File.ReadAllText(path));
+    }
+
+    [Fact]
     public void RestartReportsInterruptedRunInsteadOfStaleRunningOrSuccessfulTask()
     {
         var paths = Paths();

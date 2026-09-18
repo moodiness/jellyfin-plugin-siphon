@@ -181,10 +181,13 @@ public sealed class CatalogSyncService(
                     if (!complete)
                     {
                         failures++;
+                        var failureKey = SyncTarget.CatalogIdentity(addonConfig.Id, subscription.Key);
+                        diagnostics.RecordSubscriptionFailure(failureKey, "IncompleteCatalog");
                         diagnosticErrors.TryAdd(addonConfig.Id, "IncompleteCatalog");
                         preserved.UnionWith(previous.Values.Where(item => item.Owners.Contains(owner, StringComparer.Ordinal)).Select(item => item.Key));
                         foreach (var item in previous.Values.Where(item => item.Owners.Contains(owner, StringComparer.Ordinal)))
                             diagnostics.RecordDecision(item.ContentKey, item.SeriesName ?? item.Name, "Preserved", "IncompleteCatalog");
+                        logger.LogWarning("Siphon retained prior items for catalog {CatalogKey}: code={FailureCode}", failureKey, "IncompleteCatalog");
                     }
                     // Import limits are not failures, but only a complete, unbounded snapshot
                     // establishes absence. Deselection and partial snapshots never authorize deletion.
@@ -228,11 +231,13 @@ public sealed class CatalogSyncService(
                 catch (Exception exception) when (exception is HttpRequestException or IOException or InvalidOperationException or ArgumentException or System.Text.Json.JsonException or OperationCanceledException or StremioException or FormatException or System.Xml.XmlException)
                 {
                     failures++;
+                    var failureCode = !addons.Any(addon => addon.Configuration.Id == addonConfig.Id) ? "ManifestUnavailable" : "RequestFailed";
+                    var failureKey = SyncTarget.CatalogIdentity(addonConfig.Id, subscription.Key);
+                    diagnostics.RecordSubscriptionFailure(failureKey, failureCode);
                     preserved.UnionWith(previous.Values.Where(item => item.Owners.Contains(owner, StringComparer.Ordinal)).Select(item => item.Key));
                     foreach (var item in previous.Values.Where(item => item.Owners.Contains(owner, StringComparer.Ordinal)))
                         diagnostics.RecordDecision(item.ContentKey, item.SeriesName ?? item.Name, "Preserved", "CatalogUnavailable");
-                    diagnosticErrors.TryAdd(addonConfig.Id, !addons.Any(addon => addon.Configuration.Id == addonConfig.Id)
-                        ? "ManifestUnavailable" : "RequestFailed");
+                    diagnosticErrors.TryAdd(addonConfig.Id, failureCode);
                     foreach (var existing in desired.Values.Where(item => item.Owners.Contains(owner, StringComparer.Ordinal)).ToArray())
                     {
                         desired[existing.Key] = existing with
@@ -241,7 +246,7 @@ public sealed class CatalogSyncService(
                             MissingSinceUtc = null
                         };
                     }
-                    logger.LogWarning("Siphon retained prior items for subscription {SubscriptionId}: {ErrorType}", subscription.Key, exception.GetType().Name);
+                    logger.LogWarning("Siphon retained prior items for catalog {CatalogKey}: {ErrorType} code={FailureCode}", failureKey, exception.GetType().Name, failureCode);
                 }
 
                 progress.Report(70d * (index + 1) / configuredSubscriptions.Length);
@@ -285,7 +290,7 @@ public sealed class CatalogSyncService(
             logger.LogInformation("Siphon synchronized {ItemCount} library media items, removed {RemoveCount}, failed subscriptions {Failures}", retained.Count, snapshot.Length - retained.Count, failures);
             if (failures > 0)
             {
-                throw new InvalidOperationException($"{failures} catalog subscription(s) failed. Their previous items were preserved. See Siphon logs for subscription IDs.");
+                throw new InvalidOperationException($"{failures} catalog subscription(s) failed. Their previous items were preserved. See Siphon task details or logs for catalog identities and failure codes.");
             }
 
             progress.Report(100);

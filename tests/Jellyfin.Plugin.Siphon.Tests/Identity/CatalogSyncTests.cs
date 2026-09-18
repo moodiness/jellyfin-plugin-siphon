@@ -323,6 +323,47 @@ public sealed class CatalogSyncTests
     };
 
     [Fact]
+    public async Task DistinctCatalogFailuresPreserveExpiredItemsAndIdentifyEachSubscription()
+    {
+        const string secret = "fixture-private-token";
+        var first = Item("movie:tt1234567", "movie", "tt1234567") with
+        {
+            MissingSinceUtc = DateTimeOffset.UtcNow.AddDays(-30),
+            MissingOwners = ["installation:subscription"]
+        };
+        var second = Item("movie:tt1234568", "movie", "tt1234568") with
+        {
+            Owners = ["installation:second"],
+            MissingOwners = ["installation:second"],
+            MissingSinceUtc = DateTimeOffset.UtcNow.AddDays(-30)
+        };
+        var snapshot = await SynchronizeToStateAsync("movie", [first, second], uri => uri.AbsolutePath switch
+        {
+            "/manifest.json" => """{"id":"catalog","catalogs":[{"type":"movie","id":"all"},{"type":"movie","id":"partial"},{"type":"movie","id":"healthy"}]}""",
+            "/catalog/movie/all.json" => throw new HttpRequestException("https://private.invalid/?token=" + secret),
+            "/catalog/movie/partial.json" => """{"metas":[{"type":"movie","name":"Missing identity"}]}""",
+            "/catalog/movie/healthy.json" => """{"metas":[]}""",
+            _ => throw new InvalidOperationException("Unexpected resource.")
+        }, config => config.Addons[0].Catalogs.AddRange([
+            new CatalogSubscription { Key = "second", Type = "movie", Id = "partial" },
+            new CatalogSubscription { Key = "third", Type = "movie", Id = "healthy" }
+        ]), diagnostics =>
+        {
+            var failures = diagnostics.GetRunStatus().LastRun!.SubscriptionFailures!;
+            Assert.Equal(2, failures.Count);
+            Assert.Equal("RequestFailed", failures[SyncTarget.CatalogIdentity("installation", "subscription")]);
+            Assert.Equal("IncompleteCatalog", failures[SyncTarget.CatalogIdentity("installation", "second")]);
+            Assert.DoesNotContain(secret, System.Text.Json.JsonSerializer.Serialize(diagnostics.GetSnapshot()));
+        });
+        Assert.Equal(new[] { first.Key, second.Key }, snapshot.Select(item => item.Key));
+        Assert.All(snapshot, item =>
+        {
+            Assert.Null(item.MissingSinceUtc);
+            Assert.Empty(item.MissingOwners);
+        });
+    }
+
+    [Fact]
     public async Task SuccessfulSubscriptionCannotHideAnotherFailureForTheSameAddon()
     {
         await SynchronizeToStateAsync("movie", [], uri => uri.AbsolutePath switch

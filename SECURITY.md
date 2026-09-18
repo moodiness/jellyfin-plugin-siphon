@@ -27,7 +27,7 @@ If GitHub private reporting is unavailable, contact the repository owner through
 
 ## Security boundaries
 
-The current 1.6.0.0 release implements the following boundaries:
+The current source implements the following boundaries:
 
 - upstream media and subtitle requests are made by the server, not directly by clients;
 - clients receive opaque, expiring capability tokens rather than upstream URLs or addon headers;
@@ -35,6 +35,7 @@ The current 1.6.0.0 release implements the following boundaries:
 - DNS resolution and redirects are checked against SSRF policy, including HTTPS downgrade and cross-origin credential handling;
 - private destinations require exact hostname exceptions configured by an administrator; exception-approved connections are not pooled, so later requests cannot reuse them after an exception is removed;
 - catalog media are native Jellyfin items, while Siphon keeps catalog state and backing directories in its private plugin data directory; personal library paths are preserved;
+- canonical and retired source metadata may be used for native playback progress/stop reporting only after native visibility, user ownership and content checks; retired version relationships are revalidated. These metadata-only responses contain no playable path, opening token or streaming capabilities and do not re-advertise retired sources;
 - addon responses, subtitles, playlists, headers, and proxy sessions are size- and concurrency-bounded; upstream body reads also have an idle deadline, without imposing a total playback-duration limit;
 - media ranges retain their original byte representation; unexpectedly encoded responses are rejected, and HLS resources remain capability-proxied even behind misleading filenames;
 - TMDB, TVDB, Fanart, and MDBList integrations are individually opt-in and use fixed HTTPS provider origins; storing a credential alone does not enable outbound enrichment, while testing saved credentials makes an explicit provider request;
@@ -42,7 +43,7 @@ The current 1.6.0.0 release implements the following boundaries:
 - administrative diagnostics, field provenance, recovery, cleanup, targeted synchronization, run history and explicit search additions/removals require administrator elevation; removal changes shared ownership rather than a private user list, preserves other catalog ownership and retains native history for unambiguous later reattachment. Exported diagnostics omit credentials, private URLs, hosts and headers;
 - native addon Search preserves Jellyfin library visibility; detail expansion checks the effective user's access and impersonation rules before addon I/O. Search may obtain missing posters through bounded title-metadata requests, but card/image requests do not publish series episodes;
 - discoveries are bounded to 300 temporary titles with a 24-hour lifetime, and managed state is capped at 100,000 items before publication; explicit additions, deliberate collection/playlist membership and user-protected discoveries are retained, while unreadable protection data prevents preview removal. Existing local state is streamed without an aggregate 256 MiB byte ceiling: valid metadata must survive upgrades, and large catalogs still require sufficient memory and disk. Invalid state is never replaced by an empty ownership catalog;
-- the latest twenty synchronization runs and their bounded title/action/reason records are stored privately rather than retaining upstream request or response payloads;
+- the latest twenty synchronization runs and their bounded title/action/reason records are stored privately rather than retaining upstream request or response payloads; each run stores at most 256 catalog failure identities (64-character hashes matching synchronization targets) with allowlisted error codes. Invalid persisted identities are discarded, and arbitrary error text is replaced with a safe generic code;
 - selecting an authoritative metadata addon disables fallback to other addons; optional direct TMDB enrichment is then limited to missing numbered season posters, with native locks and existing images protected;
 - provider quota observations come only from usable response headers, remain isolated by credential fingerprints, and are not refreshed by status reads; forced refreshes and credential tests do not bypass durable quota pauses;
 - the self-connection diagnostic probes only the saved Jellyfin address, without credentials, cookies, redirects, or a proxy, and checks the returned server identity; its local-address access does not relax addon or media SSRF policy;

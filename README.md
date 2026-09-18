@@ -8,13 +8,13 @@ Siphon brings **Stremio addons into Jellyfin**: catalogs, metadata, subtitles, a
 
 Siphon targets **Jellyfin 12.1** and .NET 10. The current source includes an opt-in, bounded MonoTorrent engine. It is not a debrid client or an external-player integration.
 
-**Latest published release: [1.6.0.0](https://github.com/moodiness/jellyfin-plugin-siphon/releases/tag/v1.6.0).** The Git tag is `v1.6.0`; the plugin version is `1.6.0.0`. The stable repository manifest on `main` advertises verified published archives and retains earlier compatible versions.
+**[Latest published release](https://github.com/moodiness/jellyfin-plugin-siphon/releases/latest).** Git tags use three components and plugin versions use four: tag `v1.6.2` corresponds to plugin version `1.6.2.0`. The stable repository manifest on `main` advertises verified published archives and retains earlier compatible versions.
 
 **Siphon 1.5.0.0** adds isolated per-user playback/subtitle addons and search preferences; durable native collections and playlists; catalog collections; selected-version resumable downloads; selective orphan-history recovery; field provenance and per-title source diagnostics; a followed-series calendar and opt-in notifications; all IntroDB timing types; and real, bounded P2P playback. It also includes native addon Search, targeted synchronization, a twenty-run decision history, provider quota/cooldown tracking, shared response caching, the supplied Siphon icon, and authoritative addon metadata with an optional missing-season-only TMDB supplement. The published package also validates media response types and constrains document rendering on media routes.
 
 **Siphon 1.6.0.0** adds private persistent downloads with pause, priority, quotas, scheduling, batch preparation and track selection; finite-HLS offline exports; signed notification adapters and optional digests; French/English controls and local operational health; verified offline backup/restore and assets-first release automation. Background downloads and external delivery remain disabled by default. It also bounds request admission and state reads, moves saved-library restoration off the host startup path, and scopes search additions/removals to the affected titles.
 
-**Current source: 1.6.1.0.** It fixes a 1.6.0.0 startup regression for existing catalog states larger than 256 MiB. The 100,000-item limit, identity validation and atomic persistence remain in place; valid metadata is not truncated to fit a byte ceiling.
+**Current source: 1.6.2.0.** Failed catalog subscriptions are identified individually in Tasks and synchronization history with stable identities and safe failure causes. Partial synchronization remains Failed while preserving previous media. Native playback reports accept equivalent GUID formats and retain non-playable metadata for canonical or retired versions so progress and stop reports can preserve resume state. This release retains the 1.6.1.0 startup fix for valid catalog states larger than 256 MiB, with the 100,000-item limit, identity validation and atomic persistence unchanged.
 
 ## Features
 
@@ -203,6 +203,8 @@ To refresh a single saved catalog or known series, select it under **Tasks** and
 
 The latest **twenty executions** survive restarts, with additions, changes, unchanged and preserved items, removals, failed subscriptions, provider errors, and cache hits. Select an execution in **Tasks** to page through its per-title action and reasons. Cancellation and failures remain distinct from successful completion; an interrupted run is reported after restart rather than left permanently running. History is administrator-only and stores bounded title decisions rather than upstream request or response payloads.
 
+When a catalog synchronization partially fails, the native task remains **Failed** even if retained items were published successfully. **Tasks** lists each recorded failed subscription with its saved catalog label, stable catalog identity, and safe failure cause; these details remain available in recent history after a restart or a later successful run. Failed or incomplete snapshots preserve prior items and never authorize their removal. Each run retains at most 256 subscription failure details, with the total failure count shown separately; older runs without these details cannot identify their failed subscriptions retroactively. The administrator-only `/Siphon/Sync/Status` and `/Siphon/Sync/History` responses expose `SubscriptionFailures` as catalog-identity/error-code pairs, never upstream URLs or raw exception messages.
+
 ### Native search and saved additions
 
 Jellyfin's ordinary global **Search** searches compatible enabled addons alongside accessible native library results. It does not require opening Siphon's settings. Only advertised search catalogs whose required filters can be satisfied are queried; catalog subscriptions are not required for discovery.
@@ -342,6 +344,8 @@ Source-to-version bindings are persisted as hashes. Reordering or removing other
 
 Probed tracks remain available to Jellyfin's remux and subtitle-extraction paths. Finite HTTP playback does not retain a native tuner lease that can become stale during an audio change. Actual audio and subtitle indices belong to the selected version, not to another cut.
 
+Playback reports accept native source GUIDs with or without hyphens. When a client omits the source ID, the canonical item's metadata remains available without selecting another cut. Retired versions keep their own runtime for progress and stop reporting but return no playable path, opening token or playback capabilities, and remain absent from new playback choices. User ownership, content identity and version relationships are still checked. These reporting fixes do not diagnose arbitrary FFmpeg exit codes; a transcoding failure needs its corresponding FFmpeg log.
+
 Native subtitle upload, provider download, and deletion work for Siphon's remote videos. Sidecars are stored under that version's private native metadata directory without changing its playable path or the library's subtitle-storage setting. Reopening or probing a source preserves its external subtitles; subtitles do not leak between versions.
 
 Siphon fetches upstream resources from the Jellyfin server. Clients receive signed Siphon URLs; playback sessions use short-lived opaque capabilities. HTTP(S) progressive streams and HLS are supported, with P2P sources available only after explicit engine enablement. Unsupported protocols and external-player handoffs are rejected.
@@ -407,9 +411,9 @@ dotnet test Jellyfin.Plugin.Siphon.sln -c Release
 python3 scripts/package.py
 ```
 
-The build targets `net10.0` and Jellyfin ABI `12.1.0.0`. Release packaging verifies compiled version, PE assembly references, source provenance and runtime dependency bytes before producing `artifacts/siphon-1.6.1.0.zip`, a candidate repository manifest and internal `SHA256SUMS`. A stale binary, source/binary mismatch or incompatible ABI fails packaging. The tag for version 1.6.1.0 is `v1.6.1`; generating local artifacts does not publish another release.
+The build targets `net10.0` and Jellyfin ABI `12.1.0.0`. Release packaging verifies compiled version, PE assembly references, source provenance and runtime dependency bytes before producing `artifacts/siphon-1.6.2.0.zip`, a candidate repository manifest and internal `SHA256SUMS`. A stale binary, source/binary mismatch or incompatible ABI fails packaging. The tag for version 1.6.2.0 is `v1.6.2`; generating local artifacts does not publish another release.
 
-Release automation publishes **only the plugin ZIP and a public `SHA256SUMS` covering that ZIP**. The candidate manifest and internal package checksums remain in workflow recovery artifacts, not as release attachments. New releases take their detailed notes from the **annotated Git tag**, not a file in the source tree. The annotation must begin with `## Siphon <four-component version>`, a blank line, then the complete release notes; the short `build.yaml` changelog remains the catalog summary. For example, `git tag -a v1.6.1 --cleanup=verbatim -F -` reads the Markdown annotation from standard input without adding a notes file to the repository. Include the changes, compatibility, installation and verification details; tag signatures are excluded from the release body.
+Release automation publishes **only the plugin ZIP and a public `SHA256SUMS` covering that ZIP**. The candidate manifest and internal package checksums remain in workflow recovery artifacts, not as release attachments. New releases take their detailed notes from the **annotated Git tag**, not a file in the source tree. The annotation must begin with `## Siphon <four-component version>`, a blank line, then the complete release notes; the short `build.yaml` changelog remains the catalog summary. For example, `git tag -a v1.6.2 --cleanup=verbatim -F -` reads the Markdown annotation from standard input without adding a notes file to the repository. Include the changes, compatibility, installation and verification details; tag signatures are excluded from the release body.
 
 The workflow uploads to a draft, checks immutable bytes, publishes, verifies public downloads, then opens or reuses a **manifest-only pull request from current main**. Retries preserve published assets and existing release notes; they never move main back to a historical tag. Do not advertise an unpublished local archive in the root manifest. Jellyfin uses the stable repository manifest URL, not a release attachment.
 
@@ -422,7 +426,7 @@ The integration harness creates its own Docker network, Jellyfin instances, acco
 ```bash
 npm ci --prefix scripts/smoke --ignore-scripts --no-audit --no-fund
 node scripts/smoke/node_modules/playwright/cli.js install chromium
-python3 scripts/smoke/run.py full --image jellyfin/jellyfin:12.1 --package artifacts/siphon-1.6.1.0.zip
+python3 scripts/smoke/run.py full --image jellyfin/jellyfin:12.1 --package artifacts/siphon-1.6.2.0.zip
 ```
 
 Docker must be running. Linux browser hosts also need Playwright's system dependencies; `--chromium-executable /absolute/path/to/chromium` selects an existing browser explicitly. Missing runtime prerequisites exit with code 77, not a passing result. The harness cleans its owned resources and exports credential-free evidence/screenshots; it neither reuses nor modifies personal Jellyfin services. These fixtures do not certify every addon, client, library size or HLS format.
