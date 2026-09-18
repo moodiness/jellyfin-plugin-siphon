@@ -53,6 +53,8 @@ public sealed class CalendarNotificationService(ConfigurationAccessor configurat
             ct.ThrowIfCancellationRequested();
             var id = enabled[(_offset + index) % enabled.Length];
             if (!configuration.Current.EnableCalendarNotifications || !preferences.Get(id).NotificationsEnabled) continue;
+            logger.LogInformation("SIPHON_CALENDAR_PROBE state={StateRevision} cached={CachedRevision} next={NextScanUtc}",
+                state.Revision, _observed.GetValueOrDefault(id).Revision, _observed.GetValueOrDefault(id).NextScanUtc);
             if (_observed.TryGetValue(id, out var observed) && observed.Revision == state.Revision
                 && observed.NextScanUtc > DateTimeOffset.UtcNow) continue;
             if (!await configuration.SynchronizationGate.WaitAsync(0, ct).ConfigureAwait(false)) break;
@@ -63,6 +65,8 @@ public sealed class CalendarNotificationService(ConfigurationAccessor configurat
                 var revision = managed.Revision!.Value;
                 var now = DateTimeOffset.UtcNow;
                 var snapshot = await calendar.GetSnapshotAsync(all[id], now, ct, managed.Items).ConfigureAwait(false);
+                logger.LogInformation("SIPHON_CALENDAR_PROBE snapshot revision={Revision} episodes={Episodes} series={SeriesCount}",
+                    revision, snapshot.Episodes.Count, snapshot.SeriesIds.Count);
                 if (snapshot.Truncated)
                 {
                     logger.LogWarning("Siphon calendar observation exceeded its episode limit for user {UserId}; cursor not advanced", id);
@@ -70,6 +74,7 @@ public sealed class CalendarNotificationService(ConfigurationAccessor configurat
                 }
                 var stillEnabled = configuration.Current.EnableCalendarNotifications && preferences.Get(id).NotificationsEnabled;
                 generated = await inbox.ObserveAsync(id, snapshot, stillEnabled, now, ct).ConfigureAwait(false);
+                logger.LogInformation("SIPHON_CALENDAR_PROBE generated={Generated} enabled={Enabled}", generated.Count, stillEnabled);
                 // Unchanged idle calendars need no DB queries until a known release,
                 // committed catalog revision, or periodic native favorite/permission refresh.
                 var nextScan = now.AddMinutes(5);

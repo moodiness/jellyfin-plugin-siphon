@@ -702,6 +702,8 @@ http {
                     timeout=150, description="native followed-series notification")
             finally:
                 evidence["afterObservation"] = observation()
+                evidence["calendarProbe"] = [line for line in self.docker("logs", "--tail", "500", self.name + "-jellyfin").splitlines()
+                    if "SIPHON_CALENDAR_PROBE" in line]
             require(not self.bob.call("GET", "/Siphon/Notifications")["Items"], "Private notification appeared for an unfollowing user")
             events = eventually(lambda: self.fixture_api.call("GET", "/control/events"), lambda rows: len(rows) > before,
                                 timeout=90, description="actual calendar event webhook")
