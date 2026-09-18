@@ -14,7 +14,7 @@ Siphon targets **Jellyfin 12.1** and .NET 10. The current source includes an opt
 
 **Siphon 1.6.0.0** adds private persistent downloads with pause, priority, quotas, scheduling, batch preparation and track selection; finite-HLS offline exports; signed notification adapters and optional digests; French/English controls and local operational health; verified offline backup/restore and assets-first release automation. Background downloads and external delivery remain disabled by default. It also bounds request admission and state reads, moves saved-library restoration off the host startup path, and scopes search additions/removals to the affected titles.
 
-**Current source: 1.6.2.0.** Failed catalog subscriptions are identified individually in Tasks and synchronization history with stable identities and safe failure causes. Partial synchronization remains Failed while preserving previous media. This release retains the 1.6.1.0 startup fix for valid catalog states larger than 256 MiB, with the 100,000-item limit, identity validation and atomic persistence unchanged.
+**Current source: 1.6.2.0.** Failed catalog subscriptions are identified individually in Tasks and synchronization history with stable identities and safe failure causes. Partial synchronization remains Failed while preserving previous media. Native playback reports accept equivalent GUID formats and retain non-playable metadata for canonical or retired versions so progress and stop reports can preserve resume state. This release retains the 1.6.1.0 startup fix for valid catalog states larger than 256 MiB, with the 100,000-item limit, identity validation and atomic persistence unchanged.
 
 ## Features
 
@@ -343,6 +343,8 @@ Each supported stream is represented by a real native alternate version. Existin
 Source-to-version bindings are persisted as hashes. Reordering or removing otherwise indistinguishable mirrors does not reassign an observed mirror's ordinal to another endpoint; rotating authentication query parameters does not create a new version. An unavailable selected source fails rather than silently playing another cut. Reappearing sources recover their existing native identities. On upgrade, older ordinal-only records contain no historical endpoint identity, so the first observation necessarily establishes the binding from the addon's current order.
 
 Probed tracks remain available to Jellyfin's remux and subtitle-extraction paths. Finite HTTP playback does not retain a native tuner lease that can become stale during an audio change. Actual audio and subtitle indices belong to the selected version, not to another cut.
+
+Playback reports accept native source GUIDs with or without hyphens. When a client omits the source ID, the canonical item's metadata remains available without selecting another cut. Retired versions keep their own runtime for progress and stop reporting but return no playable path, opening token or playback capabilities, and remain absent from new playback choices. User ownership, content identity and version relationships are still checked. These reporting fixes do not diagnose arbitrary FFmpeg exit codes; a transcoding failure needs its corresponding FFmpeg log.
 
 Native subtitle upload, provider download, and deletion work for Siphon's remote videos. Sidecars are stored under that version's private native metadata directory without changing its playable path or the library's subtitle-storage setting. Reopening or probing a source preserves its external subtitles; subtitles do not leak between versions.
 

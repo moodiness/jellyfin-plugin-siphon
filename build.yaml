@@ -26,5 +26,5 @@
     "MonoTorrent.Trackers.dll",
     "ReusableTasks.dll"
   ],
-  "changelog": "Identify failed catalog subscriptions in Tasks and synchronization history with stable catalog identities and safe failure causes. Preserve these diagnostics across restarts and clear current failures after a successful run, without exposing credentials, upstream URLs or raw exception messages. Partial synchronization still reports Failed and retains previous media; incomplete snapshots never authorize deletion. Adds English/French failure details and regression coverage for distinct catalog failures, safe persistence and preservation of expired missing items."
+  "changelog": "Identify failed catalog subscriptions in Tasks and synchronization history with stable identities and safe causes, persisted across restarts without exposing credentials or upstream errors. Partial synchronization still reports Failed and preserves prior media. Fix equivalent GUID handling and keep non-playable metadata available for canonical and retired versions so native progress/stop reports can save resume state without reopening retired sources or crossing user boundaries. Adds English/French failure details and regression coverage for catalog preservation, safe persistence and playback reporting."
 }

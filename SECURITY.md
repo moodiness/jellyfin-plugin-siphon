@@ -27,7 +27,7 @@ If GitHub private reporting is unavailable, contact the repository owner through
 
 ## Security boundaries
 
-The current 1.6.0.0 release implements the following boundaries:
+The current source implements the following boundaries:
 
 - upstream media and subtitle requests are made by the server, not directly by clients;
 - clients receive opaque, expiring capability tokens rather than upstream URLs or addon headers;
@@ -35,6 +35,7 @@ The current 1.6.0.0 release implements the following boundaries:
 - DNS resolution and redirects are checked against SSRF policy, including HTTPS downgrade and cross-origin credential handling;
 - private destinations require exact hostname exceptions configured by an administrator; exception-approved connections are not pooled, so later requests cannot reuse them after an exception is removed;
 - catalog media are native Jellyfin items, while Siphon keeps catalog state and backing directories in its private plugin data directory; personal library paths are preserved;
+- canonical and retired source metadata may be used for native playback progress/stop reporting only after native visibility, user ownership and content checks; retired version relationships are revalidated. These metadata-only responses contain no playable path, opening token or streaming capabilities and do not re-advertise retired sources;
 - addon responses, subtitles, playlists, headers, and proxy sessions are size- and concurrency-bounded; upstream body reads also have an idle deadline, without imposing a total playback-duration limit;
 - media ranges retain their original byte representation; unexpectedly encoded responses are rejected, and HLS resources remain capability-proxied even behind misleading filenames;
 - TMDB, TVDB, Fanart, and MDBList integrations are individually opt-in and use fixed HTTPS provider origins; storing a credential alone does not enable outbound enrichment, while testing saved credentials makes an explicit provider request;

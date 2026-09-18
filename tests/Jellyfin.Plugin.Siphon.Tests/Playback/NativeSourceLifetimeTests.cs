@@ -55,7 +55,9 @@ public sealed class NativeSourceLifetimeTests
         Assert.Equal("fra", Assert.Single(resumed.MediaStreams, stream => stream.Type == MediaStreamType.Audio).Language);
         Assert.Equal(2, Assert.Single(resumed.MediaStreams, stream => stream.Type == MediaStreamType.Audio).Index);
         video.SetProviderId(NativeVersionService.SourceOrderProvider, "-1");
-        await Assert.ThrowsAsync<ResourceNotFoundException>(() => manager.GetMediaSource(video, video.Id.ToString("N"), null, false, CancellationToken.None));
+        var retired = await manager.GetMediaSource(video, video.Id.ToString("N"), null, false, CancellationToken.None);
+        Assert.Null(retired.Path);
+        Assert.False(retired.SupportsDirectPlay || retired.SupportsDirectStream || retired.SupportsTranscoding || retired.SupportsProbing);
     }
 
     [Fact]
@@ -105,6 +107,105 @@ public sealed class NativeSourceLifetimeTests
         Assert.Empty(metadata.MediaStreams);
         Assert.False(metadata.SupportsDirectPlay || metadata.SupportsDirectStream || metadata.SupportsTranscoding || metadata.SupportsProbing);
         Assert.Empty(await manager.GetPlaybackMediaSources(primary, user, true, true, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task EquivalentNativeIdentifiersResolveTheSameProbedVersion()
+    {
+        var fixture = new ReportingFixture();
+        var compact = await fixture.Manager.GetMediaSource(fixture.Primary, fixture.Version.Id.ToString("N"), null, false, CancellationToken.None);
+        var hyphenated = await fixture.Manager.GetMediaSource(fixture.Primary, fixture.Version.Id.ToString("D"), null, false, CancellationToken.None);
+        Assert.Equal(compact.Id, hyphenated.Id);
+        Assert.Equal(compact.RunTimeTicks, hyphenated.RunTimeTicks);
+        Assert.Equal("fra", Assert.Single(hyphenated.MediaStreams).Language);
+    }
+
+    [Fact]
+    public async Task CanonicalAndRetiredVersionsRemainReportableWithoutOfferingPlayback()
+    {
+        var fixture = new ReportingFixture();
+        var canonical = await fixture.Manager.GetMediaSource(fixture.Primary, fixture.Primary.Id.ToString("N"), null, false, CancellationToken.None);
+        Assert.Equal(fixture.Primary.Id.ToString("N"), canonical.Id);
+        Assert.Equal(fixture.Primary.RunTimeTicks, canonical.RunTimeTicks);
+        AssertMetadataOnly(canonical);
+        Assert.Single(await fixture.Manager.GetPlaybackMediaSources(fixture.Primary, fixture.User, true, true, CancellationToken.None));
+
+        fixture.Version.SetProviderId(NativeVersionService.SourceOrderProvider, "-1");
+        var retired = await fixture.Manager.GetMediaSource(fixture.Primary, fixture.Version.Id.ToString("D"), null, false, CancellationToken.None);
+        Assert.Equal(fixture.Version.Id.ToString("N"), retired.Id);
+        Assert.Equal(fixture.Version.RunTimeTicks, retired.RunTimeTicks);
+        AssertMetadataOnly(retired);
+        Assert.Empty(await fixture.Manager.GetPlaybackMediaSources(fixture.Primary, fixture.User, true, true, CancellationToken.None));
+
+        fixture.Version.SetProviderId(NativeVersionService.SourceOrderProvider, "0");
+        var restored = await fixture.Manager.GetMediaSource(fixture.Primary, fixture.Version.Id.ToString("N"), null, false, CancellationToken.None);
+        Assert.Equal("fra", Assert.Single(restored.MediaStreams).Language);
+        Assert.Single(await fixture.Manager.GetPlaybackMediaSources(fixture.Primary, fixture.User, true, true, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ReportableMetadataCannotCrossUserContentOrVersionBoundaries()
+    {
+        var fixture = new ReportingFixture();
+        fixture.Version.SetProviderId(NativeVersionService.SourceOrderProvider, "-1");
+        fixture.Version.SetProviderId(NativeVersionService.OwnerProvider, Guid.NewGuid().ToString("N"));
+        await Assert.ThrowsAsync<ResourceNotFoundException>(() => fixture.Manager.GetMediaSource(fixture.Primary,
+            fixture.Version.Id.ToString("N"), null, false, CancellationToken.None));
+        fixture.Version.SetProviderId(NativeVersionService.OwnerProvider, fixture.User.Id.ToString("N"));
+        fixture.Version.SetProviderId("Siphon", "movie:unrelated");
+        await Assert.ThrowsAsync<ResourceNotFoundException>(() => fixture.Manager.GetMediaSource(fixture.Primary,
+            fixture.Version.Id.ToString("N"), null, false, CancellationToken.None));
+        fixture.Version.SetProviderId("Siphon", "movie:fixture");
+        fixture.Version.SetProviderId(NativeVersionService.VersionProvider, Guid.NewGuid().ToString("N"));
+        await Assert.ThrowsAsync<ResourceNotFoundException>(() => fixture.Manager.GetMediaSource(fixture.Primary,
+            fixture.Version.Id.ToString("N"), null, false, CancellationToken.None));
+        await Assert.ThrowsAsync<ResourceNotFoundException>(() => fixture.Manager.GetMediaSource(fixture.Primary,
+            "not-a-source", null, false, CancellationToken.None));
+    }
+
+    private static void AssertMetadataOnly(MediaSourceInfo source)
+    {
+        Assert.Null(source.Path);
+        Assert.Null(source.OpenToken);
+        Assert.Null(source.LiveStreamId);
+        Assert.False(source.RequiresOpening || source.RequiresClosing);
+        Assert.False(source.SupportsDirectPlay || source.SupportsDirectStream || source.SupportsTranscoding || source.SupportsProbing);
+    }
+
+    private sealed class ReportingFixture
+    {
+        public User User { get; } = new("viewer", "authentication", "password-reset") { Id = Guid.NewGuid() };
+        public Movie Primary { get; } = new() { Id = Guid.NewGuid(), RunTimeTicks = TimeSpan.FromMinutes(10).Ticks };
+        public Movie Version { get; } = new() { Id = Guid.NewGuid(), RunTimeTicks = TimeSpan.FromMinutes(14).Ticks };
+        public NativeMediaSourceManager Manager { get; }
+
+        public ReportingFixture()
+        {
+            Primary.SetProviderId("Siphon", "movie:fixture");
+            Version.SetProviderId("Siphon", "movie:fixture");
+            Version.PrimaryVersionId = Primary.Id;
+            Version.SetProviderId(NativeVersionService.SourceProvider, "selected-source");
+            Version.SetProviderId(NativeVersionService.SourceOrderProvider, "0");
+            Version.SetProviderId(NativeVersionService.VersionProvider, Primary.Id.ToString("N"));
+            Version.SetProviderId(NativeVersionService.OwnerProvider, User.Id.ToString("N"));
+            var native = DispatchProxy.Create<IMediaSourceManager, Sources>();
+            ((Sources)(object)native).Source = new MediaSourceInfo
+            {
+                Id = Version.Id.ToString("N"),
+                Path = "https://server.example/selected-source",
+                RequiresOpening = true,
+                OpenToken = typeof(SiphonMediaSourceProvider).FullName!.GetMD5().ToString("N", CultureInfo.InvariantCulture) + "_fixture",
+                SupportsDirectPlay = true,
+                SupportsDirectStream = true,
+                SupportsTranscoding = true,
+                RunTimeTicks = Version.RunTimeTicks,
+                MediaStreams = [new() { Type = MediaStreamType.Audio, Index = 2, Language = "fra", Codec = "aac" }]
+            };
+            var library = DispatchProxy.Create<ILibraryManager, Library>();
+            ((Library)(object)library).Video = Version;
+            ((Library)(object)library).Primary = Primary;
+            Manager = new NativeMediaSourceManager(native, library, CreateAccess(library, User));
+        }
     }
 
     internal static PlaybackAccess CreateAccess(ILibraryManager library, User? user, bool authenticated = true)
