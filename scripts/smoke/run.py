@@ -759,8 +759,10 @@ http {
                 raise Unavailable("Playwright/browser unavailable; install scripts/smoke dependencies and the pinned Chromium, or supply --chromium-executable with an installed Chromium binary")
             stage = process.stderr.strip().removeprefix("SMOKE_STAGE=")
             safe_stage = stage if stage and len(stage) < 80 and all(character.isalpha() or character == "-" for character in stage) else "unknown"
+            if process.stdout.strip():
+                evidence.update(json.loads(process.stdout))
             require(process.returncode == 0, "Browser scenario failed at " + safe_stage + "; raw browser output withheld")
-            evidence.update(json.loads(process.stdout))
+            require(bool(process.stdout.strip()), "Browser scenario did not return evidence")
             if self.args.screenshots:
                 destination = self.args.screenshots.resolve()
                 destination.mkdir(parents=True, exist_ok=True)
