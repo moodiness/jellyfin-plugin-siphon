@@ -26,5 +26,5 @@
     "MonoTorrent.Trackers.dll",
     "ReusableTasks.dll"
   ],
-  "changelog": "Fix a Jellyfin startup regression when an existing Siphon catalog exceeds 256 MiB. Large valid state files load and save without truncation, preserving native identities, ownership and metadata; the 100,000-item limit and atomic writes remain enforced. Fix the native integration smoke after publication when source and catalog versions match, update the Node.js action runtime, and pin Linux CI to Ubuntu 24.04."
+  "changelog": "Fix a Jellyfin startup regression when an existing Siphon catalog exceeds 256 MiB. Large valid state files load and save without truncation, preserving native identities, ownership and metadata; the 100,000-item limit and atomic writes remain enforced. Prevent calendar notification starvation under brief publication-lock contention and create generated native collections with their initial members, preserving manual additions. Correct native login and notification smoke synchronization, allow matching source/catalog versions after publication, update the Node.js action runtime, and pin Linux CI to Ubuntu 24.04. Detailed release notes now come from annotated tags rather than a tracked notes file."
 }
