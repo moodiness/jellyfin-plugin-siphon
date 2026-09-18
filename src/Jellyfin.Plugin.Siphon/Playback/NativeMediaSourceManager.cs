@@ -63,7 +63,22 @@ public sealed class NativeMediaSourceManager(IMediaSourceManager inner, ILibrary
         // The provider materializes versions during the inner call. Read the resulting native group,
         // not the pre-call fallback, and preserve its permission/track processing and prefixed token.
         var video = library.GetItemById(item.Id) as Video ?? (Video)item;
-        return SelectSources(sources, GetVersions(video, user!.Id), video, user, playback: true);
+        var selected = SelectSources(sources, GetVersions(video, user!.Id), video, user, playback: true);
+        if (!allowMediaProbe)
+        {
+            // StreamingHelpers requests existing tracks for remux/seek after PlaybackInfo
+            // already opened the selected version. Do not run that remote probe again.
+            foreach (var source in selected)
+            {
+                if (!source.MediaStreams.Any(stream => stream.Type == MediaStreamType.Video && !string.IsNullOrEmpty(stream.Codec))) continue;
+                source.RequiresOpening = false;
+                source.OpenToken = null;
+                source.RequiresClosing = false;
+                source.LiveStreamId = null;
+                source.SupportsProbing = false;
+            }
+        }
+        return selected;
     }
 
     public async Task<MediaSourceInfo> GetMediaSource(

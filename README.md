@@ -344,6 +344,8 @@ Source-to-version bindings are persisted as hashes. Reordering or removing other
 
 Probed tracks remain available to Jellyfin's remux and subtitle-extraction paths. Finite HTTP playback does not retain a native tuner lease that can become stale during an audio change. Actual audio and subtitle indices belong to the selected version, not to another cut.
 
+Native remux and seek requests reuse the selected version's recorded video/audio tracks instead of opening and probing that version a second time. New PlaybackInfo requests still open/probe the selected source, and versions without recorded video codec information still require opening. The signed source route continues to resolve the exact authorized source and proxy range validation remains enforced; this does not make an upstream or reverse-proxy HTTP failure recoverable.
+
 Playback reports accept native source GUIDs with or without hyphens. When a client omits the source ID, the canonical item's metadata remains available without selecting another cut. Retired versions keep their own runtime for progress and stop reporting but return no playable path, opening token or playback capabilities, and remain absent from new playback choices. User ownership, content identity and version relationships are still checked. These reporting fixes do not diagnose arbitrary FFmpeg exit codes; a transcoding failure needs its corresponding FFmpeg log.
 
 Native subtitle upload, provider download, and deletion work for Siphon's remote videos. Sidecars are stored under that version's private native metadata directory without changing its playable path or the library's subtitle-storage setting. Reopening or probing a source preserves its external subtitles; subtitles do not leak between versions.
