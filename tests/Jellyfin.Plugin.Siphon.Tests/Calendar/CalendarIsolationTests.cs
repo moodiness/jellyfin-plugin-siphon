@@ -68,7 +68,7 @@ public sealed class CalendarIsolationTests
         try
         {
             using var database = new FollowedSeriesSelectorTests.Database();
-            var first = FollowedSeriesSelectorTests.Episode("contention");
+            var first = FollowedSeriesSelectorTests.Episode("contention") with { Path = Path.Combine(directory, "episode-1") };
             var second = first with
             {
                 Key = first.ContentKey + ":1:2",
