@@ -1,0 +1,43 @@
+## Siphon 1.6.0.0
+
+For Jellyfin Server 12.1.x (.NET 10). This release includes the persistent-download and signed-notification features prepared after 1.5, plus the operational controls and fixes merged in #23. Release source commit: 69fb0a2b68db84e8d10da1dbb84d4b841f3f0866. The Git tag is v1.6.0; the plugin and archive version is 1.6.0.0.
+
+### Added and improved
+- Private persistent offline downloads of an exact native stream version, with restart recovery, live permission checks and bounded temporary/completed storage.
+- Individual pause/resume, persisted priority, shared and per-user quotas, optional UTC download windows, download phases/rates and remaining-time estimates when supported by reliable totals.
+- User-bound, expiring, single-use batch preparation and explicit audio/subtitle selection before queueing supported sources.
+- Real finite-HLS Matroska exports through Jellyfin's FFmpeg/FFprobe, including supported audio renditions, segmented WebVTT and identity AES-128, without re-encoding video/audio.
+- Opt-in signed external notifications with explicit JSON, Discord, Slack and ntfy formats, event filters, optional digests and visible retry/abandonment state. Secrets and delivery state remain encrypted at rest.
+- Shared French/English administration and personal-portal controls, keyboard/focus/status accessibility, first-import guidance and a shareable portal link without a session token.
+- Aggregate local operational health, installed/source and repository-at-build versions, queue/storage observations and existing provider status without silently probing providers.
+- Strict offline backup/restore of the coherent Jellyfin/Siphon data trees, with preflight, restore planning, ownership/path checks and no overwrite of newer populated data.
+- Binary version, ABI, dependency and source-provenance verification before packaging; immutable assets are verified before the repository catalog is updated.
+
+### Fixes and performance
+- Saved-library restoration starts after host startup instead of blocking the Jellyfin startup path. Cancellation and restoration failures remain observable.
+- Search additions and removals reconcile only affected native titles instead of hydrating the entire managed library.
+- Missing search-poster metadata is recovered through bounded title lookups, and primary artwork uses the correct title/episode source.
+- Explicit saved-addition removal now has confirmation and keyboard-focus recovery. Catalog-owned titles remain available; retained native history is reattached on unambiguous later additions.
+- Playback and direct-download admission are bounded, read snapshots are indexed/immutable, persisted documents are bounded before parsing, and P2P filesystem traversal no longer holds the shared lock.
+- A separately padded Jellyfin catalog image keeps the complete logo visible. The original supplied PNG and embedded icon are unchanged.
+
+### Installation and update
+Use this stable Jellyfin repository URL:
+https://raw.githubusercontent.com/moodiness/jellyfin-plugin-siphon/main/manifest.json
+
+For manual installation, verify SHA256SUMS, stop Jellyfin, extract the entire siphon-1.6.0.0.zip into Jellyfin.Plugin.Siphon_1.6.0.0 in the plugin directory, remove any duplicate older plugin installation, and restart Jellyfin. Keep runtime dependencies, meta.json and licenses from the ZIP. Back up the complete stopped instance before upgrading; a copy of plugin settings alone does not preserve native history and private state.
+
+The release attachments are the plugin ZIP and SHA256SUMS. The Jellyfin catalog remains the manifest.json on main, not a release attachment.
+
+### Verification
+- 557 tests passed; Linux, macOS and Windows CI succeeded: https://github.com/moodiness/jellyfin-plugin-siphon/actions/runs/35288675305
+- Twenty owned native integration steps passed, including a real published 1.4.1 upgrade preserving native IDs/history/collections, progressive/HLS playback, selected-version exports, user isolation, permission revocation, queue restart, signed notifications and both browser interfaces: https://github.com/moodiness/jellyfin-plugin-siphon/actions/runs/35288675313
+- Two actual offline backup/restore/boot cycles preserved native settings/history, paused jobs, signed delivery and byte-identical completed-file access; 22 hostile/ownership/no-overwrite guards were exercised.
+- Package version, source provenance, PE references, ABI, dependency/license closure and archive checksums were verified against the clean release tag.
+
+SHA256 (siphon-1.6.0.0.zip): b546b159421615e0daf309d9c9310dfdd7b9f401e2bec6206ce373e1cb07bc71
+
+### Boundaries
+Background downloads and external notification delivery remain disabled by default. Audio-only, live and unsupported/DRM HLS are rejected. Resuming HLS restages segments rather than append-resuming an incomplete container. Backup/restore is offline and exact-version, preserves original mount paths, and never merges over newer history.
+
+P2P is opt-in, can upload data and exposes the server's IP to peers/trackers; it is not an anonymity layer. Private destinations require explicit exact-host administrator exceptions. Use only content you are authorized to obtain and share. Morestachio's temporary startup-page exception is a separate Jellyfin issue, not silently suppressed by Siphon.

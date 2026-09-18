@@ -5,8 +5,8 @@
 | Version | Supported |
 | --- | --- |
 | 1.0.x, 1.1.x, 1.2.x, 1.3.x and 1.4.x / Jellyfin 12.1.x | Yes |
-| 1.5.0.0 / Jellyfin 12.1.x | Yes; latest published release |
-| 1.6.0.0 / Jellyfin 12.1.x | Prepared source; not yet published |
+| 1.5.0.0 / Jellyfin 12.1.x | Yes |
+| 1.6.0.0 / Jellyfin 12.1.x | Yes; latest published release |
 | Other Jellyfin major versions | No |
 
 Siphon is a Jellyfin plugin and must be installed only on a compatible Jellyfin server. Upgrade to the latest Siphon release compatible with your Jellyfin version before reporting an issue.
@@ -27,7 +27,7 @@ If GitHub private reporting is unavailable, contact the repository owner through
 
 ## Security boundaries
 
-The current source, including unreleased changes described in the README, implements the following boundaries:
+The current 1.6.0.0 release implements the following boundaries:
 
 - upstream media and subtitle requests are made by the server, not directly by clients;
 - clients receive opaque, expiring capability tokens rather than upstream URLs or addon headers;

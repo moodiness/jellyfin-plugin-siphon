@@ -30,7 +30,7 @@ import zipfile
 # A release invocation must not dirty the checkout merely by importing its helpers.
 sys.dont_write_bytecode = True
 
-from package import ROOT, json_bytes, revision, run, verify_archive
+from package import ROOT, checksums, json_bytes, revision, run, verify_archive
 
 
 def gh_api(repository, endpoint, method="GET", payload=None, allow_missing=False, binary=False):
@@ -124,10 +124,14 @@ def verify_public(url, expected):
 def publish_assets(repository, tag, artifacts, metadata):
     release = gh_api(repository, f"releases/tags/{tag}", allow_missing=True)
     if release is None:
+        notes = (ROOT / "RELEASE_NOTES.txt").read_text(encoding="utf-8")
+        heading = f"## Siphon {metadata['version']}\n"
+        if not notes.startswith(heading) or not notes[len(heading):].strip():
+            raise ValueError(f"RELEASE_NOTES.txt must contain detailed notes headed {heading.strip()!r}")
         try:
             release = gh_api(repository, "releases", "POST", {
-                "tag_name": tag, "target_commitish": revision(), "name": tag,
-                "body": metadata["changelog"], "draft": True, "prerelease": False})
+                "tag_name": tag, "target_commitish": revision(), "name": f"v{metadata['version']}",
+                "body": notes, "draft": True, "prerelease": False})
         except ValueError:
             # Another creator may have won; compare assets below, never overwrite.
             release = gh_api(repository, f"releases/tags/{tag}", allow_missing=True)
@@ -135,35 +139,41 @@ def publish_assets(repository, tag, artifacts, metadata):
                 raise
     if release.get("prerelease"):
         raise ValueError("A prerelease cannot be published into the stable catalog")
-    names = [f"siphon-{metadata['version']}.zip", "manifest.json", "SHA256SUMS"]
-    for name in names:
-        expected = (artifacts / name).read_bytes()
-        release = gh_api(repository, f"releases/{release['id']}")
-        matching = [asset for asset in release["assets"] if asset["name"] == name]
-        if len(matching) > 1:
-            raise ValueError(f"Release has duplicate assets named {name}; manual recovery required")
-        if matching and matching[0].get("state") == "starter":
-            if not release["draft"]:
-                raise ValueError(f"Published release has an incomplete asset {name}; manual recovery is required")
-            # GitHub can retain an empty starter record after an interrupted
-            # upload. Only this never-published record may be removed on retry.
-            gh_api(repository, f"releases/assets/{matching[0]['id']}", "DELETE")
-            matching = []
-        if not matching:
-            result = subprocess.run(["gh", "release", "upload", tag, str(artifacts / name), "--repo", repository],
-                                    capture_output=True, text=True, cwd=ROOT, check=False)
+    archive = artifacts / f"siphon-{metadata['version']}.zip"
+    # The candidate manifest stays in workflow recovery artifacts, not on the release.
+    # Public checksums cover only public files; the internal artifact checksum is unchanged.
+    with tempfile.TemporaryDirectory(prefix="siphon-public-assets-") as temporary:
+        sums = Path(temporary) / "SHA256SUMS"
+        sums.write_text(checksums(artifacts, [archive.name]), encoding="utf-8")
+        for path in (archive, sums):
+            name = path.name
+            expected = path.read_bytes()
             release = gh_api(repository, f"releases/{release['id']}")
             matching = [asset for asset in release["assets"] if asset["name"] == name]
-            if len(matching) != 1:
-                raise ValueError(f"Asset upload failed for {name}; safely rerun after recovery: {result.stderr.strip()}")
-        verify_asset(repository, matching[0], expected)
-    check_remote_tag(repository, tag)
-    if release["draft"]:
-        release = gh_api(repository, f"releases/{release['id']}", "PATCH", {"draft": False, "make_latest": "legacy"})
-    if release["draft"]:
-        raise ValueError("Release remained a draft; catalog has not been changed")
-    for name in names:
-        verify_public(f"https://github.com/{repository}/releases/download/{tag}/{name}", (artifacts / name).read_bytes())
+            if len(matching) > 1:
+                raise ValueError(f"Release has duplicate assets named {name}; manual recovery required")
+            if matching and matching[0].get("state") == "starter":
+                if not release["draft"]:
+                    raise ValueError(f"Published release has an incomplete asset {name}; manual recovery is required")
+                # GitHub can retain an empty starter record after an interrupted
+                # upload. Only this never-published record may be removed on retry.
+                gh_api(repository, f"releases/assets/{matching[0]['id']}", "DELETE")
+                matching = []
+            if not matching:
+                result = subprocess.run(["gh", "release", "upload", tag, str(path), "--repo", repository],
+                                        capture_output=True, text=True, cwd=ROOT, check=False)
+                release = gh_api(repository, f"releases/{release['id']}")
+                matching = [asset for asset in release["assets"] if asset["name"] == name]
+                if len(matching) != 1:
+                    raise ValueError(f"Asset upload failed for {name}; safely rerun after recovery: {result.stderr.strip()}")
+            verify_asset(repository, matching[0], expected)
+        check_remote_tag(repository, tag)
+        if release["draft"]:
+            release = gh_api(repository, f"releases/{release['id']}", "PATCH", {"draft": False, "make_latest": "legacy"})
+        if release["draft"]:
+            raise ValueError("Release remained a draft; catalog has not been changed")
+        for path in (archive, sums):
+            verify_public(f"https://github.com/{repository}/releases/download/{tag}/{path.name}", path.read_bytes())
     print(f"Published assets verified: https://github.com/{repository}/releases/tag/{tag}")
 
 

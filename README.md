@@ -6,11 +6,11 @@ Siphon brings **Stremio addons into Jellyfin**: catalogs, metadata, subtitles, a
 
 Siphon targets **Jellyfin 12.1** and .NET 10. The current source includes an opt-in, bounded MonoTorrent engine. It is not a debrid client or an external-player integration.
 
-**Latest published release: 1.5.0.0. Prepared source version: 1.6.0.0.** The repository manifest advertises the published 1.5 archive. The 1.6 functionality below is not included in that archive; source changes alone do not publish a release.
+**Latest published release: [1.6.0.0](https://github.com/moodiness/jellyfin-plugin-siphon/releases/tag/v1.6.0).** The Git tag is `v1.6.0`; the plugin version is `1.6.0.0`. The stable repository manifest on `main` advertises verified published archives and retains earlier compatible versions.
 
 **Siphon 1.5.0.0** adds isolated per-user playback/subtitle addons and search preferences; durable native collections and playlists; catalog collections; selected-version resumable downloads; selective orphan-history recovery; field provenance and per-title source diagnostics; a followed-series calendar and opt-in notifications; all IntroDB timing types; and real, bounded P2P playback. It also includes native addon Search, targeted synchronization, a twenty-run decision history, provider quota/cooldown tracking, shared response caching, the supplied Siphon icon, and authoritative addon metadata with an optional missing-season-only TMDB supplement. The published package also validates media response types and constrains document rendering on media routes.
 
-**Siphon 1.6.0.0 (not yet published)** adds private persistent downloads with pause, priority, quotas, scheduling, batch preparation and track selection; finite-HLS offline exports; signed notification adapters and optional digests; French/English controls and local operational health; verified offline backup/restore and assets-first release automation. Background downloads and external delivery remain disabled by default. It also bounds request admission and state reads, moves saved-library restoration off the host startup path, and scopes search additions/removals to the affected titles.
+**Siphon 1.6.0.0** adds private persistent downloads with pause, priority, quotas, scheduling, batch preparation and track selection; finite-HLS offline exports; signed notification adapters and optional digests; French/English controls and local operational health; verified offline backup/restore and assets-first release automation. Background downloads and external delivery remain disabled by default. It also bounds request admission and state reads, moves saved-library restoration off the host startup path, and scopes search additions/removals to the affected titles.
 
 ## Features
 
@@ -66,7 +66,7 @@ The repository manifest points to the release archive and includes its Jellyfin 
 
 ## Manual installation
 
-1. For the prepared 1.6.0.0 source, build `siphon-1.6.0.0.zip` using the commands below or download the matching CI artifact. The intended release tag is `v1.6.0`; no download at that tag exists until publication. The current stable download is the [v1.5.0 release](https://github.com/moodiness/jellyfin-plugin-siphon/releases/tag/v1.5.0), containing `siphon-1.5.0.0.zip`.
+1. Download `siphon-1.6.0.0.zip` and `SHA256SUMS` from the [v1.6.0.0 release](https://github.com/moodiness/jellyfin-plugin-siphon/releases/tag/v1.6.0).
 2. Verify the archive against `SHA256SUMS`.
 3. For 1.6.0.0, create a versioned folder named `Jellyfin.Plugin.Siphon_1.6.0.0` inside Jellyfin's plugin directory and extract the archive contents into that folder. The folder must contain `Jellyfin.Plugin.Siphon.dll` and `meta.json`. Use the matching versioned folder when installing an older release; do not leave two copies of the plugin installed.
 4. Restart Jellyfin.
@@ -395,9 +395,11 @@ dotnet test Jellyfin.Plugin.Siphon.sln -c Release
 python3 scripts/package.py
 ```
 
-The build targets `net10.0` and Jellyfin ABI `12.1.0.0`. Release packaging verifies compiled version, PE assembly references, source provenance and runtime dependency bytes before producing `artifacts/siphon-1.6.0.0.zip`, a repository manifest and `SHA256SUMS`. A stale binary, source/binary mismatch or incompatible ABI fails packaging. The intended tag is `v1.6.0`; generating artifacts does not create it or publish a release.
+The build targets `net10.0` and Jellyfin ABI `12.1.0.0`. Release packaging verifies compiled version, PE assembly references, source provenance and runtime dependency bytes before producing `artifacts/siphon-1.6.0.0.zip`, a candidate repository manifest and internal `SHA256SUMS`. A stale binary, source/binary mismatch or incompatible ABI fails packaging. The tag for version 1.6.0.0 is `v1.6.0`; generating local artifacts does not publish another release.
 
-Release automation uploads verified assets to a draft, checks immutable bytes, publishes, verifies the public downloads, then opens or reuses a **manifest-only pull request from current main**. Retries do not overwrite published assets or move main back to a historical tag. Until publication, do not replace the root manifest with a locally generated one: its 1.6.0.0 download URL is not live. Jellyfin uses the stable repository manifest URL, not a release attachment.
+Release automation publishes **only the plugin ZIP and a public `SHA256SUMS` covering that ZIP**. The candidate manifest and internal package checksums remain in workflow recovery artifacts, not as release attachments. New releases require detailed, version-matching notes in `RELEASE_NOTES.txt`, headed `## Siphon <four-component version>`; the short `build.yaml` changelog remains the catalog summary.
+
+The workflow uploads to a draft, checks immutable bytes, publishes, verifies public downloads, then opens or reuses a **manifest-only pull request from current main**. Retries preserve published assets and existing release notes; they never move main back to a historical tag. Do not advertise an unpublished local archive in the root manifest. Jellyfin uses the stable repository manifest URL, not a release attachment.
 
 The ZIP includes the padded `siphon-jellyfin.png` catalog image, its `meta.json` declaration, MonoTorrent's runtime dependency closure and dependency licenses. It excludes Jellyfin's own SDK/server assemblies. The new 1280×720 image keeps the complete mark inside Jellyfin's card crop; the original `assets/siphon.png` and the image served at `/Siphon/Icon` remain unchanged. The repository manifest references `assets/siphon-jellyfin.png`.
 
