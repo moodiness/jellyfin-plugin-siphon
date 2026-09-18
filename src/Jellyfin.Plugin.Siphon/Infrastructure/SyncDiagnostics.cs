@@ -96,6 +96,20 @@ public sealed partial class SyncDiagnostics : IDisposable
         }
     }
 
+    public void RecordSubscriptionFailure(string subscriptionKey, string code)
+    {
+        lock (_gate)
+        {
+            if (_disposed || _currentRun is not { } run || !IsCatalogIdentity(subscriptionKey)) return;
+            if (run.SubscriptionFailures.Count >= MaximumRecords && !run.SubscriptionFailures.ContainsKey(subscriptionKey)) return;
+            run.SubscriptionFailures[subscriptionKey] = SafeCode(code, SyncCodes, "SyncFailed");
+            ScheduleWrite();
+        }
+    }
+
+    private static bool IsCatalogIdentity(string? value)
+        => value is { Length: 64 } && value.All(char.IsAsciiHexDigit);
+
     public void SetSummary(int added, int updated, int unchanged, int removed, int preserved, int failedSubscriptions)
     {
         lock (_gate)
@@ -351,7 +365,10 @@ public sealed partial class SyncDiagnostics : IDisposable
                 .DistinctBy(provider => provider.Provider).Take(Providers.Count)
                 .Select(provider => new SyncProviderSnapshot(provider.Provider, Math.Max(0, provider.Requests), Math.Max(0, provider.CacheHits),
                     (provider.Errors ?? new Dictionary<string, int>()).Where(error => ProviderCodes.Contains(error.Key))
-                        .ToDictionary(error => error.Key, error => Math.Max(0, error.Value), StringComparer.Ordinal))).ToArray()
+                        .ToDictionary(error => error.Key, error => Math.Max(0, error.Value), StringComparer.Ordinal))).ToArray(),
+            SubscriptionFailures = run.SubscriptionFailures?.Where(pair => IsCatalogIdentity(pair.Key))
+                .Take(MaximumRecords)
+                .ToDictionary(pair => pair.Key, pair => SafeCode(pair.Value, SyncCodes, "SyncFailed"), StringComparer.Ordinal)
         };
     }
 
@@ -361,6 +378,7 @@ public sealed partial class SyncDiagnostics : IDisposable
         private readonly Dictionary<string, ProviderCounters> _providers = new(StringComparer.Ordinal);
         public string Id { get; } = Guid.NewGuid().ToString("N");
         public Dictionary<string, SyncDecision> Decisions { get; } = new(StringComparer.Ordinal);
+        public Dictionary<string, string> SubscriptionFailures { get; } = new(StringComparer.Ordinal);
         public bool DecisionsDirty { get; set; }
         public string Stage { get; set; } = "Preparing";
         public string Unit { get; set; } = "Items";
@@ -383,7 +401,8 @@ public sealed partial class SyncDiagnostics : IDisposable
         public SyncRunSnapshot Snapshot() => new(kind, "Running", _startedAtUtc, null, Stage, Unit, Completed, Total,
             PrioritySeries, Added, Updated, Unchanged, Removed, Preserved, FailedSubscriptions,
             _providers.Select(provider => new SyncProviderSnapshot(provider.Key, provider.Value.Requests, provider.Value.CacheHits,
-                new Dictionary<string, int>(provider.Value.Errors, StringComparer.Ordinal))).ToArray(), Id, scope, targetKey, Decisions.Count);
+                new Dictionary<string, int>(provider.Value.Errors, StringComparer.Ordinal))).ToArray(), Id, scope, targetKey, Decisions.Count,
+            new Dictionary<string, string>(SubscriptionFailures, StringComparer.Ordinal));
     }
 
     private sealed class ProviderCounters
@@ -414,7 +433,8 @@ public sealed record SyncRunStatus(SyncRunSnapshot? CurrentRun, SyncRunSnapshot?
 public sealed record SyncRunSnapshot(string Kind, string State, DateTimeOffset StartedAtUtc, DateTimeOffset? FinishedAtUtc,
     string Stage, string Unit, int Completed, int Total, int PrioritySeries, int Added, int Updated, int Unchanged,
     int Removed, int Preserved, int FailedSubscriptions, IReadOnlyList<SyncProviderSnapshot> Providers,
-    string Id = "", string Scope = "All", string? TargetKey = null, int DecisionCount = 0);
+    string Id = "", string Scope = "All", string? TargetKey = null, int DecisionCount = 0,
+    IReadOnlyDictionary<string, string>? SubscriptionFailures = null);
 public sealed record SyncProviderSnapshot(string Provider, int Requests, int CacheHits, IReadOnlyDictionary<string, int> Errors);
 public sealed record InstallationDiagnostic(string InstallationId, DateTimeOffset? LastSuccessUtc, DateTimeOffset? LastFailureUtc,
     string? LastErrorCode, ManifestCheckDiagnostic? LastManifestCheck);
