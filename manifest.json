@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/moodiness/jellyfin-plugin-siphon/main/assets/siphon-jellyfin.png",
     "versions": [
       {
+        "version": "1.6.1.0",
+        "targetAbi": "12.1.0.0",
+        "sourceUrl": "https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.6.1/siphon-1.6.1.0.zip",
+        "checksum": "54e98f0f2aaf2b60e1aed6747f7ac524",
+        "timestamp": "2026-09-18T14:21:58Z",
+        "changelog": "Fix a Jellyfin startup regression when an existing Siphon catalog exceeds 256 MiB. Large valid state files load and save without truncation, preserving native identities, ownership and metadata; the 100,000-item limit and atomic writes remain enforced. Prevent calendar notification starvation under brief publication-lock contention and create generated native collections with their initial members, preserving manual additions. Correct native login and notification smoke synchronization, allow matching source/catalog versions after publication, update the Node.js action runtime, and pin Linux CI to Ubuntu 24.04. Detailed release notes now come from annotated tags rather than a tracked notes file."
+      },
+      {
         "version": "1.6.0.0",
         "targetAbi": "12.1.0.0",
         "sourceUrl": "https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.6.0/siphon-1.6.0.0.zip",
