@@ -8,22 +8,15 @@ namespace Jellyfin.Plugin.Siphon.Infrastructure;
 public sealed class SiphonStateStore : ISiphonStateStore, IDisposable
 {
     internal const int MaximumItems = 100_000;
-    internal const long MaximumDocumentBytes = 256L * 1024 * 1024;
     private readonly string _path;
-    private readonly long _maximumDocumentBytes;
     private readonly SemaphoreSlim _writer = new(1, 1);
     private Snapshot _snapshot;
 
     /// <summary>Process-local commit revision for consumers caching immutable snapshots.</summary>
     public long Revision => Volatile.Read(ref _snapshot).Read.Revision!.Value;
 
-    public SiphonStateStore(SiphonPaths paths) : this(paths, MaximumDocumentBytes) { }
-
-    internal SiphonStateStore(SiphonPaths paths, long maximumDocumentBytes)
+    public SiphonStateStore(SiphonPaths paths)
     {
-        if (maximumDocumentBytes is <= 0 or > MaximumDocumentBytes)
-            throw new ArgumentOutOfRangeException(nameof(maximumDocumentBytes));
-        _maximumDocumentBytes = maximumDocumentBytes;
         _path = Path.Combine(paths.DataDirectory, "state.json");
         if (!File.Exists(_path))
         {
@@ -31,20 +24,19 @@ public sealed class SiphonStateStore : ISiphonStateStore, IDisposable
             return;
         }
 
-        // Admission precedes parsing. Never replace rejected ownership data with an empty catalog.
+        // Existing catalogs can exceed 256 MiB within the supported item count.
+        // Stream persisted metadata; never discard ownership data because of its total byte size.
         using var stream = File.OpenRead(_path);
-        using var bounded = new StateDocumentStream(stream, _maximumDocumentBytes);
-        bounded.CheckLength();
         try
         {
             // Read only the version first; the current schema needs no intermediate JSON tree.
             // Property order is unrestricted, including legacy documents with Items before Version.
-            var version = ReadVersion(bounded, _maximumDocumentBytes);
+            var version = ReadVersion(stream);
             stream.Position = 0;
             StateDocument? document;
             if (version == 1)
             {
-                var root = JsonNode.Parse(bounded) as JsonObject
+                var root = JsonNode.Parse(stream) as JsonObject
                     ?? throw new InvalidDataException("Siphon state is empty or corrupt; the original file was retained.");
                 if (root["Items"] is not JsonArray legacyItems)
                     throw new InvalidDataException("Siphon legacy state has no item array; the original file was retained.");
@@ -65,7 +57,7 @@ public sealed class SiphonStateStore : ISiphonStateStore, IDisposable
             }
             else if (version == 2)
             {
-                document = JsonSerializer.Deserialize<StateDocument>(bounded);
+                document = JsonSerializer.Deserialize<StateDocument>(stream);
             }
             else
             {
@@ -118,8 +110,7 @@ public sealed class SiphonStateStore : ISiphonStateStore, IDisposable
 
             await using (var stream = new FileStream(temporary, options))
             {
-                using var bounded = new StateDocumentStream(stream, _maximumDocumentBytes);
-                await JsonSerializer.SerializeAsync(bounded, new StateDocument { Version = 2, Items = next.Items }, cancellationToken: cancellationToken).ConfigureAwait(false);
+                await JsonSerializer.SerializeAsync(stream, new StateDocument { Version = 2, Items = next.Items }, cancellationToken: cancellationToken).ConfigureAwait(false);
                 await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
                 stream.Flush(flushToDisk: true);
             }
@@ -193,7 +184,7 @@ public sealed class SiphonStateStore : ISiphonStateStore, IDisposable
 
     private sealed record Snapshot(ManagedItem[] Items, SiphonReadSnapshot Read);
 
-    private static int ReadVersion(Stream stream, long maximumBytes)
+    private static int ReadVersion(Stream stream)
     {
         // Inspect tokens incrementally instead of buffering an ignored Items property.
         // Writer output puts Version first; reordered documents retain the same semantics.
@@ -230,7 +221,7 @@ public sealed class SiphonStateStore : ISiphonStateStore, IDisposable
                 buffered -= consumed;
                 buffer.AsSpan(consumed, buffered).CopyTo(buffer);
                 if (buffered < buffer.Length) continue;
-                var capacity = checked((int)Math.Min((long)buffer.Length * 2, maximumBytes));
+                var capacity = (int)Math.Min((long)buffer.Length * 2, Array.MaxLength);
                 if (capacity <= buffer.Length) throw new JsonException("Siphon state contains an oversized JSON token.");
                 var larger = ArrayPool<byte>.Shared.Rent(capacity);
                 buffer.AsSpan(0, buffered).CopyTo(larger);
@@ -245,62 +236,5 @@ public sealed class SiphonStateStore : ISiphonStateStore, IDisposable
     {
         public int Version { get; init; }
         public ManagedItem[]? Items { get; init; }
-    }
-
-    /// <summary>Enforces the same byte bound while reading or writing, even if an input grows.</summary>
-    private sealed class StateDocumentStream(Stream inner, long maximumBytes) : Stream
-    {
-        public void CheckLength()
-        {
-            if (inner.Length > maximumBytes) throw TooLarge();
-        }
-
-        private InvalidDataException TooLarge() => new(
-            $"Siphon state exceeds the {maximumBytes:N0}-byte document limit. The previous state was retained; restore a bounded backup or reduce the managed catalog before retrying.");
-
-        private int ReadLength(int requested)
-        {
-            CheckLength();
-            return (int)Math.Min(requested, Math.Max(0, maximumBytes - inner.Position));
-        }
-
-        private void AdmitWrite(int count)
-        {
-            if (count > maximumBytes - inner.Position) throw TooLarge();
-        }
-
-        public override bool CanRead => inner.CanRead;
-        public override bool CanSeek => false;
-        public override bool CanWrite => inner.CanWrite;
-        public override long Length => inner.Length;
-        public override long Position { get => inner.Position; set => throw new NotSupportedException(); }
-        public override int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, ReadLength(count));
-        public override int Read(Span<byte> buffer) => inner.Read(buffer[..ReadLength(buffer.Length)]);
-        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
-            => inner.ReadAsync(buffer[..ReadLength(buffer.Length)], cancellationToken);
-        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
-            => ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
-        public override void Write(byte[] buffer, int offset, int count)
-        {
-            AdmitWrite(count);
-            inner.Write(buffer, offset, count);
-        }
-        public override void Write(ReadOnlySpan<byte> buffer)
-        {
-            AdmitWrite(buffer.Length);
-            inner.Write(buffer);
-        }
-        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            AdmitWrite(buffer.Length);
-            return inner.WriteAsync(buffer, cancellationToken);
-        }
-        public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
-            => WriteAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
-        public override void Flush() => inner.Flush();
-        public override Task FlushAsync(CancellationToken cancellationToken) => inner.FlushAsync(cancellationToken);
-        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
-        public override void SetLength(long value) => throw new NotSupportedException();
     }
 }

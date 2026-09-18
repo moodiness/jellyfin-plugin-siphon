@@ -12,6 +12,8 @@ Siphon targets **Jellyfin 12.1** and .NET 10. The current source includes an opt
 
 **Siphon 1.6.0.0** adds private persistent downloads with pause, priority, quotas, scheduling, batch preparation and track selection; finite-HLS offline exports; signed notification adapters and optional digests; French/English controls and local operational health; verified offline backup/restore and assets-first release automation. Background downloads and external delivery remain disabled by default. It also bounds request admission and state reads, moves saved-library restoration off the host startup path, and scopes search additions/removals to the affected titles.
 
+**Current source: 1.6.1.0.** It fixes a 1.6.0.0 startup regression for existing catalog states larger than 256 MiB. The 100,000-item limit, identity validation and atomic persistence remain in place; valid metadata is not truncated to fit a byte ceiling.
+
 ## Features
 
 - Present each selected movie or series catalog as a native library, collection, or both.
@@ -73,6 +75,14 @@ The repository manifest points to the release archive and includes its Jellyfin 
 5. Configure Siphon from the plugin dashboard.
 
 The plugin directory depends on the installation method. For Docker, mount a persistent host directory at `/config/plugins` and create the versioned plugin folder there. Extract the **entire packaged archive**, including its MonoTorrent dependencies and `licenses/` directory. Do not copy arbitrary build-output assemblies: Jellyfin supplies its own 12.1 server assemblies, which are deliberately excluded from the package.
+
+### Recovering from the 1.6.0.0 large-state startup failure
+
+If the startup log reports `Siphon state exceeds the 268,435,456-byte document limit`, preserve the existing state: **do not delete or truncate `state.json`, regenerate `signing.key`, or remove the Jellyfin database**. The size check is a 1.6.0.0 regression, not evidence of a corrupt catalog or insufficient free disk space.
+
+Stop Jellyfin before replacing plugin binaries. To bring the server back without Siphon temporarily, move every Siphon version directory outside the actual plugin directory reported in its logs, then restart. Docker layouts differ: the official image commonly uses `/config/plugins`, while a deployment with program data at `/config/data` uses `/config/data/plugins`. Keep the removed binaries for rollback and leave the separate Siphon data directory untouched. Avoid library scans while the plugin is absent.
+
+Install the complete, verified 1.6.1.0-or-newer package into one matching versioned plugin directory with the server stopped, retaining the existing configuration, native database and Siphon data at their original paths. Restart and confirm both the loaded Siphon version and successful host startup. Large persisted metadata still consumes memory and disk; the fix does not silently discard records or replace invalid state with an empty catalog.
 
 ## Offline backup and restore
 
@@ -395,9 +405,9 @@ dotnet test Jellyfin.Plugin.Siphon.sln -c Release
 python3 scripts/package.py
 ```
 
-The build targets `net10.0` and Jellyfin ABI `12.1.0.0`. Release packaging verifies compiled version, PE assembly references, source provenance and runtime dependency bytes before producing `artifacts/siphon-1.6.0.0.zip`, a candidate repository manifest and internal `SHA256SUMS`. A stale binary, source/binary mismatch or incompatible ABI fails packaging. The tag for version 1.6.0.0 is `v1.6.0`; generating local artifacts does not publish another release.
+The build targets `net10.0` and Jellyfin ABI `12.1.0.0`. Release packaging verifies compiled version, PE assembly references, source provenance and runtime dependency bytes before producing `artifacts/siphon-1.6.1.0.zip`, a candidate repository manifest and internal `SHA256SUMS`. A stale binary, source/binary mismatch or incompatible ABI fails packaging. The tag for version 1.6.1.0 is `v1.6.1`; generating local artifacts does not publish another release.
 
-Release automation publishes **only the plugin ZIP and a public `SHA256SUMS` covering that ZIP**. The candidate manifest and internal package checksums remain in workflow recovery artifacts, not as release attachments. New releases require detailed, version-matching notes in `RELEASE_NOTES.txt`, headed `## Siphon <four-component version>`; the short `build.yaml` changelog remains the catalog summary.
+Release automation publishes **only the plugin ZIP and a public `SHA256SUMS` covering that ZIP**. The candidate manifest and internal package checksums remain in workflow recovery artifacts, not as release attachments. New releases take their detailed notes from the **annotated Git tag**, not a file in the source tree. The annotation must begin with `## Siphon <four-component version>`, a blank line, then the complete release notes; the short `build.yaml` changelog remains the catalog summary. For example, `git tag -a v1.6.1 --cleanup=verbatim -F -` reads the Markdown annotation from standard input without adding a notes file to the repository. Include the changes, compatibility, installation and verification details; tag signatures are excluded from the release body.
 
 The workflow uploads to a draft, checks immutable bytes, publishes, verifies public downloads, then opens or reuses a **manifest-only pull request from current main**. Retries preserve published assets and existing release notes; they never move main back to a historical tag. Do not advertise an unpublished local archive in the root manifest. Jellyfin uses the stable repository manifest URL, not a release attachment.
 
@@ -410,7 +420,7 @@ The integration harness creates its own Docker network, Jellyfin instances, acco
 ```bash
 npm ci --prefix scripts/smoke --ignore-scripts --no-audit --no-fund
 node scripts/smoke/node_modules/playwright/cli.js install chromium
-python3 scripts/smoke/run.py full --image jellyfin/jellyfin:12.1 --package artifacts/siphon-1.6.0.0.zip
+python3 scripts/smoke/run.py full --image jellyfin/jellyfin:12.1 --package artifacts/siphon-1.6.1.0.zip
 ```
 
 Docker must be running. Linux browser hosts also need Playwright's system dependencies; `--chromium-executable /absolute/path/to/chromium` selects an existing browser explicitly. Missing runtime prerequisites exit with code 77, not a passing result. The harness cleans its owned resources and exports credential-free evidence/screenshots; it neither reuses nor modifies personal Jellyfin services. These fixtures do not certify every addon, client, library size or HLS format.
