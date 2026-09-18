@@ -386,8 +386,7 @@ http {
             after = self.fixture_api.call("GET", "/control/counters")
             require(before == after, "Health refresh initiated an upstream request")
             require(health["SourceVersion"] == self.current_version, "Health source version does not match installed archive")
-            require("RepositoryVersionAtBuild" in health and health["RepositoryVersionAtBuild"] != health["SourceVersion"],
-                    "Health confuses source version and published repository version at build")
+            # The embedded catalog may already publish this source version after a release.
             serialized = json.dumps(health)
             for forbidden in (self.password, self.admin.token, self.alice.token, "http://", "https://", "/config", "/fixture", "Generated Movie", "smoke-alice"):
                 require(forbidden not in serialized, "Health exposed private runtime data")
@@ -625,8 +624,25 @@ http {
 
     def notifications(self):
         with self.step("signed-notification-adapters") as evidence:
-            self.alice.call("PUT", "/Siphon/Preferences", {"SearchMode": "Inherit", "NotificationsEnabled": True})
             self.alice.call("POST", f"/Users/{self.alice.user_id}/FavoriteItems/{self.series}")
+            self.alice.call("PUT", "/Siphon/Preferences", {"SearchMode": "Inherit", "NotificationsEnabled": True})
+            initial_episode = next(row["Id"] for row in self.items("Episode")
+                if uuid.UUID(row["SeriesId"]) == uuid.UUID(self.series) and row["IndexNumber"] == 1)
+
+            def baseline_ready():
+                # The observer deliberately suppresses the first snapshot as historical
+                # backlog. Adapter-test duration is not proof that this snapshot exists.
+                paths = list((self.temp / "config").glob("**/siphon/calendar-notifications.json"))
+                if not paths:
+                    return False
+                require(len(paths) == 1, "Owned notification baseline path is ambiguous")
+                users = json.loads(paths[0].read_text())["Users"]
+                state = next((value for key, value in users.items() if uuid.UUID(key) == uuid.UUID(self.alice.user_id)), None)
+                return state is not None and state["Enabled"] and any(
+                    uuid.UUID(row["Id"]) == uuid.UUID(initial_episode) for row in state["Observations"])
+
+            eventually(baseline_ready, timeout=150, description="durable followed-series baseline before adding an episode")
+            evidence["initialEpisodeObserved"] = True
             counts = {}
             last_test = None
             for adapter in ("Json", "Discord", "Slack", "Ntfy"):
@@ -660,6 +676,10 @@ http {
             before = len(self.fixture_api.call("GET", "/control/events"))
             self.fixture_api.call("POST", "/control/episodes", {"count": 2})
             self.sync()
+            eventually(lambda: self.items("Episode"),
+                lambda rows: any(uuid.UUID(row["SeriesId"]) == uuid.UUID(self.series) and row["IndexNumber"] == 2 for row in rows),
+                description="second native episode publication")
+            evidence["secondEpisodePublished"] = True
             inbox = eventually(lambda: self.alice.call("GET", "/Siphon/Notifications"),
                 lambda value: any(row["Kind"] == "NewEpisode" and row["Episode"]["EpisodeNumber"] == 2 for row in value["Items"]),
                 timeout=150, description="native followed-series notification")
@@ -718,8 +738,10 @@ http {
                 raise Unavailable("Playwright/browser unavailable; install scripts/smoke dependencies and the pinned Chromium, or supply --chromium-executable with an installed Chromium binary")
             stage = process.stderr.strip().removeprefix("SMOKE_STAGE=")
             safe_stage = stage if stage and len(stage) < 80 and all(character.isalpha() or character == "-" for character in stage) else "unknown"
+            if process.stdout.strip():
+                evidence.update(json.loads(process.stdout))
             require(process.returncode == 0, "Browser scenario failed at " + safe_stage + "; raw browser output withheld")
-            evidence.update(json.loads(process.stdout))
+            require(bool(process.stdout.strip()), "Browser scenario did not return evidence")
             if self.args.screenshots:
                 destination = self.args.screenshots.resolve()
                 destination.mkdir(parents=True, exist_ok=True)

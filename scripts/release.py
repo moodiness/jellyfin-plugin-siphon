@@ -124,10 +124,14 @@ def verify_public(url, expected):
 def publish_assets(repository, tag, artifacts, metadata):
     release = gh_api(repository, f"releases/tags/{tag}", allow_missing=True)
     if release is None:
-        notes = (ROOT / "RELEASE_NOTES.txt").read_text(encoding="utf-8")
+        reference = f"refs/tags/{tag}"
+        if run("git", "cat-file", "-t", reference) != "tag":
+            raise ValueError("A new release requires an annotated tag containing its detailed release notes")
+        # Keep notes on the versioned tag, not in the source tree; omit any tag signature.
+        notes = run("git", "for-each-ref", "--format=%(contents:subject)%0a%0a%(contents:body)", reference) + "\n"
         heading = f"## Siphon {metadata['version']}\n"
         if not notes.startswith(heading) or not notes[len(heading):].strip():
-            raise ValueError(f"RELEASE_NOTES.txt must contain detailed notes headed {heading.strip()!r}")
+            raise ValueError(f"The annotated tag must contain detailed notes headed {heading.strip()!r}")
         try:
             release = gh_api(repository, "releases", "POST", {
                 "tag_name": tag, "target_commitish": revision(), "name": f"v{metadata['version']}",

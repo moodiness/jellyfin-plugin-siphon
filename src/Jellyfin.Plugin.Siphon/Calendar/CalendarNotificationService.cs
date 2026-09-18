@@ -33,7 +33,7 @@ public sealed class CalendarNotificationService(ConfigurationAccessor configurat
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
     }
 
-    private async Task ObserveAsync(CancellationToken ct)
+    internal async Task ObserveAsync(CancellationToken ct)
     {
         var all = users.GetUsers().ToDictionary(user => user.Id);
         var allowed = configuration.Current.EnableCalendarNotifications;
@@ -55,7 +55,9 @@ public sealed class CalendarNotificationService(ConfigurationAccessor configurat
             if (!configuration.Current.EnableCalendarNotifications || !preferences.Get(id).NotificationsEnabled) continue;
             if (_observed.TryGetValue(id, out var observed) && observed.Revision == state.Revision
                 && observed.NextScanUtc > DateTimeOffset.UtcNow) continue;
-            if (!await configuration.SynchronizationGate.WaitAsync(0, ct).ConfigureAwait(false)) break;
+            // Native publication and webhook delivery share this gate. An immediate
+            // try-lock can starve observation when periodic services tick together.
+            if (!await configuration.SynchronizationGate.WaitAsync(TimeSpan.FromSeconds(3), ct).ConfigureAwait(false)) break;
             IReadOnlyList<CalendarNotification> generated;
             try
             {

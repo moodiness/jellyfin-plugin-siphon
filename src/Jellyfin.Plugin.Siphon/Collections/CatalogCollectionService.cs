@@ -133,19 +133,20 @@ public sealed class CatalogCollectionService(
                     ?? throw new InvalidOperationException("Jellyfin could not create its collections folder.");
                 if (Directory.Exists(Path.Combine(parent.Path, "Siphon " + hash + " [boxset]")))
                     throw new InvalidOperationException("A collection already occupies Siphon's generated storage path; it was not adopted.");
+                // Creating an empty collection queues a native refresh before links
+                // are added. Publish its initial members in the same native operation.
                 box = await collections.CreateCollectionAsync(new CollectionCreationOptions
                 {
                     Name = "Siphon " + hash,
                     IsLocked = true,
                     ProviderIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { [OwnerProvider] = owner },
-                    ItemIdList = []
+                    ItemIdList = [.. desired.Select(static id => id.ToString("N"))]
                 }).ConfigureAwait(false);
-                box.LinkedChildren = [];
                 // The storage name is private/stable; the display name follows the native catalog's custom name.
                 var view = library.GetVirtualFolders().Select(info => Guid.TryParse(info.ItemId, out var id) ? library.GetItemById(id) : null)
                     .FirstOrDefault(item => item?.GetProviderId(CatalogLibraryService.CatalogProvider) == owner);
                 box.Name = view?.Name ?? entry.Catalog.Id;
-                lock (_ledgerLock) LoadLedger().TryAdd(box.Id, new());
+                lock (_ledgerLock) LoadLedger().TryAdd(box.Id, new() { Automatic = new(desired) });
             }
             if (!box.LinkedChildrenLoaded)
                 box = library.GetItemById<BoxSet>(box.Id) ?? throw new InvalidOperationException("The catalog collection disappeared during reconciliation.");

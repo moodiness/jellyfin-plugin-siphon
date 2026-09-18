@@ -124,6 +124,27 @@ public sealed class CollectionMembershipTests
     }
 
     [Fact]
+    public async Task InitialCatalogMembersRemainAutomaticAfterRestart()
+    {
+        using var fixture = new Fixture();
+        fixture.Config.Addons = [new() { Id = "installation", Catalogs = [new() { Key = "catalog", Type = "movie", Id = "all", Presentation = "Collection" }] }];
+        var automatic = fixture.Movie("automatic");
+        var personal = fixture.Add(new Movie { Id = Guid.NewGuid(), Name = "Personal" });
+        await fixture.Catalogs.ReconcileAsync(fixture.State.Items, CancellationToken.None);
+        var generated = Assert.Single(fixture.Items.Values.OfType<BoxSet>());
+        generated.LinkedChildren = [.. generated.LinkedChildren, LinkedChild.Create(personal)];
+        await fixture.Catalogs.RecordDeliberateAsync(generated, [personal.Id], CancellationToken.None);
+
+        fixture.ReloadServices();
+        fixture.Config.Addons = [];
+        await fixture.Catalogs.ReconcileAsync(fixture.State.Items, CancellationToken.None);
+
+        var remaining = Assert.IsType<BoxSet>(fixture.Items[generated.Id]);
+        Assert.Equal(personal.Id, Assert.Single(remaining.LinkedChildren).ItemId);
+        Assert.Contains(automatic.Id, fixture.Items.Keys);
+    }
+
+    [Fact]
     public async Task MissingCatalogLinksDisappearWithoutDeletingRetainedTitlesOrDeliberateMembership()
     {
         using var fixture = new Fixture();
@@ -254,6 +275,7 @@ public sealed class CollectionMembershipTests
                 "GetItemById" => Items.GetValueOrDefault((Guid)args![0]!),
                 "GetNewItemId" => Guid.Empty,
                 "GetItemList" => Query((InternalItemsQuery)args![0]!),
+                "GetVirtualFolders" => new List<VirtualFolderInfo>(),
                 "ConfigureUserAccess" or "RegisterItem" => null,
                 "DeleteItem" => Delete((BaseItem)args![0]!),
                 _ => throw new NotSupportedException(method.Name)
@@ -262,10 +284,29 @@ public sealed class CollectionMembershipTests
             _persistence = Proxy<IItemPersistenceService>((method, _) => method.Name == "SaveItems" ? null : throw new NotSupportedException(method.Name));
             _collections = Proxy<ICollectionManager>((method, args) =>
             {
-                if (method.Name != "RemoveFromCollectionAsync") throw new NotSupportedException(method.Name);
+                if (method.Name == "GetCollectionsFolder")
+                    return Task.FromResult<Folder?>(new Folder { Path = Path.Combine(_directory, "collections") });
+                if (method.Name == "CreateCollectionAsync")
+                {
+                    var options = (CollectionCreationOptions)args![0]!;
+                    var path = Path.Combine(_directory, "collections", options.Name + " [boxset]");
+                    Directory.CreateDirectory(path);
+                    return Task.FromResult(Add(new BoxSet
+                    {
+                        Id = Guid.NewGuid(),
+                        Name = options.Name,
+                        Path = path,
+                        ProviderIds = options.ProviderIds,
+                        LinkedChildren = options.ItemIdList.Select(id => LinkedChild.Create(Items[Guid.Parse(id)])).ToArray()
+                    }));
+                }
+                if (method.Name is not ("AddToCollectionAsync" or "RemoveFromCollectionAsync"))
+                    throw new NotSupportedException(method.Name);
                 var box = (BoxSet)Items[(Guid)args![0]!];
-                var removed = ((IEnumerable<Guid>)args[1]!).ToHashSet();
-                box.LinkedChildren = box.LinkedChildren.Where(link => !removed.Contains(link.ItemId!.Value)).ToArray();
+                var ids = ((IEnumerable<Guid>)args[1]!).ToHashSet();
+                box.LinkedChildren = method.Name == "RemoveFromCollectionAsync"
+                    ? box.LinkedChildren.Where(link => !ids.Contains(link.ItemId!.Value)).ToArray()
+                    : [.. box.LinkedChildren, .. ids.Where(id => !box.LinkedChildren.Any(link => link.ItemId == id)).Select(id => LinkedChild.Create(Items[id]))];
                 return Task.CompletedTask;
             });
             ReloadServices();

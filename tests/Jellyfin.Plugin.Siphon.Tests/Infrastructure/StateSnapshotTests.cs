@@ -73,44 +73,56 @@ public sealed class StateSnapshotTests : IDisposable
     }
 
     [Fact]
-    public void OversizedMalformedDocumentIsRejectedBeforeParsingAndNeverTruncated()
+    public async Task ExistingCatalogAbove256MiBCanLoadCommitAndRestartWithoutLosingMetadata()
     {
         var paths = Paths();
         Directory.CreateDirectory(paths.DataDirectory);
         var path = Path.Combine(paths.DataDirectory, "state.json");
-        using (var file = File.Create(path))
+        // Repeated escaped metadata crosses the former aggregate limit without a huge JSON token.
+        var template = Item() with { Description = new string('é', 64 * 1024) };
+        var items = Enumerable.Range(0, 700).Select(index => template with
         {
-            file.Write(Encoding.UTF8.GetBytes("not-json"));
-            file.SetLength(SiphonStateStore.MaximumDocumentBytes + 1);
-        }
-        var error = Assert.Throws<InvalidDataException>(() => new SiphonStateStore(paths));
-        Assert.Null(error.InnerException); // Malformed JSON was not handed to the parser.
-        Assert.Equal(SiphonStateStore.MaximumDocumentBytes + 1, new FileInfo(path).Length);
-        using var retained = File.OpenRead(path);
-        var prefix = new byte[8];
-        retained.ReadExactly(prefix);
-        Assert.Equal("not-json", Encoding.UTF8.GetString(prefix));
-    }
+            Key = "movie:large-" + index,
+            ContentId = "large-" + index,
+            ContentKey = "movie:large-" + index,
+            VideoId = "large-" + index,
+            Path = Path.Combine(_directory, index + ".strm")
+        }).ToArray();
+        // Write independently of the current store, as an existing v2 catalog from 1.5.
+        await using (var stream = File.Create(path))
+            await JsonSerializer.SerializeAsync(stream, new { Items = items, Version = 2 });
+        var previousLength = new FileInfo(path).Length;
+        Assert.True(previousLength > 256L * 1024 * 1024);
 
-    [Fact]
-    public async Task WriterAcceptsExactReadBoundaryAndRejectsOneExtraByteWithoutCommitting()
-    {
-        var paths = Paths();
-        var item = Item();
-        using (var initial = new SiphonStateStore(paths))
-            await initial.SaveAsync([item], CancellationToken.None);
-        var path = Path.Combine(paths.DataDirectory, "state.json");
-        var durable = await File.ReadAllBytesAsync(path);
-        using var bounded = new SiphonStateStore(paths, durable.LongLength);
-        await bounded.SaveAsync([item], CancellationToken.None);
-        var revision = bounded.GetReadSnapshot().Revision;
-        await Assert.ThrowsAsync<InvalidDataException>(() => bounded.SaveAsync([item with { Name = item.Name + "a" }], CancellationToken.None));
-        Assert.Equal(revision, bounded.GetReadSnapshot().Revision);
-        Assert.Equal(item.Name, bounded.ReadByKey(item.Key)?.Name);
-        Assert.Equal(durable, await File.ReadAllBytesAsync(path));
-        Assert.Empty(Directory.EnumerateFiles(paths.DataDirectory, "state.json.*.tmp"));
-        using var restarted = new SiphonStateStore(paths, durable.LongLength);
-        Assert.Equal(item.Key, restarted.ReadByPath(item.Path)?.Key);
+        using (var state = new SiphonStateStore(paths))
+        {
+            AssertCatalog(state);
+            Assert.Equal(previousLength, new FileInfo(path).Length);
+            items[0] = items[0] with { Name = "Updated after upgrade" };
+            await state.SaveAsync(items, CancellationToken.None);
+            AssertCatalog(state);
+        }
+        Assert.True(new FileInfo(path).Length > 256L * 1024 * 1024);
+        using var restarted = new SiphonStateStore(paths);
+        AssertCatalog(restarted);
+
+        void AssertCatalog(SiphonStateStore state)
+        {
+            Assert.Equal(items.Length, state.GetReadSnapshot().Items.Count);
+            foreach (var expected in items)
+            {
+                var actual = Assert.IsType<ManagedItemSnapshot>(state.ReadByKey(expected.Key));
+                Assert.Equal(expected.Key, state.ReadByPath(expected.Path)?.Key);
+                Assert.Equal(expected.ContentKey, actual.ContentKey);
+                Assert.Equal(expected.VideoId, actual.VideoId);
+                Assert.Equal(expected.Name, actual.Name);
+                Assert.Equal(expected.Description, actual.Description);
+                Assert.Equal(expected.Owners, actual.Owners);
+                Assert.Equal(expected.MissingOwners, actual.MissingOwners);
+                Assert.Equal("tt1234567", actual.ProviderIds["Imdb"]);
+                Assert.Equal("Addon", actual.MetadataProvenance["Name"].Sources[0].Origin);
+            }
+        }
     }
 
     [Theory]

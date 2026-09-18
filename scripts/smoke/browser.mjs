@@ -92,18 +92,35 @@ try {
 
     // Native web login uses the actual form and Jellyfin's own ApiClient/session setup.
     stage = 'native-admin-login';
-    await page.goto(config.base + '/web/index.html#/login');
+    // Jellyfin's native return URL avoids entering and tearing down the home
+    // queries. Global network idleness is not a reliable SPA readiness signal.
+    const adminRoute = '/configurationpage?name=siphon';
+    await page.goto(config.base + '/web/index.html#/login?url=' + encodeURIComponent(adminRoute));
+    stage = 'native-login-form';
     const manual = page.locator('#btnManual, .btnManual').or(page.getByRole('button', { name: /manual login|sign in manually/i })).first();
     const username = page.locator('input[autocomplete="username"]').first();
-    await Promise.any([manual.waitFor({ state: 'visible' }), username.waitFor({ state: 'visible' })]);
-    if (await manual.isVisible()) await manual.click();
+    // The manual button is visible in the initial template, then disappears when
+    // the public-user response opens the form. Wait for a rendered login choice.
+    const publicUserCard = page.locator('#divUsers .card').first();
+    await Promise.any([publicUserCard.waitFor({ state: 'visible' }), username.waitFor({ state: 'visible' })]);
+    stage = 'native-login-manual';
+    if (!await username.isVisible()) await manual.click();
+    stage = 'native-login-username';
     await username.fill('smoke-admin');
+    stage = 'native-login-password';
     await page.locator('#txtManualPassword, input[name="password"]').first().fill(config.password);
-    await page.locator('#txtManualPassword, input[name="password"]').first().press('Enter');
-    await page.waitForURL(url => !/login/i.test(url.hash), { timeout: 30000 });
+    stage = 'native-admin-authentication';
+    const [authenticated] = await Promise.all([
+        page.waitForResponse(response => new URL(response.url()).pathname.toLowerCase().endsWith('/users/authenticatebyname')
+            && response.request().method() === 'POST'),
+        page.locator('#txtManualPassword, input[name="password"]').first().press('Enter')
+    ]);
+    evidence.nativeLoginStatus = authenticated.status();
+    assert.equal(evidence.nativeLoginStatus, 200, 'Native administrator authentication failed');
+    stage = 'native-admin-redirect';
+    await page.waitForURL(url => url.hash === '#' + adminRoute, { timeout: 30000 });
     evidence.nativeAdminLogin = true;
     stage = 'embedded-admin-load';
-    await page.goto(config.base + '/web/index.html#/configurationpage?name=siphon');
     await page.locator('#SiphonConfigPage').waitFor({ state: 'visible' });
     await page.waitForFunction(() => document.querySelector('#siphonFields')?.disabled === false);
     await keyboardTabs('#SiphonConfigPage');
@@ -133,8 +150,10 @@ try {
     stage = 'uncaught-browser-exceptions';
     assert.equal(errors.length, 0, 'A browser page emitted an uncaught exception');
     process.stdout.write(JSON.stringify(evidence));
-} catch {
+} catch (error) {
     // Never export browser exception/trace bodies: form values and URLs may carry credentials.
+    evidence.failureCode = error?.name === 'TimeoutError' ? 'timeout' : error?.name === 'AssertionError' ? 'assertion' : 'error';
+    process.stdout.write(JSON.stringify(evidence));
     process.stderr.write('SMOKE_STAGE=' + stage + '\n');
     process.exitCode = 1;
 } finally {
