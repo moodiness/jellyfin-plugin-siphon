@@ -1,6 +1,8 @@
-# Siphon
+<h1 align="center">Siphon</h1>
 
-<img src="assets/siphon.png" alt="Siphon" width="96" height="96">
+<p align="center">
+  <img src="assets/siphon.png" alt="Siphon" width="96" height="96">
+</p>
 
 Siphon brings **Stremio addons into Jellyfin**: catalogs, metadata, subtitles, and selectable stream versions through a server-side proxy and native Jellyfin libraries.
 
