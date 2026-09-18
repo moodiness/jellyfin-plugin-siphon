@@ -33,20 +33,40 @@ public sealed class NotificationWebhookService(NotificationWebhookStore store, C
     {
         var value = store.Get(userId);
         return new(Allowed(userId), value.Enabled, value.Url, value.Secret.Length > 0,
-            value.LastSuccessUtc, value.LastError, value.Pending.Length);
+            value.LastSuccessUtc, value.LastError, value.Pending.Length)
+        {
+            Adapter = value.Adapter,
+            Kinds = value.Kinds.ToArray(),
+            DigestMinutes = value.DigestMinutes,
+            LastAttemptUtc = value.LastAttemptUtc,
+            NextAttemptUtc = value.Pending.Length == 0 ? null : value.Pending.Min(entry => entry.NextAttemptUtc),
+            LastAttemptCount = value.LastAttemptCount,
+            LastOutcome = value.LastOutcome,
+            AbandonedCount = value.AbandonedCount
+        };
     }
+
+    public NotificationWebhookHealth GetHealth()
+        => store.GetHealth(configuration.Current.EnableNotificationWebhooks && configuration.Current.EnableCalendarNotifications);
 
     internal async Task ConfigureAsync(Guid userId, NotificationWebhookSettings settings, CancellationToken ct)
     {
+        settings = settings.Normalize();
         if (settings.Url is null) throw new ArgumentException("A webhook destination is required.");
         var url = settings.Url.Trim();
-        if (url.Length > 0 && (settings.Enabled || url != store.Get(userId).Url)) url = ValidateEndpoint(url).AbsoluteUri;
+        var previous = store.Get(userId);
+        if (url.Length > 0 && (settings.Enabled || url != previous.Url || settings.Adapter != previous.Adapter))
+        {
+            var endpoint = ValidateEndpoint(url);
+            ValidateEndpoint(NotificationWebhookAdapters.Endpoint(settings.Adapter, endpoint).AbsoluteUri);
+            url = endpoint.AbsoluteUri;
+        }
         if (url.Length == 0 && settings.Enabled) throw new ArgumentException("A webhook destination is required.");
         await _delivery.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             if (settings.Enabled && !Allowed(userId)) throw new InvalidOperationException("Enable calendar notifications and webhook delivery first.");
-            await store.ConfigureAsync(userId, settings.Enabled, url, Allowed(userId), inbox.Get(userId),
+            await store.ConfigureAsync(userId, settings with { Url = url }, Allowed(userId), inbox.Get(userId),
                 DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
         }
         finally { _delivery.Release(); }
@@ -66,8 +86,8 @@ public sealed class NotificationWebhookService(NotificationWebhookStore store, C
         {
             var value = store.Get(userId);
             if (!Allowed(userId) || !value.Enabled || value.Secret.Length == 0)
-                throw new InvalidOperationException("Enable all notification options and rotate a signing secret before testing.");
-            var endpoint = ValidateEndpoint(value.Url);
+                throw new InvalidOperationException("Enable notification delivery and configure a signing secret for the Json adapter before testing.");
+            var endpoint = ValidateEndpoint(NotificationWebhookAdapters.Endpoint(value.Adapter, ValidateEndpoint(value.Url)).AbsoluteUri);
             var now = DateTimeOffset.UtcNow;
             if (now - _testWindow >= TimeSpan.FromMinutes(1)) { _testWindow = now; _testsInWindow = 0; }
             if (_testsInWindow >= 8 || !await store.ReserveTestAsync(userId, now, ct).ConfigureAwait(false))
@@ -75,9 +95,11 @@ public sealed class NotificationWebhookService(NotificationWebhookStore store, C
             _testsInWindow++;
             if (!Allowed(userId)) throw new InvalidOperationException("Webhook delivery is no longer allowed.");
             var id = Guid.NewGuid();
-            var result = await PostAsync(endpoint, NotificationWebhookPayload.CreateTest(id, now), value.Secret, id, ct).ConfigureAwait(false);
+            var result = await PostAsync(endpoint, NotificationWebhookAdapters.CreateTest(value, id, now), value.Secret, id, ct).ConfigureAwait(false);
             await store.RecordTestAsync(userId, value.Generation, result.Success, DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
-            return new(result.Success, result.Success ? "Siphon webhook test delivered." : "Webhook test failed. Check the destination and its access policy.");
+            return new(result.Success, result.Success
+                ? "Webhook test accepted by the destination. Vendor receivers may ignore Siphon signing headers."
+                : "Webhook test failed. Check the destination and its access policy.", result.Success ? null : "WebhookDeliveryFailed");
         }
         finally { _delivery.Release(); }
     }
@@ -95,9 +117,13 @@ public sealed class NotificationWebhookService(NotificationWebhookStore store, C
         return uri;
     }
 
-    private bool EndpointAllowed(string url)
+    private bool EndpointAllowed(WebhookUserState value)
     {
-        try { ValidateEndpoint(url); return true; }
+        try
+        {
+            ValidateEndpoint(NotificationWebhookAdapters.Endpoint(value.Adapter, ValidateEndpoint(value.Url)).AbsoluteUri);
+            return true;
+        }
         catch (ArgumentException) { return false; }
     }
 
@@ -141,7 +167,7 @@ public sealed class NotificationWebhookService(NotificationWebhookStore store, C
                     var current = inbox.Get(id);
                     var user = users.GetUserById(id);
                     var value = store.Get(id);
-                    var allowed = Allowed(id) && EndpointAllowed(value.Url);
+                    var allowed = Allowed(id) && EndpointAllowed(value);
                     var accessible = allowed && user is not null ? calendar.FilterInbox(user, current, ct) : [];
                     await store.ObserveAsync(id, allowed, current, accessible.Select(entry => entry.Id).ToHashSet(),
                         DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
@@ -167,31 +193,47 @@ public sealed class NotificationWebhookService(NotificationWebhookStore store, C
         // Read permissions and the committed entry afresh for every attempt, including retries.
         var user = users.GetUserById(userId);
         var current = inbox.Get(userId);
-        if (!Allowed(userId) || user is null || !EndpointAllowed(state.Url))
+        if (!Allowed(userId) || user is null || !EndpointAllowed(state))
         {
             await store.ObserveAsync(userId, false, current, new HashSet<Guid>(), DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
             return;
         }
-        var notification = calendar.FilterInbox(user, current.Where(entry => entry.Id == pending.EventId).ToArray(), ct).SingleOrDefault();
-        if (notification is null)
+        if (!Authorized(user, current, pending, ct))
         {
             await store.CompleteAsync(userId, state.Generation, pending.EventId, false, false,
-                "Delivery revoked because the notification is no longer accessible.", DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
+                "Delivery revoked because a retained notification is no longer accessible.", DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
             return;
         }
         await store.BeginAttemptAsync(userId, state.Generation, pending.EventId, DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
-        // No network activity until the attempt is durable, so crashes also consume the bounded attempt budget.
+        // No network activity until both body and attempt are durable. Crashes consume the finite attempt budget.
+        state = store.Get(userId);
+        pending = state.Pending.FirstOrDefault(entry => entry.EventId == pending.EventId)!;
+        if (pending?.Body is null) return;
         user = users.GetUserById(userId);
-        if (!Allowed(userId) || user is null || calendar.FilterInbox(user, [notification], ct).Count == 0)
+        current = inbox.Get(userId);
+        if (!Allowed(userId) || user is null || !EndpointAllowed(state))
         {
             await store.ObserveAsync(userId, false, current, new HashSet<Guid>(), DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
             return;
         }
-        var result = await PostAsync(ValidateEndpoint(state.Url), NotificationWebhookPayload.Create(notification),
-            state.Secret, pending.EventId, ct).ConfigureAwait(false);
+        if (!Authorized(user, current, pending, ct))
+        {
+            await store.CompleteAsync(userId, state.Generation, pending.EventId, false, false,
+                "Delivery revoked because a retained notification is no longer accessible.", DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
+            return;
+        }
+        var endpoint = ValidateEndpoint(NotificationWebhookAdapters.Endpoint(state.Adapter, ValidateEndpoint(state.Url)).AbsoluteUri);
+        var result = await PostAsync(endpoint, pending.Body, state.Secret, pending.EventId, ct).ConfigureAwait(false);
         await store.CompleteAsync(userId, state.Generation, pending.EventId, result.Success, result.Retry,
             result.Success ? null : "Webhook delivery failed. Check the destination and its access policy.",
             DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
+    }
+
+    private bool Authorized(User user, IReadOnlyList<CalendarNotification> current, WebhookDelivery pending, CancellationToken ct)
+    {
+        var retained = pending.Notifications;
+        if (retained.Any(entry => !current.Any(committed => WebhookDelivery.SameEvent(entry, committed)))) return false;
+        return calendar.FilterInbox(user, retained, ct).Count == retained.Length;
     }
 
     private async Task<(bool Success, bool Retry)> PostAsync(Uri endpoint, string json, string secret, Guid eventId, CancellationToken ct)

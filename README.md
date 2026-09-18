@@ -6,11 +6,11 @@ Siphon brings **Stremio addons into Jellyfin**: catalogs, metadata, subtitles, a
 
 Siphon targets **Jellyfin 12.1** and .NET 10. The current source includes an opt-in, bounded MonoTorrent engine. It is not a debrid client or an external-player integration.
 
-**Latest published release: 1.5.0.0. Prepared source version: 1.6.0.0.** The repository manifest advertises the published 1.5 archive. The newer 1.6 source is merged but is not yet released; merging source does not publish a release.
+**Latest published release: 1.5.0.0. Prepared source version: 1.6.0.0.** The repository manifest advertises the published 1.5 archive. The 1.6 functionality below is not included in that archive; source changes alone do not publish a release.
 
 **Siphon 1.5.0.0** adds isolated per-user playback/subtitle addons and search preferences; durable native collections and playlists; catalog collections; selected-version resumable downloads; selective orphan-history recovery; field provenance and per-title source diagnostics; a followed-series calendar and opt-in notifications; all IntroDB timing types; and real, bounded P2P playback. It also includes native addon Search, targeted synchronization, a twenty-run decision history, provider quota/cooldown tracking, shared response caching, the supplied Siphon icon, and authoritative addon metadata with an optional missing-season-only TMDB supplement. The published package also validates media response types and constrains document rendering on media routes.
 
-**Siphon 1.6.0.0 (not yet published)** adds a private, persistent server download queue, real finite-HLS offline exports, and opt-in signed notification webhooks. Both background downloads and external delivery are disabled by default. This candidate extends the published 1.5 functionality; it is not included in the published 1.5.0.0 package.
+**Siphon 1.6.0.0 (not yet published)** adds private persistent downloads with pause, priority, quotas, scheduling, batch preparation and track selection; finite-HLS offline exports; signed notification adapters and optional digests; French/English controls and local operational health; verified offline backup/restore and assets-first release automation. Background downloads and external delivery remain disabled by default. It also bounds request admission and state reads, moves saved-library restoration off the host startup path, and scopes search additions/removals to the affected titles.
 
 ## Features
 
@@ -31,13 +31,13 @@ Siphon targets **Jellyfin 12.1** and .NET 10. The current source includes an opt
 - Assign playback and subtitle addons per Jellyfin user without changing shared catalog or metadata ownership.
 - Choose personal local-only or addon-inclusive search, with optional unreleased-title filtering.
 - Download the exact progressive or P2P version with byte-range resume and current-user permission checks.
-- Queue an exact native version for private server-side HTTP/P2P downloading or finite-HLS export, with restart recovery and bounded storage.
+- Queue an exact native version for private HTTP/P2P downloading or finite-HLS export, with pause/resume, priority, user quotas, UTC windows, selected tracks and bounded batch preparation.
 - Follow dated episodes in a personal calendar and receive opt-in, persistent release/date-change notifications.
-- Deliver opted-in calendar events to a per-user webhook with a one-time signing secret, encrypted settings and durable bounded retries.
+- Deliver opted-in calendar events as JSON, Discord, Slack or ntfy requests, with event filters, optional digests, one-time signing secrets, encrypted settings and visible bounded retries.
 - Project IntroDB intro, recap, end-credit and post-credit timings into native segments and chapters.
 - Inspect recorded field provenance and source outcomes, or preview and selectively restore proven orphaned Siphon history.
 - Stream supported torrents through an opt-in engine with connection, cache, rate and lifetime limits.
-- Manage addons and collapsible catalog selections in separate native settings tabs, alongside diagnostics, protected cleanup, and opt-in metadata providers.
+- Manage addons and catalog selections through French/English native settings, with a first-import guide, a shareable personal-portal link, aggregate local health, protected cleanup and opt-in metadata providers.
 - Enable the Cinemata addon by default as a removable example configuration. It has no catalog subscriptions selected by default.
 
 ## Requirements
@@ -74,6 +74,73 @@ The repository manifest points to the release archive and includes its Jellyfin 
 
 The plugin directory depends on the installation method. For Docker, mount a persistent host directory at `/config/plugins` and create the versioned plugin folder there. Extract the **entire packaged archive**, including its MonoTorrent dependencies and `licenses/` directory. Do not copy arbitrary build-output assemblies: Jellyfin supplies its own 12.1 server assemblies, which are deliberately excluded from the package.
 
+## Offline backup and restore
+
+Use `scripts/backup.py` from this repository to preserve a **complete, stopped Jellyfin instance**, not just Siphon's settings. It is a local filesystem utility, not a live/remote backup API. It requires Python 3.11 or newer, a current SQLite library, and local POSIX filesystem semantics on Linux/macOS. Network filesystems, Windows, symlinked trees, hard-linked files, special files, special permission bits and ambiguous installed Siphon versions are refused. Pass real, non-symlinked paths, including their ancestors.
+
+The snapshot includes the entire Jellyfin program-data tree (`data/`, `plugins/`, native library/user/history databases, server identity, metadata and library definitions) and the entire configuration tree, including every plugin configuration. Under `data/siphon/`, this includes `state.json`, the original 32-byte `signing.key`, managed library/catalog directories, recovery records, preferences, calendar/inbox state, download ownership/queue/files, encrypted webhook state and all other present private stores. These are copied together; no identities, favorites, watched state or resume positions are regenerated or merged. A configured instance with native `data/jellyfin.db`, `data/device.txt`, Siphon state/key, saved plugin configuration, and one installed Siphon DLL with matching `meta.json` is required.
+
+**Scope and path mapping:** `--program-data` means Jellyfin's whole program-data directory, not its `data/` child. `--config-dir` defaults to `PROGRAM_DATA/config`; an external configuration directory is included separately. Include custom external metadata or other required persistent trees using repeatable `--extra-root NAME=PATH`; roots must not overlap. External personal media, cache/transcode directories and logs outside the selected roots are not automatically discovered or backed up. Inventory your deployment's mounts and configured paths first. The tool does not back up the Jellyfin executable/container image; retain the exact server image/version separately.
+
+### Create, inspect and restore
+
+Stop Jellyfin cleanly and disable service/container restarters for the entire operation. Run the tool as the owning account, or as root when preserving mixed ownership. Supply every approved **numeric** owner pair with repeatable `--owner UID:GID`; unapproved source/archive owners are refused. Ownership is preserved, never remapped. In this example all instance files belong to `1000:1000`; add `--owner 0:0` only if root-owned instance files are expected. Replace the example versions with the actual stopped server and installed plugin versions.
+
+```bash
+python3 scripts/backup.py create \
+  --program-data /srv/jellyfin/config \
+  --config-dir /srv/jellyfin/config/config \
+  --output /srv/backups/jellyfin-offline.tar \
+  --jellyfin-version 12.1.0 --siphon-version 1.6.0.0 \
+  --owner 1000:1000 --ack-stopped
+```
+
+The output archive must be new, outside every source tree, and have an existing parent directory. The tool creates a private, uncompressed tar archive with strictly canonical bounded POSIX/PAX headers, per-file SHA-256 checksums and a manifest checksum, validates the copied SQLite databases, then publishes it without replacing an existing archive. PAX supports long UTF-8 names and files larger than USTAR's 8 GiB boundary; arbitrary extension records are refused. Its JSON result contains counts, versions and `archive_sha256`, not filenames, credentials or native user data. Retain that digest separately in trusted storage. The recorded Jellyfin version is the operator's assertion; the Siphon version is also checked against installed plugin metadata. Checksums detect corruption, not an attacker who can replace both archive and expected digest.
+
+```bash
+python3 scripts/backup.py validate /srv/backups/jellyfin-offline.tar \
+  --jellyfin-version 12.1.0 --siphon-version 1.6.0.0 --owner 1000:1000
+
+python3 scripts/backup.py plan /srv/backups/jellyfin-offline.tar \
+  --destination /srv/jellyfin-restored \
+  --jellyfin-version 12.1.0 --siphon-version 1.6.0.0 --owner 1000:1000
+
+python3 scripts/backup.py restore /srv/backups/jellyfin-offline.tar \
+  --destination /srv/jellyfin-restored \
+  --jellyfin-version 12.1.0 --siphon-version 1.6.0.0 \
+  --owner 1000:1000 --ack-stopped
+
+python3 scripts/backup.py verify-restored /srv/backups/jellyfin-offline.tar \
+  --destination /srv/jellyfin-restored \
+  --jellyfin-version 12.1.0 --siphon-version 1.6.0.0 \
+  --owner 1000:1000 --ack-stopped
+```
+
+For each archive-reading command, add `--sha256` followed by the separately retained `archive_sha256` to verify its expected identity. `validate` checks the entire archive, required state, checksums, members and copied SQLite integrity; `plan` performs the same checks and confirms that the selected destination is absent or empty, without restoring anything. `restore` repeats validation before staging any restored files. The destination's parent must already exist; **a populated destination is never overwritten or merged**, even if it contains newer native history. `verify-restored` checks the complete resulting inventory, file bytes, ordinary permissions and numeric ownership while the restored instance remains stopped. Starting Jellyfin changes native state, so run this comparison before its first start.
+
+The restored envelope contains `program/`, plus `config/` only when configuration was external, and one directory per extra root. In the example, mount `/srv/jellyfin-restored/program` at the original container `/config`; configuration remains its `config/` child. For an external configuration tree, mount restored `config/` at its original runtime configuration path. Reuse **the same runtime paths and native media mounts**, numeric account identities, Jellyfin version and Siphon version; managed state can contain absolute paths. The tool deliberately does not rewrite paths, upgrade schemas, rotate keys, repair orphans, or merge history. Keep the original instance stopped and untouched while evaluating the restored copy. Starting both copies can duplicate external notifications and background work.
+
+All commands are size-bounded: defaults are 128 GiB total payload, 32 GiB per file, 200,000 filesystem entries and 64 MiB metadata. Set `--max-bytes`, `--max-file-bytes` and `--max-members` explicitly for larger trusted instances, consistently on create and validation/restore. Allow space for the uncompressed archive, the complete restored tree and a private temporary copy of the largest SQLite database. No source file is intentionally modified. Source database files nevertheless require write-open permission to acquire POSIX exclusive byte-range locks.
+
+### Stopped Docker container procedure
+
+For a Linux Docker host with a bind mount `/srv/jellyfin/config:/config`, first record the exact image identifier/version, original restart policy, numeric container account, and all persistent mount destinations in your private operational records. Do not dump environment variables or a complete container inspection into shared evidence; those may contain credentials.
+
+```bash
+docker inspect --format '{{.Image}} {{.HostConfig.RestartPolicy.Name}} {{.Config.User}}' jellyfin
+docker update --restart=no jellyfin
+docker stop --time 120 jellyfin
+docker inspect --format '{{.State.Status}} {{.State.Running}} {{.State.Restarting}} {{.State.ExitCode}} {{.State.OOMKilled}}' jellyfin
+```
+
+Require a clean completed stop, `Running=false`, `Restarting=false`, and no OOM/forced-kill indication. Disable the corresponding Compose/systemd/orchestrator restart mechanism as well; changing Docker's restart policy does not stop another supervisor. Run the host Python commands above against the stopped bind-mount source. For named volumes, locate the actual volume mountpoint on the **Linux Docker host** and use it as `--program-data`; Docker Desktop VM volumes are not ordinary macOS host paths. Do not use `docker cp` from a running server, and do not restart it during copying.
+
+After restore and `verify-restored`, create an isolated replacement container using the recorded exact image and settings, bind the restored `program/` tree to the same `/config` destination, and retain the original media/mount destinations. Keep the original container stopped; use an isolated port and control outbound access during evaluation. Confirm the original native user/item IDs, favorite/watched/resume state, managed library visibility and Siphon private state before enabling scheduled work and the desired restart policy. Restoring the original container's former restart policy is an explicit operator action, not something this utility does.
+
+**Offline checks have limits:** `--ack-stopped` acknowledges that the operator has stopped the instance and all writers. The utility also refuses any SQLite WAL/SHM/journal sidecar, acquires SQLite's conventional POSIX lock-byte range on every detected database for the full source copy/comparison, checks source stability, and runs `quick_check` on copied databases. These checks can reject active SQLite readers/writers but cannot prove the absence of an idle process, a process using different locking semantics, a supervisor that restarts later, or a writer to a non-database file. Never delete sidecars to pass a check: if a forced stop left them behind, let the original server recover and then stop it cleanly before retrying.
+
+Handled interruption (Ctrl-C, SIGTERM, SIGHUP) removes private incomplete staging. SIGKILL, power loss or filesystem failure can prevent cleanup; they never make an unfinished staging file a published snapshot. After confirming no backup process remains, inspect only this tool's `.siphon-backup-*.tmp`, `.siphon-restore-*` and temporary `siphon-verify-*` entries in the chosen output/destination/temp directories. Keep incomplete data private and remove only entries known to belong to the interrupted operation. Archives and temporary copies contain credentials, signing material, private history and possibly downloaded media: use private storage and authenticated encryption for retained/off-host copies.
+
 ## First configuration
 
 1. Open **Dashboard → Siphon** in the **Plugins** sidebar section. The configuration page also remains accessible through **Plugins → My Plugins → Siphon**.
@@ -85,7 +152,7 @@ The plugin directory depends on the installation method. For Docker, mount a per
 
 Catalogs share the same canonical media identities rather than importing a separate copy for every row. Series contain native seasons and episodes. Siphon manages the backing directories under its private data directory; no manual Movies/TV Shows target path, `.strm` file, or NFO file is required.
 
-Libraries are restored from saved state on startup without another addon fetch. Existing personal libraries are not adopted. Migration from previous Siphon library layouts retains canonical item IDs and user state, moves their descendants together, and transfers the old library's access and home preferences. A mixed library containing personal media retains its unrelated paths and permissions.
+Libraries are restored from saved state without another addon fetch. Restoration starts in the background **after Jellyfin reports host startup complete**, rather than blocking its startup screen. Tasks records the startup run, including cancellation or failure; stopping the server cancels and joins the owned worker. Existing personal libraries are not adopted. Migration from previous Siphon library layouts retains canonical item IDs and user state, moves their descendants together, and transfers the old library's access and home preferences. A mixed library containing personal media retains its unrelated paths and permissions.
 
 Enabling or disabling a catalog controls its presentation and importing; retained media and its state are not automatically deleted. **Remove items no longer returned by enabled catalogs** remains the explicit removal control. Empty catalog libraries keep a stable identity.
 
@@ -128,9 +195,11 @@ The latest **twenty executions** survive restarts, with additions, changes, unch
 
 Jellyfin's ordinary global **Search** searches compatible enabled addons alongside accessible native library results. It does not require opening Siphon's settings. Only advertised search catalogs whose required filters can be satisfied are queried; catalog subscriptions are not required for discovery.
 
-Search cards are lightweight previews. Displaying a card or fetching its image does not load full metadata. Opening a selected title loads that title's details and, for a series, its native seasons and episodes. Existing canonical items retain their identities instead of being duplicated. Search does not queue addon work behind synchronization; already available local results remain usable.
+Search cards are lightweight previews and do not publish series episodes. If a catalog result lacks a usable poster, the bounded search may fetch that title's metadata to obtain artwork; simply displaying the card or requesting its image does not expand the title. Opening a selected title loads its details and native seasons/episodes. Existing canonical items retain their identities instead of being duplicated. Search does not queue addon work behind synchronization; already available local results remain usable.
 
 Administrators can also use **Siphon → Search & additions → Add to library** to retain a discovery outside any selected catalog. Adding the same title again is idempotent. Adding a discovery through Jellyfin's native collection or playlist actions also makes it durable, without changing its canonical ID or relaxing native permissions. A discovery favorited, played, or started by any user is retained by periodic maintenance. Saved additions survive synchronization and restarts in native **Siphon saved** libraries.
+
+**Remove saved addition** is available on search results and saved-addition rows. It requires administrator confirmation because it changes the shared library for all users, not just a personal list. Removing the explicit saved owner leaves catalog-owned content available; manual-only native items are removed. Jellyfin's retained history is reattached on a later addition when the native user-data keys match unambiguously. Adding or removing a title reconciles only its affected native items, rather than hydrating and republishing every managed item.
 
 Unprotected previews expire after 24 hours and are limited to 300 titles. Preview libraries stay out of My Media and recently-added rows. Jellyfin's library visibility rules still apply to search results and detail expansion. If user protection data is unavailable, maintenance retains previews rather than risking removal of a favorite or resume item.
 
@@ -150,13 +219,13 @@ Notifications require both the administrator's **Enable calendar notifications**
 
 ### Signed external notification webhooks
 
-External delivery additionally requires the administrator's **Enable notification webhooks** setting and the user's saved webhook opt-in under **My Siphon → Notifications**. It sends calendar-event metadata, including series/episode titles and announced dates, to the destination the user chooses. This is not a browser-push or vendor-specific mobile-push integration.
+External delivery additionally requires the administrator's **Enable notification webhooks** setting and the user's saved opt-in under **My Siphon → Notifications**. Choose **JSON** for a custom receiver, or the explicit **Discord**, **Slack** or **ntfy** adapter for its destination format. Select eligible event kinds and optionally group notifications into a digest. These requests disclose permitted series/episode titles and announced dates to the chosen destination; this is not browser push or a guarantee of mobile delivery.
 
-Save the destination, generate a signing secret and copy it to the receiver, then use **Send test**. Secrets are shown only when generated; ordinary status reads never reveal them. Tests are explicit synthetic events, and a failed send is reported as failure. Tests are limited to one per user per minute and eight server-wide per minute. URLs require HTTPS unless an administrator permits the exact hostname; embedded credentials, fragments, redirects and disallowed private destinations are rejected.
+Save the destination, generate a signing secret, then use **Send test**. For a receiver you operate, copy the secret to that receiver and verify requests as described below. Secrets are shown only when generated; ordinary status reads never reveal them. Tests are explicit synthetic events, and a failed send is reported as failure. Tests are limited to one per user per minute and eight server-wide per minute. URLs require HTTPS unless an administrator permits the exact hostname; embedded credentials, fragments, redirects and disallowed private destinations are rejected.
 
-Each POST carries `X-Siphon-Event-Id` (a UUID) and `X-Siphon-Signature` (`sha256=` followed by lowercase hexadecimal HMAC-SHA256). Base64-decode the generated secret to obtain the 32-byte key, verify the **exact received UTF-8 request body** with a constant-time comparison, and deduplicate by event ID. The version-1 JSON payload contains `Type`, `EventId`, `CreatedUtc`, `Test`, and, for `calendar.notification`, `Kind`, `Episode`, `PreviousAnnouncedReleaseUtc` and `AvailabilityNote`. Synthetic events use `Type: webhook.test` and `Test: true`. Reading an inbox item does not change a retry's payload.
+Every adapter's POST carries `X-Siphon-Event-Id` (a UUID) and `X-Siphon-Signature` (`sha256=` followed by lowercase hexadecimal HMAC-SHA256). Base64-decode the generated secret to obtain the 32-byte key, verify the **exact received UTF-8 request body** with a constant-time comparison, and deduplicate by event ID. The JSON adapter's version-1 payload contains `Type`, `EventId`, `CreatedUtc`, `Test`, and, for `calendar.notification`, `Kind`, `Episode`, `PreviousAnnouncedReleaseUtc` and `AvailabilityNote`. JSON synthetic events use `Type: webhook.test` and `Test: true`; grouped delivery uses `calendar.digest`. Other adapters use their destination-specific body. Reading an inbox item does not change a retry's payload.
 
-Delivery is bounded, at-least-once rather than guaranteed: at most five attempts, with 30/120/480/1920-second backoffs and a 24-hour expiry. Network failures, HTTP 408/429 and 5xx are retryable; other HTTP failures are terminal. Pending state, attempts and event IDs survive restart. Setup, reconfiguration and secret rotation establish a baseline instead of sending an existing inbox backlog. Opt-out and lost item/account access stop further eligible delivery; an already-transmitted request cannot be recalled.
+Delivery is bounded, at-least-once rather than guaranteed: at most five attempts, with 30/120/480/1920-second backoffs and a 24-hour expiry. Network failures, HTTP 408/429 and 5xx are retryable; other HTTP failures are terminal. The portal shows delivery state, the latest attempt, the next attempt and the safe reason for abandonment. Pending state, attempts and event IDs survive restart. Setup, reconfiguration and secret rotation establish a baseline instead of sending an existing inbox backlog. Opt-out and lost item/account access stop further eligible delivery; an already-transmitted request cannot be recalled.
 
 Settings, secrets and delivery state are encrypted together with AES-GCM in the private plugin data directory, using a domain-separated key derived from Siphon's signing key. Protect that key and backups: encryption does not hide data from the Jellyfin administrator. Storage is capped at 1,024 users, 200 pending deliveries per user, 10,000 total pending deliveries and a 16 MiB encrypted document.
 
@@ -281,17 +350,21 @@ Choose **Download this version** for a progressive or P2P source. The short-live
 
 ### Persistent private offline downloads
 
-An administrator first enables **Private offline downloads** under **Playback & P2P**. A user with native Jellyfin download permission selects **Queue offline** on a specific version, then opens **Downloads** to follow progress, cancel, retry, delete or save a completed file. Closing the portal does not cancel work. The queue is private to the authenticated account; even an administrator cannot select another user's bound native version or impersonate its queue with a `userId` query parameter.
+An administrator first enables **Private offline downloads** under **Playback & P2P**. A user with native Jellyfin download permission selects **Queue offline** on an exact version, then opens **Downloads** to inspect the phase, bytes, measured rate and any available remaining-time estimate; pause/resume, change priority, cancel, retry, delete or save a completed file. Estimates are withheld when the available totals cannot support them. Closing the portal does not cancel work. The queue is private to the authenticated account; even an administrator cannot select another user's bound native version or impersonate its queue with a `userId` query parameter.
 
-Defaults are **2 concurrent jobs**, **51,200 MiB shared storage**, **10,240 MiB per job**, **20 retained jobs per user** and **7-day retention**. A job's budget includes temporary files and its result, not just the final video's size. HLS staging can therefore require substantially more space than the finished file. P2P also uses the independently bounded torrent cache. The portal shows only the user's retained bytes against the shared server limit, not other users' files or free capacity.
+Defaults are **2 concurrent jobs**, **51,200 MiB shared storage**, **20,480 MiB per user**, **10,240 MiB per job**, **20 retained jobs per user** and **7-day retention**. A job's budget includes temporary files and its result, not just the final video's size. HLS staging can therefore require substantially more space than the finished file. P2P also uses the independently bounded torrent cache. The portal shows the current user's storage and quota without exposing other users' files.
 
-The private ledger stores stable native/source identities and configuration digests, not upstream URLs or request credentials. A worker re-resolves the exact selected source; disappearance or changed authority fails rather than silently selecting a different version. Interrupted running jobs return to the queue after restart. HTTP appends only when a strong ETag, known total length and exact returned range identify the same representation; absent/changed validators safely restart. P2P partial reuse is bound to the exact torrent file. HLS restages rather than appending an incomplete container.
+The private ledger stores stable native/source identities and configuration digests, not upstream URLs or request credentials. A worker re-resolves the exact selected source; disappearance or changed authority fails rather than silently selecting a different version. Interrupted running jobs return to the queue after restart; an individually paused job stays paused. HTTP appends only when a strong ETag, known total length and exact returned range identify the same representation; absent/changed validators safely restart. P2P partial reuse is bound to the exact torrent file. **HLS resumes by fresh staging:** previously downloaded segments are fetched again, not appended to an incomplete container.
 
 Disabling the queue pauses work and withholds file access. Explicit cancellation survives restart; retry is deliberate. Current account, library, download rights and playback/transport configuration are rechecked during work and file reads. Cancelled writers stop before their reservations can be reused. Completed files use five-minute, in-memory capability links with `GET`, `HEAD` and byte-range support; links expire on restart and reject authenticated foreign users. Retention/delete operations touch only owned private artifacts.
+
+Priorities range from **−10 to 10**. An optional **UTC download window** controls when background workers write; it does not remove access to already completed files. Batch preparation previews the available exact versions before explicit submission. Its user-bound confirmation expires after five minutes and can be consumed only once; preparation alone does not enqueue work.
 
 ### Finite HLS offline exports
 
 **Queue offline** exports supported finite HLS to a real Matroska file using Jellyfin's configured **FFmpeg and FFprobe**. It selects one coherent video variant, preserves its matching audio renditions, assembles segmented WebVTT subtitle renditions with timestamp-map handling, and supports identity AES-128. Encoded audio/video are copied, not re-encoded. ADTS AAC receives a bounded fragmented-MP4 preparation pass when codec configuration is missing, so Matroska output remains strictly byte-bounded without needing a seekable child-process output.
+
+Preparation exposes available audio/subtitle choices and conservative temporary-storage information before enqueueing. An omitted track selection preserves all supported matching tracks, an empty selection omits that track kind, and explicit selections are validated against the chosen source. Audio-only HLS is currently rejected with an explicit unsupported-format error; Siphon does not promise audio extraction or append-resume for HLS.
 
 All playlists, segments and keys are fetched through Siphon's checked HTTP transport and staged under generated local filenames. Probe/remux inputs permit only local file/crypto protocols and restricted demuxer formats; every subprocess output is copied through the same storage budget. Cancellation, idle deadlines, quotas and process deadlines stop and reap owned children. Keep the native media tools patched; these restrictions are not an operating-system sandbox.
 
@@ -322,9 +395,23 @@ dotnet test Jellyfin.Plugin.Siphon.sln -c Release
 python3 scripts/package.py
 ```
 
-The build targets `net10.0` and Jellyfin ABI `12.1.0.0`. Release packaging produces `artifacts/siphon-1.6.0.0.zip`, a repository manifest, and `SHA256SUMS`. The intended release tag is `v1.6.0`; generating these files does not create a tag or publish a release. The release workflow publishes only the plugin ZIP and `SHA256SUMS`, and updates the root `manifest.json` in the repository. Until publication, do not replace the repository manifest with a local generated manifest: its 1.6.0.0 download URL is not live. Jellyfin should use the stable repository manifest URL above, not a release attachment.
+The build targets `net10.0` and Jellyfin ABI `12.1.0.0`. Release packaging verifies compiled version, PE assembly references, source provenance and runtime dependency bytes before producing `artifacts/siphon-1.6.0.0.zip`, a repository manifest and `SHA256SUMS`. A stale binary, source/binary mismatch or incompatible ABI fails packaging. The intended tag is `v1.6.0`; generating artifacts does not create it or publish a release.
 
-The ZIP includes the supplied `siphon.png` icon, its `meta.json` declaration, MonoTorrent's runtime dependency closure, and dependency licenses. It deliberately excludes Jellyfin's own SDK/server assemblies. The plugin also serves the unchanged embedded image at `/Siphon/Icon`; the repository manifest references `assets/siphon.png`. Local source builds remain unreleased until an explicit versioned release is published.
+Release automation uploads verified assets to a draft, checks immutable bytes, publishes, verifies the public downloads, then opens or reuses a **manifest-only pull request from current main**. Retries do not overwrite published assets or move main back to a historical tag. Until publication, do not replace the root manifest with a locally generated one: its 1.6.0.0 download URL is not live. Jellyfin uses the stable repository manifest URL, not a release attachment.
+
+The ZIP includes the padded `siphon-jellyfin.png` catalog image, its `meta.json` declaration, MonoTorrent's runtime dependency closure and dependency licenses. It excludes Jellyfin's own SDK/server assemblies. The new 1280×720 image keeps the complete mark inside Jellyfin's card crop; the original `assets/siphon.png` and the image served at `/Siphon/Icon` remain unchanged. The repository manifest references `assets/siphon-jellyfin.png`.
+
+### Owned Jellyfin runtime checks
+
+The integration harness creates its own Docker network, Jellyfin instances, accounts and generated legal media. It exercises the actual ZIP, native playback/download routes, account isolation, queue restart, notification delivery, media segments and browser actions. The full scenario also installs the pinned published 1.4.1 binary before upgrading and checking retained native IDs, history and collections.
+
+```bash
+npm ci --prefix scripts/smoke --ignore-scripts --no-audit --no-fund
+node scripts/smoke/node_modules/playwright/cli.js install chromium
+python3 scripts/smoke/run.py full --image jellyfin/jellyfin:12.1 --package artifacts/siphon-1.6.0.0.zip
+```
+
+Docker must be running. Linux browser hosts also need Playwright's system dependencies; `--chromium-executable /absolute/path/to/chromium` selects an existing browser explicitly. Missing runtime prerequisites exit with code 77, not a passing result. The harness cleans its owned resources and exports credential-free evidence/screenshots; it neither reuses nor modifies personal Jellyfin services. These fixtures do not certify every addon, client, library size or HLS format.
 
 ## License
 

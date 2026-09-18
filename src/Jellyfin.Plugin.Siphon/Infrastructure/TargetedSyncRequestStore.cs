@@ -11,6 +11,12 @@ public sealed record SyncTarget(string? CatalogKey = null, string? ContentKey = 
         => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(addonId.Length + ":" + addonId + subscriptionKey)));
 
     public void Validate(PluginConfiguration config, IReadOnlyCollection<ManagedItem> items)
+        => Validate(config, ContentKey is not null && items.Any(item => item.Type == "series" && !item.IsSearchPreview && item.ContentKey == ContentKey));
+
+    public void Validate(PluginConfiguration config, SiphonReadSnapshot snapshot)
+        => Validate(config, ContentKey is not null && snapshot.Items.Any(item => item.Type == "series" && !item.IsSearchPreview && item.ContentKey == ContentKey));
+
+    private void Validate(PluginConfiguration config, bool containsSeries)
     {
         if ((CatalogKey is null) == (ContentKey is null)
             || CatalogKey is not null && string.IsNullOrWhiteSpace(CatalogKey)
@@ -21,7 +27,7 @@ public sealed record SyncTarget(string? CatalogKey = null, string? ContentKey = 
             .SelectMany(addon => addon.Catalogs.Where(catalog => catalog.Enabled)
                 .Select(catalog => CatalogIdentity(addon.Id, catalog.Key))).Count(key => key == CatalogKey) != 1)
             throw new KeyNotFoundException("The catalog is missing, disabled, or ambiguous. Reload the target list and select an enabled catalog.");
-        if (ContentKey is not null && !items.Any(item => item.Type == "series" && !item.IsSearchPreview && item.ContentKey == ContentKey))
+        if (ContentKey is not null && !containsSeries)
             throw new KeyNotFoundException("The series is no longer in Siphon. Reload the target list and select an existing series.");
     }
 }

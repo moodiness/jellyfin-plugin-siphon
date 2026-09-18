@@ -48,6 +48,28 @@ public sealed class DownloadQueueStoreTests : IDisposable
         Assert.NotNull(store.TryStart(pending.Id, 2, 200, 100));
         Assert.Equal(160, store.Snapshot().Sum(job => job.State == DownloadJobState.Running ? job.ReservedBytes : job.StoredBytes));
     }
+    [Fact]
+    public void UserQuotaCountsPausedPartialsAndStoppingReservations()
+    {
+        var store = new DownloadQueueStore(_directory);
+        var owner = Guid.NewGuid();
+        var paused = store.Add(Job() with { UserId = owner, State = DownloadJobState.Paused, StoredBytes = 30 }, 20);
+        var running = store.Add(Job() with { UserId = owner, ItemKey = "movie:running" }, 20);
+        var queued = store.Add(Job() with { UserId = owner, ItemKey = "movie:queued" }, 20);
+        Assert.NotNull(store.TryStart(running.Id, 4, 1000, 100, 150));
+        store.Update(running.Id, job => job with { State = DownloadJobState.Paused });
+        Assert.Null(store.TryStart(queued.Id, 4, 1000, 100, 150));
+        var stranger = store.Add(Job(), 20);
+        Assert.NotNull(store.TryStart(stranger.Id, 4, 1000, 100, 150));
+        store.Update(running.Id, job => job with { ReservedBytes = 0, StoredBytes = 20 });
+        Assert.NotNull(store.TryStart(queued.Id, 4, 1000, 100, 150));
+        var recovered = new DownloadQueueStore(_directory);
+        recovered.Recover();
+        Assert.Equal(DownloadJobState.Paused, recovered.Find(paused.Id, owner)!.State);
+        Assert.Equal(DownloadJobState.Paused, recovered.Find(running.Id, owner)!.State);
+        Assert.Equal(30, recovered.Find(paused.Id, owner)!.StoredBytes);
+    }
+
 
     [Fact]
     public void FailedCommitDoesNotPublishAJobOrLoseItsPredecessor()

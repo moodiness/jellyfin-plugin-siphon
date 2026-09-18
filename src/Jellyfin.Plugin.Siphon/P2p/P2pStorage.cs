@@ -35,15 +35,17 @@ internal static class P2pStorage
             throw new IOException("Torrent contains an unsafe file path.");
     }
 
-    internal static long Size(string root)
+    internal static long Size(string root, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         CheckPath(root, root);
         if (!Directory.Exists(root)) return 0;
         long bytes = 0;
         foreach (var entry in Directory.EnumerateFileSystemEntries(root))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             CheckPath(root, entry);
-            bytes = checked(bytes + (Directory.Exists(entry) ? Size(entry) : new FileInfo(entry).Length));
+            bytes = checked(bytes + (Directory.Exists(entry) ? Size(entry, cancellationToken) : new FileInfo(entry).Length));
         }
 
         return bytes;

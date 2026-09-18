@@ -26,9 +26,9 @@ public sealed class SiphonProxyController(
 {
     private static readonly SemaphoreSlim GlobalSlots = new(64, 64);
     private static readonly SemaphoreSlim ResolutionGate = new(4, 4);
-    private static readonly object RateGate = new();
-    private static long _rateWindow;
-    private static int _rateCount;
+    private static readonly PlaybackRequestBudget InvalidRequests = new();
+    private static readonly PlaybackRequestBudget PlaybackRequests = new();
+    private static readonly PlaybackRequestBudget ImageRequests = new();
 
     [HttpGet("s/{token}")]
     [HttpHead("s/{token}")]
@@ -51,7 +51,7 @@ public sealed class SiphonProxyController(
         var session = sessions.Get(token);
         if (session is not { Download: true } || !access.AllowsLease(session, download: true))
         {
-            Response.StatusCode = 404;
+            InvalidReference();
             return;
         }
         await downloads.RelayAsync(HttpContext, session.Source, HttpContext.RequestAborted).ConfigureAwait(false);
@@ -61,19 +61,14 @@ public sealed class SiphonProxyController(
     private async Task ExecuteAsync(string token, int tokenKind)
     {
         var ct = HttpContext.RequestAborted;
-        if (!AllowRequest() || !GlobalSlots.Wait(0))
-        {
-            Reject();
-            return;
-        }
-
+        var admitted = false;
         ProxySession? session = null;
         var acquired = false;
         try
         {
             if (token.Length > 4096)
             {
-                Response.StatusCode = 404;
+                InvalidReference();
                 return;
             }
 
@@ -86,7 +81,7 @@ public sealed class SiphonProxyController(
                     : tokens.TryReadItem(token, out key);
                 if (!valid || state.FindByKey(key) is not { } item)
                 {
-                    Response.StatusCode = 404;
+                    InvalidReference();
                     return;
                 }
 
@@ -95,9 +90,11 @@ public sealed class SiphonProxyController(
                 if (userId == Guid.Empty || !access.CanPlay(userId) || (User.Identity?.IsAuthenticated == true && current is null) || (current is not null && current.Id != userId)
                     || access.FindVideo(key, userId, sourceId) is null)
                 {
-                    Response.StatusCode = 404;
+                    InvalidReference();
                     return;
                 }
+                if (!TryAdmit(PlaybackRequests, userId.ToString("N"))) return;
+                admitted = true;
                 var selectionKey = userId.ToString("N") + "|" + (sourceId is null ? key : key + "|" + sourceId);
 
                 session = sessions.GetDefault(selectionKey);
@@ -139,8 +136,13 @@ public sealed class SiphonProxyController(
 
             if (session is null || session.Download || state.FindByKey(session.ItemKey) is null || !access.AllowsLease(session))
             {
-                Response.StatusCode = 404;
+                InvalidReference();
                 return;
+            }
+            if (!admitted)
+            {
+                if (!TryAdmit(PlaybackRequests, session.Source.UserId.ToString("N"))) return;
+                admitted = true;
             }
 
             if (!sessions.TryAcquire(session))
@@ -175,7 +177,7 @@ public sealed class SiphonProxyController(
                 sessions.Complete(session);
             }
 
-            GlobalSlots.Release();
+            if (admitted) GlobalSlots.Release();
         }
     }
     private async Task ExecuteImageAsync(string token, string? type)
@@ -183,18 +185,14 @@ public sealed class SiphonProxyController(
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
         deadline.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(configuration.Current.AddonTimeoutSeconds, 1, 120)));
         var ct = deadline.Token;
-        if (!AllowRequest() || !GlobalSlots.Wait(0))
-        {
-            Reject();
-            return;
-        }
+        var admitted = false;
 
         try
         {
             if (token.Length > 4096 || type is { Length: > 32 } || !tokens.TryReadItem(token, out var key)
-                || (state.FindByKey(key) ?? state.FindByContentKey(key)) is not { } item)
+                || (state.ReadByKey(key) ?? state.ReadByContentKey(key)) is not { } item)
             {
-                Response.StatusCode = 404;
+                InvalidReference();
                 return;
             }
 
@@ -203,7 +201,7 @@ public sealed class SiphonProxyController(
             {
                 null or "" or "poster" => item.PosterUrl,
                 "season" => item.SeasonPosterUrl,
-                "primary" => item.Type == "series" ? item.ThumbnailUrl : item.PosterUrl,
+                "primary" => item.Type == "series" && key != item.ContentKey ? item.ThumbnailUrl : item.PosterUrl,
                 "thumbnail" => item.ThumbnailUrl,
                 "backdrop" => item.BackdropUrl,
                 "logo" => item.LogoUrl,
@@ -215,9 +213,11 @@ public sealed class SiphonProxyController(
             };
             if (!Uri.TryCreate(image, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
             {
-                Response.StatusCode = 404;
+                InvalidReference();
                 return;
             }
+            if (!TryAdmit(ImageRequests, PlaybackRequestBudget.Client(HttpContext))) return;
+            admitted = true;
 
             using var upstream = await http.SendAsync(uri, HttpMethod.Get, null, ct).ConfigureAwait(false);
             if (!upstream.IsSuccessStatusCode || upstream.Content.Headers.ContentLength is > 8 * 1024 * 1024)
@@ -265,20 +265,20 @@ public sealed class SiphonProxyController(
         }
         finally
         {
-            GlobalSlots.Release();
+            if (admitted) GlobalSlots.Release();
         }
     }
 
-    private static string? CreditPhoto(ManagedPerson[] people, ReadOnlySpan<char> index)
+    private static string? CreditPhoto(IReadOnlyList<ManagedPerson> people, ReadOnlySpan<char> index)
         => int.TryParse(index, NumberStyles.None, CultureInfo.InvariantCulture, out var position)
-            && (uint)position < (uint)people.Length ? people[position].PhotoUrl : null;
+            && (uint)position < (uint)people.Count ? people[position].PhotoUrl : null;
 
 
     private async Task ProxyAsync(ProxySession session, CancellationToken ct)
     {
         if (session.Source.P2p is not null)
         {
-            await downloads.RelayP2pAsync(HttpContext, session.Source, attachment: false, ct).ConfigureAwait(false);
+            await downloads.RelayP2pPlaybackAsync(HttpContext, session.Source, ct).ConfigureAwait(false);
             return;
         }
         using var readDeadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -333,9 +333,12 @@ public sealed class SiphonProxyController(
         }
 
         var finalUrl = upstream.RequestMessage?.RequestUri ?? session.Source.Url;
-        // An upstream extension is not proof of binary content. Classify nonzero ranges
-        // from byte zero so a mislabeled playlist cannot expose unrewritten resource URLs.
-        if (upstream.StatusCode == HttpStatusCode.PartialContent && upstream.Content.Headers.ContentRange?.From > 0)
+        var rootMedia = session.RootToken == session.Token;
+        var classifiedBinary = false;
+        // Every ranged root is classified from byte zero, even bytes=0-1. HLS
+        // children can also be playlists, but keys and encrypted segments are opaque.
+        if (upstream.StatusCode == HttpStatusCode.PartialContent
+            && (rootMedia || upstream.Content.Headers.ContentRange?.From > 0))
         {
             var classificationHeaders = new Dictionary<string, string>(session.Source.RequestHeaders, StringComparer.OrdinalIgnoreCase)
             {
@@ -367,6 +370,11 @@ public sealed class SiphonProxyController(
                 await using var fullBody = await full.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
                 await WritePlaylistAsync(session, fullBody, ReadOnlyMemory<byte>.Empty, full.RequestMessage?.RequestUri ?? finalUrl, readDeadline, ct).ConfigureAwait(false);
                 return;
+            }
+            if (rootMedia)
+            {
+                NativeMediaClassifier.RequireSupported(start.AsSpan(0, length));
+                classifiedBinary = true;
             }
         }
         var mediaType = upstream.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
@@ -403,6 +411,8 @@ public sealed class SiphonProxyController(
 
             return;
         }
+        if (rootMedia && !classifiedBinary)
+            NativeMediaClassifier.RequireSupported(prefix.AsSpan(0, prefixLength));
 
         Response.StatusCode = (int)upstream.StatusCode;
         Response.ContentType = GetMediaContentType(mediaType);
@@ -511,18 +521,23 @@ public sealed class SiphonProxyController(
         Response.Headers.RetryAfter = "2";
     }
 
-    private static bool AllowRequest()
+    private void InvalidReference()
     {
-        lock (RateGate)
-        {
-            var now = Environment.TickCount64 / 1000;
-            if (_rateWindow != now)
-            {
-                _rateWindow = now;
-                _rateCount = 0;
-            }
+        if (InvalidRequests.Allow(PlaybackRequestBudget.Client(HttpContext))) Response.StatusCode = 404;
+        else Reject();
+    }
 
-            return ++_rateCount <= 128;
+    private bool TryAdmit(PlaybackRequestBudget budget, string client)
+    {
+        if (!GlobalSlots.Wait(0))
+        {
+            Reject();
+            return false;
         }
+
+        if (budget.Allow(client)) return true;
+        GlobalSlots.Release();
+        Reject();
+        return false;
     }
 }

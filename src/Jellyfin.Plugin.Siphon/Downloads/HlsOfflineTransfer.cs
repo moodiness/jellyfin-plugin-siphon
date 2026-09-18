@@ -7,7 +7,7 @@ using MediaBrowser.Controller.MediaEncoding;
 
 namespace Jellyfin.Plugin.Siphon.Downloads;
 
-internal sealed class HlsOfflineTransfer(ISafeHttpClient http, IMediaEncoder encoder, ResolvedStream source, DownloadTransferWorkspace workspace)
+internal sealed class HlsOfflineTransfer(ISafeHttpClient http, IMediaEncoder encoder, ResolvedStream source, DownloadTransferWorkspace workspace, DownloadTransferOptions options)
 {
     private readonly Dictionary<(Uri Url, HlsByteRange? Range, HlsResourceKind Kind), string> _resources = [];
     private readonly Dictionary<Uri, string> _playlists = [];
@@ -21,7 +21,7 @@ internal sealed class HlsOfflineTransfer(ISafeHttpClient http, IMediaEncoder enc
     internal async Task<DownloadTransferResult> TransferAsync(Stream root, ReadOnlyMemory<byte> prefix, Uri finalUrl, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(encoder.EncoderPath) || !File.Exists(encoder.EncoderPath))
-            throw new InvalidOperationException("Offline HLS requires Jellyfin's configured FFmpeg encoder.");
+            throw new DownloadSelectionException("Offline HLS requires Jellyfin's configured FFmpeg encoder. Configure the media tools or choose a progressive source.");
         var text = await ReadPlaylistAsync(root, prefix, cancellationToken).ConfigureAwait(false);
         var manifest = HlsOfflineManifest.Parse(text, finalUrl);
         string input;
@@ -30,11 +30,8 @@ internal sealed class HlsOfflineTransfer(ISafeHttpClient http, IMediaEncoder enc
         if (manifest.IsMaster)
         {
             // Exactly one rendition: never switch to a different variant after a failed request.
-            var selected = manifest.Variants.OrderByDescending(variant => variant.HasVideo).ThenByDescending(variant => variant.Bandwidth).First();
-            var audio = manifest.Renditions.Where(rendition => rendition.Type == "AUDIO" && rendition.Group == selected.Audio).ToArray();
-            var subtitles = manifest.Renditions.Where(rendition => rendition.Type == "SUBTITLES" && rendition.Group == selected.Subtitles).ToArray();
-            if ((selected.Audio is not null && audio.Length == 0) || (selected.Subtitles is not null && subtitles.Length == 0))
-                throw new InvalidDataException("The selected HLS variant references a missing rendition group.");
+            var selected = DownloadPreparationService.SelectVariant(manifest);
+            var (audio, subtitles) = DownloadPreparationService.SelectRenditions(manifest, selected, options);
             if (audio.Length + subtitles.Length + 2 > HlsOfflineManifest.MaximumPlaylists)
                 throw new InvalidDataException("The selected HLS variant has too many rendition playlists.");
             if (audio.Concat(subtitles).GroupBy(rendition => (rendition.Type, rendition.Name)).Any(group => group.Count() != 1))
@@ -64,19 +61,22 @@ internal sealed class HlsOfflineTransfer(ISafeHttpClient http, IMediaEncoder enc
         }
         else
         {
+            if (options.AudioLanguages is { Length: > 0 } || options.SubtitleLanguages is { Length: > 0 })
+                throw new DownloadSelectionException("This media playlist does not advertise languages. Retain all tracks, select none, or choose a master playlist.");
             input = await StageMediaAsync(manifest, cancellationToken).ConfigureAwait(false);
         }
 
-        await workspace.ReportAsync(_received, _received, force: true).ConfigureAwait(false);
+        await workspace.ReportAsync(_received, null, force: true, phase: "PreparingAudio").ConfigureAwait(false);
         var remuxer = new HlsRemuxer(encoder.EncoderPath);
-        var audioInputs = await remuxer.PrepareAudioAsync(workspace, input, encoder.ProbePath, _received, cancellationToken).ConfigureAwait(false);
+        var audioInputs = await remuxer.PrepareAudioAsync(workspace, input, encoder.ProbePath, _received, options.AudioLanguages, cancellationToken).ConfigureAwait(false);
         if (audioRequired && audioInputs.Count == 0) throw new InvalidDataException("The selected HLS audio group has no playable audio.");
-        await remuxer.RemuxAsync(workspace, input, audioInputs, subtitleInputs, _received, cancellationToken).ConfigureAwait(false);
+        await workspace.ReportAsync(_received, null, force: true, phase: "Assembling").ConfigureAwait(false);
+        await remuxer.RemuxAsync(workspace, input, audioInputs, subtitleInputs, _received, options.SubtitleLanguages is null, cancellationToken).ConfigureAwait(false);
         var bytes = workspace.Length("remux.part");
         if (bytes == 0) throw new IOException("The HLS remux produced no media.");
         workspace.Move("remux.part", "media.mkv");
         foreach (var name in _stagedNames) workspace.Delete(name);
-        await workspace.ReportAsync(_received, _received, force: true).ConfigureAwait(false);
+        await workspace.ReportAsync(_received, null, force: true, phase: "Assembling").ConfigureAwait(false);
         return new DownloadTransferResult("media.mkv", "video/x-matroska", bytes);
     }
 

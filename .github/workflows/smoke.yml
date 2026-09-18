@@ -1,0 +1,68 @@
+name: Owned Jellyfin integration
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'scripts/package.py'
+      - 'scripts/smoke/**'
+      - 'global.json'
+      - 'Directory.Build.props'
+      - '.github/workflows/smoke.yml'
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: Real owned runtime scenario
+        type: choice
+        default: full
+        options: [full, install, playback, exports, notifications, segments, ui, upgrade]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: siphon-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: scripts/smoke/package-lock.json
+      - name: Install pinned browser tooling
+        run: npm ci --prefix scripts/smoke --ignore-scripts --no-audit --no-fund
+      - name: Install Chromium and system dependencies
+        working-directory: scripts/smoke
+        run: npx playwright install --with-deps chromium
+      - name: Build and package the actual source
+        run: |
+          dotnet build src/Jellyfin.Plugin.Siphon -c Release
+          python3 scripts/package.py --output artifacts/smoke-package
+      - name: Exercise selected native runtime paths
+        env:
+          SCENARIO: ${{ inputs.scenario || 'full' }}
+        run: python3 scripts/smoke/run.py "$SCENARIO" --package artifacts/smoke-package/siphon-*.zip --evidence artifacts/smoke-evidence.json --screenshots artifacts/smoke-screenshots
+      # Exit 77 is intentionally not converted to success: unsupported runtime/history needs attention.
+      - name: Publish credential-free evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: siphon-owned-smoke-evidence
+          path: |
+            artifacts/smoke-evidence.json
+            artifacts/smoke-screenshots/*.png
+          if-no-files-found: error
+          retention-days: 7

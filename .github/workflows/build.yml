@@ -12,15 +12,19 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
         with:
           dotnet-version: '10.0.x'
-      - run: dotnet build Jellyfin.Plugin.Siphon.sln -c Release
-      - run: python3 scripts/package.py
+      # Python 3.10+ and Git are source-build prerequisites for embedded provenance.
+      - run: dotnet test Jellyfin.Plugin.Siphon.sln -c Release
+      - run: python3 scripts/package.py --output "$RUNNER_TEMP/siphon-package"
+      - run: python3 scripts/package.py --verify-only --output "$RUNNER_TEMP/siphon-package"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: siphon-plugin
-          path: artifacts/*
+          path: ${{ runner.temp }}/siphon-package/*
           if-no-files-found: error

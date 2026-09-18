@@ -151,7 +151,7 @@ public sealed class WatchRecoveryService(
     private BaseItem[] FindTargets(RecoveryLedger.Entry identity)
     {
         var managed = identity.NativeType is "Series" or "Season"
-            ? state.FindByContentKey(identity.Identity.ContentKey) : state.FindByKey(identity.Identity.Key);
+            ? state.ReadByContentKey(identity.Identity.ContentKey) : state.ReadByKey(identity.Identity.Key);
         if (managed is null || managed.ContentKey != identity.Identity.ContentKey || managed.Type != identity.Identity.Type) return [];
         BaseItemKind? kind = identity.NativeType switch
         {

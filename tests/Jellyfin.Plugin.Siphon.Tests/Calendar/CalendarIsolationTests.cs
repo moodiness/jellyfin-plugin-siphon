@@ -1,4 +1,5 @@
 using Jellyfin.Plugin.Siphon.Calendar;
+using Jellyfin.Plugin.Siphon.Infrastructure;
 using Jellyfin.Plugin.Siphon.Tests.Identity;
 using MediaBrowser.Controller.Session;
 using MediaBrowser.Model.Session;
@@ -24,9 +25,10 @@ public sealed class CalendarIsolationTests
         var bob = await context.UserData.Where(data => data.Item!.Provider!.Any(provider => provider.ProviderValue == second.ContentKey))
             .Select(data => data.UserId).SingleAsync();
         var calendar = new FollowedCalendarService(null!, null!, database);
-        Assert.Equal(first.ContentKey, Assert.Single(await calendar.SelectFollowedAsync(alice, [first, second], CancellationToken.None)));
-        Assert.Equal(second.ContentKey, Assert.Single(await calendar.SelectFollowedAsync(bob, [first, second], CancellationToken.None)));
-        Assert.Empty(await calendar.SelectFollowedAsync(Guid.NewGuid(), [first, second], CancellationToken.None));
+        var managed = new[] { ManagedItemSnapshot.CopyOf(first), ManagedItemSnapshot.CopyOf(second) };
+        Assert.Equal(first.ContentKey, Assert.Single(await calendar.SelectFollowedAsync(alice, managed, CancellationToken.None)));
+        Assert.Equal(second.ContentKey, Assert.Single(await calendar.SelectFollowedAsync(bob, managed, CancellationToken.None)));
+        Assert.Empty(await calendar.SelectFollowedAsync(Guid.NewGuid(), managed, CancellationToken.None));
     }
 
     [Fact]

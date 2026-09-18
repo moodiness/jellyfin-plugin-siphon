@@ -17,7 +17,14 @@ public sealed class PlaybackDownloadService(ISafeHttpClient http, P2pStreamServi
     {
         try
         {
-            if (source.P2p is not null) { await RelayP2pAsync(context, source, true, ct).ConfigureAwait(false); return; }
+            using var admission = DirectTransferAdmission.Shared.TryAcquire(source.UserId, ct);
+            if (admission is null)
+            {
+                context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                context.Response.Headers.RetryAfter = "2";
+                return;
+            }
+            if (source.P2p is not null) { await RelayP2pCoreAsync(context, source, true, ct).ConfigureAwait(false); return; }
             if (DownloadUnavailableReason(source) is not null) { await RejectHls(context, ct).ConfigureAwait(false); return; }
             var headers = new Dictionary<string, string>(source.RequestHeaders, StringComparer.OrdinalIgnoreCase) { ["Accept-Encoding"] = "identity" };
             headers.Remove("Range");
@@ -109,7 +116,12 @@ public sealed class PlaybackDownloadService(ISafeHttpClient http, P2pStreamServi
             await context.Response.WriteAsJsonAsync(new { Code = "HlsRequiresOfflinePreparation", Message = "HLS needs offline preparation. Use the server download queue." }, ct).ConfigureAwait(false);
     }
 
-    public async Task RelayP2pAsync(HttpContext context, ResolvedStream source, bool attachment, CancellationToken ct)
+    // Playback is already admitted by the proxy. Direct downloads enter RelayAsync once,
+    // regardless of whether the selected source uses HTTP or P2P.
+    internal Task RelayP2pPlaybackAsync(HttpContext context, ResolvedStream source, CancellationToken ct)
+        => RelayP2pCoreAsync(context, source, false, ct);
+
+    private async Task RelayP2pCoreAsync(HttpContext context, ResolvedStream source, bool attachment, CancellationToken ct)
     {
         await using var lease = await p2p.OpenAsync(source.P2p ?? throw new InvalidOperationException(), source.UserId, ct).ConfigureAwait(false);
         var length = lease.Length;
@@ -123,6 +135,21 @@ public sealed class PlaybackDownloadService(ISafeHttpClient http, P2pStreamServi
             context.Response.StatusCode = 416;
             context.Response.Headers.ContentRange = "bytes */" + length.ToString(CultureInfo.InvariantCulture);
             return;
+        }
+        if (!attachment)
+        {
+            // A torrent filename is not a container classification either. Direct byte
+            // exports remain unchanged; native playback only receives supported roots.
+            var prefix = new byte[(int)Math.Min(512, length)];
+            lease.Content.Seek(0, SeekOrigin.Begin);
+            var read = 0;
+            while (read < prefix.Length)
+            {
+                var count = await lease.Content.ReadAsync(prefix.AsMemory(read), ct).ConfigureAwait(false);
+                if (count == 0) break;
+                read += count;
+            }
+            NativeMediaClassifier.RequireSupported(prefix.AsSpan(0, read));
         }
         context.Response.StatusCode = partial ? 206 : 200;
         SetHeaders(context, "application/octet-stream", partial ? end - start + 1 : length, attachment, SafeExtension(source with { FileName = lease.FileName }));

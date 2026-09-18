@@ -12,6 +12,10 @@ namespace Jellyfin.Plugin.Siphon.P2p;
 public sealed class P2pStreamService(ConfigurationAccessor configuration, SiphonPaths paths, SsrfPolicy policy, ILogger<P2pStreamService> logger) : BackgroundService
 {
     private readonly object _gate = new();
+    // Filesystem scans and reservation transitions serialize here, never under _gate.
+    private readonly SemaphoreSlim _storageGate = new(1, 1);
+    private long _cacheBytes;
+    private long _cacheMeasuredTicks;
     private readonly Dictionary<string, Session> _sessions = new(StringComparer.Ordinal);
     private readonly string _root = Path.Combine(paths.DataDirectory, "p2p");
     private bool _stopping;
@@ -28,18 +32,23 @@ public sealed class P2pStreamService(ConfigurationAccessor configuration, Siphon
             var settings = Limits.Read(configuration.Current);
             if (_stopping || !settings.Enabled) throw new InvalidOperationException("P2P playback is disabled.");
             if (_sessions.Count >= settings.Streams) throw new InvalidOperationException("The P2P concurrent stream limit has been reached.");
-            P2pStorage.CheckPath(_root, _root);
-            Directory.CreateDirectory(_root);
+            cancellationToken.ThrowIfCancellationRequested();
             var slot = Enumerable.Range(0, settings.Streams).First(index => _sessions.Values.All(active => active.Slot != index));
             session = new Session(Guid.NewGuid().ToString("N"), slot, settings, cancellationToken);
             session.Directory = Path.Combine(_root, "session-" + session.Id);
-            Directory.CreateDirectory(session.Directory);
-            File.Create(Path.Combine(session.Directory, ".siphon-p2p-v1")).Dispose();
             _sessions.Add(session.Id, session);
         }
 
         try
         {
+            await _storageGate.WaitAsync(session.Cancellation.Token).ConfigureAwait(false);
+            try
+            {
+                P2pStorage.CheckPath(_root, session.Directory);
+                Directory.CreateDirectory(session.Directory);
+                File.Create(Path.Combine(session.Directory, ".siphon-p2p-v1")).Dispose();
+            }
+            finally { _storageGate.Release(); }
             session.Network = new P2pNetwork(policy);
             using var metadataTimeout = CancellationTokenSource.CreateLinkedTokenSource(session.Cancellation.Token);
             metadataTimeout.CancelAfter(TimeSpan.FromSeconds(session.Limits.MetadataSeconds));
@@ -91,18 +100,23 @@ public sealed class P2pStreamService(ConfigurationAccessor configuration, Siphon
             }
             var selectedSource = source.FileIndex is int index ? source with { FileIndex = P2pStorage.MapFileIndex(torrent, bytes.Span, index) } : source;
             var selection = P2pStorage.SelectFile(torrent.Files.Select(file => (file.Path, file.Length)).ToArray(), selectedSource);
-            lock (_gate)
+            await _storageGate.WaitAsync(session.Cancellation.Token).ConfigureAwait(false);
+            try
             {
-                session.Cancellation.Token.ThrowIfCancellationRequested();
-                var limit = Limits.Read(configuration.Current);
-                if (!limit.Enabled || limit != session.Limits) throw new InvalidOperationException("P2P configuration changed. Retry playback.");
-                var inactiveBytes = Directory.EnumerateFileSystemEntries(_root)
-                    .Where(entry => !_sessions.Values.Any(active => active.Directory == entry))
-                    .Sum(entry => Directory.Exists(entry) ? P2pStorage.Size(entry) : new FileInfo(entry).Length);
-                if (reservation > limit.CacheBytes - inactiveBytes - _sessions.Values.Sum(active => active.ReservedBytes))
-                    throw new IOException("The torrent exceeds the available P2P disk reservation. Clean inactive cache or raise the limit.");
-                session.ReservedBytes = reservation;
+                HashSet<string> activeDirectories;
+                lock (_gate) activeDirectories = _sessions.Values.Select(active => active.Directory).ToHashSet(StringComparer.Ordinal);
+                var inactiveBytes = MeasureInactive(activeDirectories, session.Cancellation.Token);
+                lock (_gate)
+                {
+                    session.Cancellation.Token.ThrowIfCancellationRequested();
+                    var limit = Limits.Read(configuration.Current);
+                    if (!limit.Enabled || limit != session.Limits) throw new InvalidOperationException("P2P configuration changed. Retry playback.");
+                    if (reservation > limit.CacheBytes - inactiveBytes - _sessions.Values.Sum(active => active.ReservedBytes))
+                        throw new IOException("The torrent exceeds the available P2P disk reservation. Clean inactive cache or raise the limit.");
+                    session.ReservedBytes = reservation;
+                }
             }
+            finally { _storageGate.Release(); }
 
             session.Manager = await session.Engine.AddStreamingAsync(torrent, Path.Combine(session.Directory, "content"), new TorrentSettingsBuilder
             {
@@ -145,19 +159,26 @@ public sealed class P2pStreamService(ConfigurationAccessor configuration, Siphon
         {
             var limit = Limits.Read(configuration.Current);
             return new P2pStatus(limit.Enabled, _sessions.Count, limit.Streams, _sessions.Values.Sum(session => session.ReservedBytes),
-                P2pStorage.Size(_root), limit.CacheBytes, limit.DownloadBytes, limit.UploadBytes, limit.Dht,
+                Interlocked.Read(ref _cacheBytes), limit.CacheBytes, limit.DownloadBytes, limit.UploadBytes, limit.Dht,
                 _sessions.Values.Select(session => new P2pSessionStatus(session.Id, session.State, session.ReservedBytes,
-                    session.Manager?.Monitor.DownloadRate ?? 0, session.Manager?.Monitor.UploadRate ?? 0)).ToArray());
+                    session.Manager?.Monitor.DownloadRate ?? 0, session.Manager?.Monitor.UploadRate ?? 0)).ToArray())
+            {
+                CacheMeasuredAtUtc = Interlocked.Read(ref _cacheMeasuredTicks) is var ticks && ticks != 0
+                    ? new DateTimeOffset(ticks, TimeSpan.Zero) : null
+            };
         }
     }
 
     public P2pCleanupResult Cleanup()
     {
-        lock (_gate)
+        _storageGate.Wait();
+        try
         {
+            HashSet<string> activeDirectories;
+            lock (_gate) activeDirectories = _sessions.Values.Select(session => session.Directory).ToHashSet(StringComparer.Ordinal);
             long bytes = 0;
             var count = 0;
-            foreach (var directory in InactiveDirectories())
+            foreach (var directory in InactiveDirectories(activeDirectories))
             {
                 var size = P2pStorage.Size(directory);
                 P2pStorage.Delete(_root, directory);
@@ -165,18 +186,42 @@ public sealed class P2pStreamService(ConfigurationAccessor configuration, Siphon
                 count++;
             }
 
-            return new P2pCleanupResult(count, bytes, _sessions.Count);
+            MeasureCache(CancellationToken.None);
+            return new P2pCleanupResult(count, bytes, activeDirectories.Count);
         }
+        finally { _storageGate.Release(); }
     }
 
-    private IEnumerable<string> InactiveDirectories()
+    private IEnumerable<string> InactiveDirectories(HashSet<string> activeDirectories)
     {
         P2pStorage.CheckPath(_root, _root);
         if (!Directory.Exists(_root)) return [];
         return Directory.EnumerateDirectories(_root, "session-*")
             .Where(directory => Guid.TryParseExact(Path.GetFileName(directory)[8..], "N", out _)
-                && !_sessions.Values.Any(session => session.Directory == directory)
-                && File.Exists(Path.Combine(directory, ".siphon-p2p-v1"))).ToArray();
+                && !activeDirectories.Contains(directory)
+                && File.Exists(Path.Combine(directory, ".siphon-p2p-v1")));
+    }
+
+    private long MeasureInactive(HashSet<string> activeDirectories, CancellationToken cancellationToken)
+    {
+        P2pStorage.CheckPath(_root, _root);
+        if (!Directory.Exists(_root)) return 0;
+        long bytes = 0;
+        foreach (var entry in Directory.EnumerateFileSystemEntries(_root))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            P2pStorage.CheckPath(_root, entry);
+            if (activeDirectories.Contains(entry)) continue;
+            bytes = checked(bytes + (Directory.Exists(entry) ? P2pStorage.Size(entry, cancellationToken) : new FileInfo(entry).Length));
+        }
+        return bytes;
+    }
+
+    private void MeasureCache(CancellationToken cancellationToken)
+    {
+        var bytes = P2pStorage.Size(_root, cancellationToken);
+        Interlocked.Exchange(ref _cacheBytes, bytes);
+        Interlocked.Exchange(ref _cacheMeasuredTicks, DateTimeOffset.UtcNow.Ticks);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -195,6 +240,15 @@ public sealed class P2pStreamService(ConfigurationAccessor configuration, Siphon
                 }
 
                 foreach (var session in expired) await CloseAsync(session).ConfigureAwait(false);
+                if (await _storageGate.WaitAsync(0, stoppingToken).ConfigureAwait(false))
+                {
+                    try { MeasureCache(stoppingToken); }
+                    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                    {
+                        logger.LogWarning("P2P cache measurement failed ({ErrorType}); retaining the last complete measurement.", exception.GetType().Name);
+                    }
+                    finally { _storageGate.Release(); }
+                }
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
@@ -234,15 +288,19 @@ public sealed class P2pStreamService(ConfigurationAccessor configuration, Siphon
         {
             session.Network?.Dispose();
             session.Engine?.Dispose();
-            lock (_gate)
+            await _storageGate.WaitAsync().ConfigureAwait(false);
+            try
             {
                 try { P2pStorage.Delete(_root, session.Directory); }
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
                 {
                     logger.LogWarning("P2P scratch cleanup failed ({ErrorType}); administrator cleanup may be required.", exception.GetType().Name);
                 }
-                _sessions.Remove(session.Id);
+                // Keep the reservation until all writers stop and cleanup completes. If deletion
+                // fails, the next admission measures this directory as inactive before reserving.
+                lock (_gate) _sessions.Remove(session.Id);
             }
+            finally { _storageGate.Release(); }
 
             session.Cancellation.Dispose();
         }
@@ -276,6 +334,9 @@ public sealed class P2pStreamService(ConfigurationAccessor configuration, Siphon
 }
 
 public sealed record P2pStatus(bool Enabled, int ActiveStreams, int MaximumStreams, long ReservedBytes, long CacheBytes, long MaximumCacheBytes,
-    long DownloadLimitBytesPerSecond, long UploadLimitBytesPerSecond, bool DhtEnabled, P2pSessionStatus[] Sessions);
+    long DownloadLimitBytesPerSecond, long UploadLimitBytesPerSecond, bool DhtEnabled, P2pSessionStatus[] Sessions)
+{
+    public DateTimeOffset? CacheMeasuredAtUtc { get; init; }
+}
 public sealed record P2pSessionStatus(string Id, string State, long ReservedBytes, long DownloadBytesPerSecond, long UploadBytesPerSecond);
 public sealed record P2pCleanupResult(int RemovedDirectories, long RemovedBytes, int SkippedActive);

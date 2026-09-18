@@ -80,6 +80,7 @@ internal sealed class DownloadTransferWorkspace
         await using var output = OpenWrite(name, FileMode.CreateNew);
         await AppendAsync(output, bytes, cancellationToken).ConfigureAwait(false);
         await output.FlushAsync(cancellationToken).ConfigureAwait(false);
+        output.Flush(flushToDisk: true);
     }
 
     internal void Delete(string name)
@@ -112,8 +113,12 @@ internal sealed class DownloadTransferWorkspace
     {
         var bytes = JsonSerializer.SerializeToUtf8Bytes(state);
         await WriteAsync("resume.new", bytes, cancellationToken).ConfigureAwait(false);
-        Delete("resume.json");
-        Move("resume.new", "resume.json");
+        cancellationToken.ThrowIfCancellationRequested();
+        // Rename-overwrite is the commit boundary. A failed replacement retains the old
+        // metadata; the staged successor remains accounted until the next attempt.
+        var previousLength = Length("resume.json");
+        File.Move(PathFor("resume.new"), PathFor("resume.json"), overwrite: true);
+        _storedBytes -= previousLength;
     }
 
     internal DownloadResumeState? ReadResume()
@@ -125,12 +130,12 @@ internal sealed class DownloadTransferWorkspace
         catch (JsonException) { return null; }
     }
 
-    internal async Task ReportAsync(long received, long? total, bool force = false)
+    internal async Task ReportAsync(long received, long? total, bool force = false, string phase = "Receiving")
     {
         var now = Environment.TickCount64;
         if (!force && now - _lastReport < 500) return;
         _lastReport = now;
-        await _progress(new DownloadTransferProgress(received, total, _storedBytes)).ConfigureAwait(false);
+        await _progress(new DownloadTransferProgress(received, total, _storedBytes, phase)).ConfigureAwait(false);
     }
 
     internal static string Fingerprint(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));

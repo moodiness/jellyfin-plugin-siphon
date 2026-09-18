@@ -56,7 +56,7 @@ public sealed class DownloadQueueStore
             if (_document.Jobs.Length >= MaximumJobs || _document.Jobs.Count(value => value.UserId == job.UserId) >= maximumPerUser)
                 throw new DownloadQueueException(409, "The download queue limit has been reached. Delete an existing job first.");
             if (_document.Jobs.Any(value => !value.DeleteRequested && value.UserId == job.UserId && value.ItemKey == job.ItemKey
-                && value.SourceId == job.SourceId && value.State is DownloadJobState.Queued or DownloadJobState.Running))
+                && value.SourceId == job.SourceId && value.State is DownloadJobState.Queued or DownloadJobState.Running or DownloadJobState.Paused))
                 throw new DownloadQueueException(409, "This version is already queued.");
             if (!Valid(job)) throw new InvalidDataException("Invalid download job.");
             Commit(_document with { Jobs = [.. _document.Jobs, job] });
@@ -68,26 +68,46 @@ public sealed class DownloadQueueStore
     {
         lock (_gate)
         {
-            var jobs = _document.Jobs.Select(job => job.State == DownloadJobState.Running
-                ? job with { State = job.DeleteRequested ? DownloadJobState.Cancelled : DownloadJobState.Queued, ReservedBytes = 0, UpdatedUtc = DateTimeOffset.UtcNow }
+            var jobs = _document.Jobs.Select(job => job.State == DownloadJobState.Running || job.ReservedBytes != 0
+                ? job with
+                {
+                    State = job.State == DownloadJobState.Running ? job.DeleteRequested ? DownloadJobState.Cancelled : DownloadJobState.Queued : job.State,
+                    ReservedBytes = 0,
+                    Phase = "Waiting",
+                    BytesPerSecond = null,
+                    EstimatedSecondsRemaining = null,
+                    UpdatedUtc = DateTimeOffset.UtcNow
+                }
                 : job).ToArray();
             if (!jobs.SequenceEqual(_document.Jobs)) Commit(_document with { Jobs = jobs });
         }
     }
 
-    internal DownloadJob? TryStart(Guid id, int maximumConcurrent, long maximumStorage, long maximumFile)
+    internal DownloadJob? TryStart(Guid id, int maximumConcurrent, long maximumStorage, long maximumFile, long maximumPerUser = long.MaxValue)
     {
         lock (_gate)
         {
             var job = _document.Jobs.FirstOrDefault(value => value.Id == id && !value.DeleteRequested && value.State == DownloadJobState.Queued);
-            if (job is null || _document.Jobs.Count(value => value.State == DownloadJobState.Running) >= maximumConcurrent) return null;
-            var reservation = Math.Min(maximumFile, maximumStorage);
+            if (job is null || _document.Jobs.Count(value => value.ReservedBytes > 0) >= maximumConcurrent) return null;
+            var reservation = Math.Min(maximumFile, Math.Min(maximumStorage, maximumPerUser));
             if (reservation <= 0 || job.StoredBytes > reservation) return null;
-            var committed = _document.Jobs.Sum(value => value.State == DownloadJobState.Running ? value.ReservedBytes : value.StoredBytes);
-            if (committed - job.StoredBytes > maximumStorage - reservation) return null;
-            return Replace(job with { State = DownloadJobState.Running, ReservedBytes = reservation, Error = null, UpdatedUtc = DateTimeOffset.UtcNow });
+            var committed = _document.Jobs.Sum(CommittedBytes);
+            var userCommitted = _document.Jobs.Where(value => value.UserId == job.UserId).Sum(CommittedBytes);
+            if (committed - job.StoredBytes > maximumStorage - reservation || userCommitted - job.StoredBytes > maximumPerUser - reservation) return null;
+            return Replace(job with
+            {
+                State = DownloadJobState.Running,
+                ReservedBytes = reservation,
+                Error = null,
+                Phase = "Receiving",
+                BytesPerSecond = null,
+                EstimatedSecondsRemaining = null,
+                UpdatedUtc = DateTimeOffset.UtcNow
+            });
         }
     }
+
+    internal static long CommittedBytes(DownloadJob job) => Math.Max(job.ReservedBytes, job.StoredBytes);
 
     internal DownloadJob? Update(Guid id, Func<DownloadJob, DownloadJob?> transition)
     {
@@ -104,7 +124,7 @@ public sealed class DownloadQueueStore
     {
         lock (_gate)
         {
-            if (!_document.Jobs.Any(job => job.Id == id && job.DeleteRequested && job.State != DownloadJobState.Running)) return;
+            if (!_document.Jobs.Any(job => job.Id == id && job.DeleteRequested && job.ReservedBytes == 0 && job.State != DownloadJobState.Running)) return;
             Commit(_document with { Jobs = _document.Jobs.Where(job => job.Id != id).ToArray() });
         }
     }
@@ -145,10 +165,14 @@ public sealed class DownloadQueueStore
             && job.Name is { Length: <= 256 } && Enum.IsDefined(job.State) && job.BytesReceived >= 0 && job.StoredBytes >= 0
             && job.StoredBytes <= 16L * 1024 * 1024 * 1024 * 1024 && job.ReservedBytes is >= 0 and <= 16L * 1024 * 1024 * 1024 * 1024
             && (job.TotalBytes is null or >= 0) && (job.Error is null || job.Error.Length <= 256)
+            && job.Priority is >= -10 and <= 10 && job.Phase is "Waiting" or "WaitingWindow" or "Receiving" or "PreparingAudio" or "Assembling" or "Ready"
+            && DownloadTransferOptions.ValidLanguages(job.AudioLanguages) && DownloadTransferOptions.ValidLanguages(job.SubtitleLanguages)
+            && (job.BytesPerSecond is null || double.IsFinite(job.BytesPerSecond.Value) && job.BytesPerSecond > 0)
+            && (job.EstimatedSecondsRemaining is null || double.IsFinite(job.EstimatedSecondsRemaining.Value) && job.EstimatedSecondsRemaining >= 0)
             && (job.FileName is null || DownloadQueueFiles.SafeName(job.FileName))
             && (job.ContentType is null || job.ContentType is "video/mp4" or "video/x-matroska" or "video/webm" or "application/octet-stream")
             && (job.State != DownloadJobState.Completed || job.FileName is not null && job.ContentType is not null)
-            && (job.State == DownloadJobState.Running ? job.ReservedBytes > 0 : job.ReservedBytes == 0);
+            && (job.State != DownloadJobState.Running || job.ReservedBytes > 0);
 
     private sealed record Document
     {

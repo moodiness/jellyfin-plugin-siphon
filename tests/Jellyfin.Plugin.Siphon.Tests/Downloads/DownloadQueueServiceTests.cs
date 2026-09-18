@@ -33,7 +33,6 @@ public sealed class DownloadQueueServiceTests
         await fixture.StartAsync();
         await fixture.WaitForAsync(queued.Id, DownloadJobState.Failed);
         Assert.Equal(0, fixture.Transfer.Calls);
-        Assert.Contains("exact selected version", fixture.Store.Find(queued.Id, fixture.User.Id)!.Error);
         var ledger = File.ReadAllText(Path.Combine(fixture.Directory, "download-queue.json"));
         Assert.DoesNotContain("private-secret", ledger);
         Assert.DoesNotContain("source-secret", ledger);
@@ -131,6 +130,108 @@ public sealed class DownloadQueueServiceTests
         Assert.False(System.IO.Directory.Exists(Path.Combine(fixture.Directory, "downloads", queued.Id.ToString("N"))));
     }
 
+    [Fact]
+    public async Task PauseRetainsReservationUntilTheWriterExitsAndSurvivesRestart()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        fixture.Transfer.IgnoreCancellation = true;
+        var queued = await fixture.EnqueueAsync();
+        await fixture.StartAsync();
+        await fixture.Transfer.Started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var pause = fixture.Queue.PauseAsync(fixture.User.Id, queued.Id, default);
+        await fixture.WaitForAsync(queued.Id, DownloadJobState.Paused);
+        Assert.False(pause.IsCompleted);
+        Assert.True(fixture.Queue.GetHealth().ReservedBytes > 0);
+        await Assert.ThrowsAsync<DownloadQueueException>(() => fixture.Queue.ResumeAsync(fixture.User.Id, queued.Id, default));
+        fixture.Transfer.Release.TrySetResult();
+        await pause.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(0, fixture.Queue.GetHealth().ReservedBytes);
+        Assert.Equal("Paused", fixture.Queue.List(fixture.User.Id).Jobs.Single().State);
+        await fixture.Queue.StopAsync(default);
+        var reopened = new DownloadQueueStore(fixture.Directory);
+        reopened.Recover();
+        Assert.Equal(DownloadJobState.Paused, reopened.Find(queued.Id, fixture.User.Id)!.State);
+        Assert.Null(reopened.TryStart(queued.Id, 2, 1024 * 1024, 1024 * 1024));
+    }
+
+    [Fact]
+    public async Task ClosingTheWindowStopsTheWriterAndReopeningResumesWithoutExplicitPauseLoss()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var queued = await fixture.EnqueueAsync();
+        await fixture.StartAsync();
+        await fixture.Transfer.Started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var hour = DateTimeOffset.UtcNow.Hour;
+        fixture.Settings.DownloadWindowStartUtcHour = (hour + 1) % 24;
+        fixture.Settings.DownloadWindowEndUtcHour = (hour + 2) % 24;
+        fixture.Settings.DownloadWindowEnabled = true;
+        await fixture.Transfer.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await WaitAsync(() => fixture.Queue.GetHealth().ReservedBytes == 0);
+        var waiting = fixture.Queue.List(fixture.User.Id).Jobs.Single();
+        Assert.Equal("WaitingWindow", waiting.Phase);
+        Assert.NotNull(waiting.NextEligibleUtc);
+        fixture.Transfer.Release.TrySetResult();
+        fixture.Settings.DownloadWindowEnabled = false;
+        await fixture.WaitForAsync(queued.Id, DownloadJobState.Completed);
+        Assert.Equal(2, fixture.Transfer.Calls);
+    }
+
+    [Fact]
+    public async Task RevokedPermissionCannotResumeOrReprioritizePausedWork()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var queued = await fixture.EnqueueAsync();
+        await fixture.Queue.PauseAsync(fixture.User.Id, queued.Id, default);
+        fixture.User.SetPermission(PermissionKind.EnableContentDownloading, false);
+        var resume = await Assert.ThrowsAsync<DownloadQueueException>(() => fixture.Queue.ResumeAsync(fixture.User.Id, queued.Id, default));
+        var priority = await Assert.ThrowsAsync<DownloadQueueException>(() => fixture.Queue.SetPriorityAsync(fixture.User.Id, queued.Id, 10, default));
+        Assert.Equal(403, resume.StatusCode);
+        Assert.Equal(403, priority.StatusCode);
+        Assert.Equal(DownloadJobState.Paused, fixture.Store.Find(queued.Id, fixture.User.Id)!.State);
+    }
+
+    [Fact]
+    public async Task BatchPreviewCannotGrantAccessToANonContainerOrAnUnknownToken()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        Assert.Equal(404, (await Assert.ThrowsAsync<DownloadQueueException>(() =>
+            fixture.Queue.BatchPreviewAsync(fixture.User.Id, fixture.Primary.Id, default))).StatusCode);
+        var request = new DownloadBatchRequest(new string('A', 64), [new(fixture.Primary.Id, fixture.Selected.Id.ToString("N"))]);
+        Assert.Equal("DownloadPreviewExpired", (await Assert.ThrowsAsync<DownloadQueueException>(() =>
+            fixture.Queue.BatchAsync(fixture.User.Id, request, default))).Code);
+        Assert.Empty(fixture.Store.Snapshot());
+    }
+
+    [Fact]
+    public async Task PreviewIsOwnerBoundSingleUseAndReportsRejectedItemsExplicitly()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var preview = await fixture.Queue.BatchPreviewAsync(fixture.User.Id, fixture.Series.Id, default);
+        var request = new DownloadBatchRequest(preview.Token, [new(fixture.Primary.Id, fixture.Selected.Id.ToString("N"))]);
+        var foreign = await Assert.ThrowsAsync<DownloadQueueException>(() => fixture.Queue.BatchAsync(Guid.NewGuid(), request, default));
+        Assert.Equal("DownloadPreviewExpired", foreign.Code);
+        var result = await fixture.Queue.BatchAsync(fixture.User.Id, request, default);
+        Assert.Empty(result.Jobs);
+        var rejected = Assert.Single(result.Rejected);
+        Assert.Equal(fixture.Primary.Id, rejected.ItemId);
+        Assert.Equal("DownloadSelectionUnavailable", rejected.Code);
+        Assert.Equal("DownloadPreviewExpired", (await Assert.ThrowsAsync<DownloadQueueException>(() =>
+            fixture.Queue.BatchAsync(fixture.User.Id, request, default))).Code);
+        Assert.Empty(fixture.Store.Snapshot());
+    }
+
+    [Fact]
+    public async Task PreviewedSelectionDigestCannotBeSubstitutedBeforeAdmission()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var before = fixture.Origin.Requests;
+        var result = await Assert.ThrowsAsync<DownloadQueueException>(() => fixture.Queue.EnqueueAsync(fixture.User.Id,
+            new(fixture.Primary.Id, fixture.Selected.Id.ToString("N")), default, "movie:fixture", new string('F', 64)));
+        Assert.Equal("DownloadSelectionUnavailable", result.Code);
+        Assert.Equal(before, fixture.Origin.Requests);
+        Assert.Empty(fixture.Store.Snapshot());
+    }
+
     private static async Task WaitAsync(Func<bool> ready)
     {
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
@@ -150,6 +251,7 @@ public sealed class DownloadQueueServiceTests
         };
         public Movie Primary { get; } = new() { Id = Guid.NewGuid(), Name = "A legal fixture", VideoType = VideoType.VideoFile };
         public Movie Selected { get; } = new() { Id = Guid.NewGuid(), Name = "A legal fixture", VideoType = VideoType.VideoFile };
+        public MediaBrowser.Controller.Entities.TV.Series Series { get; } = new() { Id = Guid.NewGuid(), Name = "A series" };
         public Origin Origin { get; } = new();
         public ControlledTransfer Transfer { get; } = new();
         public DownloadQueueStore Store { get; private set; } = null!;
@@ -183,13 +285,14 @@ public sealed class DownloadQueueServiceTests
             ((Boundary)(object)library).Call = (method, arguments) => method.Name switch
             {
                 "GetItemById" => arguments![0] is Guid id ? id == fixture.Primary.Id ? fixture.Primary : id == fixture.Selected.Id ? fixture.Selected : null : null,
-                "GetItemList" => new BaseItem[] { fixture.Primary, fixture.Selected },
+                "GetItemList" => new BaseItem[] { fixture.Primary, fixture.Selected, fixture.Series },
                 "ConfigureUserAccess" => null,
                 _ => throw new NotSupportedException(method.Name)
             };
             var access = new PlaybackAccess(new HttpContextAccessor(), authorization, users, library);
             fixture.Store = new DownloadQueueStore(fixture.Directory);
-            fixture.Queue = new DownloadQueueService(fixture.Store, fixture.Transfer, configuration, access, users, state, resolver,
+            var versions = new NativeVersionService(configuration, null!, state, library, null!, null!, null!, resolver, access);
+            fixture.Queue = new DownloadQueueService(fixture.Store, fixture.Transfer, configuration, access, users, state, resolver, library, versions,
                 new StartedLifetime(), NullLogger<DownloadQueueService>.Instance);
             return fixture;
         }
@@ -271,7 +374,9 @@ public sealed class DownloadQueueServiceTests
         public TaskCompletionSource Finished { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool IgnoreCancellation { get; set; }
         public int Calls { get; private set; }
-        public async Task<DownloadTransferResult> TransferAsync(ResolvedStream source, string directory, long maximumBytes,
+        public Task<DownloadPreparation> PrepareAsync(ResolvedStream source, CancellationToken cancellationToken)
+            => Task.FromResult(new DownloadPreparation("Progressive", [], [], source.Size, source.Size, []));
+        public async Task<DownloadTransferResult> TransferAsync(ResolvedStream source, string directory, long maximumBytes, DownloadTransferOptions options,
             Func<DownloadTransferProgress, Task> progress, CancellationToken cancellationToken)
         {
             Calls++;

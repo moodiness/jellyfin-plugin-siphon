@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Runtime.CompilerServices;
 using Jellyfin.Plugin.Siphon.Identity;
+using Jellyfin.Plugin.Siphon.Infrastructure;
 using Jellyfin.Plugin.Siphon.Protocol;
 
 namespace Jellyfin.Plugin.Siphon.Metadata;
@@ -118,6 +119,21 @@ public static class MetadataProvenance
         foreach (var field in fields)
         {
             if (Present(Value(result, field))) provenance[field] = (previous.MetadataProvenance.GetValueOrDefault(field) ?? new([Unknown])) with { PreservationReason = reason };
+            else provenance.Remove(field);
+        }
+        return result with { MetadataProvenance = provenance };
+    }
+
+    internal static ManagedItem Retain(ManagedItem result, ManagedItemSnapshot previous, IEnumerable<string> fields, string reason)
+    {
+        var provenance = Clone(result.MetadataProvenance);
+        foreach (var field in fields)
+        {
+            if (Present(Value(result, field)))
+            {
+                var evidence = previous.MetadataProvenance.GetValueOrDefault(field);
+                provenance[field] = new(evidence?.Sources.ToArray() ?? [Unknown], reason);
+            }
             else provenance.Remove(field);
         }
         return result with { MetadataProvenance = provenance };

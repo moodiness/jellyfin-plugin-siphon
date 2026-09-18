@@ -167,6 +167,43 @@ public sealed class P2pSafetyTests
         finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
     }
 
+    [Fact]
+    public void StatusRemainsAvailableWhenInactiveStorageCannotBeTraversedSafely()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var directory = NewDirectory();
+        try
+        {
+            var configuration = new ConfigurationAccessor(() => new PluginConfiguration { EnableP2p = true });
+            using var service = Service(configuration, directory);
+            var root = Path.Combine(directory, "siphon", "p2p");
+            var external = Path.Combine(directory, "external");
+            Directory.CreateDirectory(root);
+            Directory.CreateDirectory(external);
+            var link = Path.Combine(root, "linked-cache");
+            Directory.CreateSymbolicLink(link, external);
+            try
+            {
+                var status = service.GetStatus();
+                Assert.True(status.Enabled);
+                Assert.Equal(0, status.ActiveStreams);
+                Assert.Null(status.CacheMeasuredAtUtc);
+                // Status is a local observation; explicit storage operations still enforce paths.
+                Assert.Throws<IOException>(() => service.Cleanup());
+            }
+            finally { Directory.Delete(link); }
+        }
+        finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void StorageMeasurementObservesCancellationBeforeTraversingCache()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        Assert.Throws<OperationCanceledException>(() => P2pStorage.Size(NewDirectory(), cancellation.Token));
+    }
+
     private static string NewDirectory()
     {
         var root = Path.GetTempPath();

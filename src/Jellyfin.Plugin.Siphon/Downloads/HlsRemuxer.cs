@@ -12,32 +12,41 @@ internal sealed class HlsRemuxer(string encoderPath)
     private const string NormalizedAudio = "audio-config.m4a";
 
     internal async Task<IReadOnlyList<HlsAudioInput>> PrepareAudioAsync(DownloadTransferWorkspace workspace, string playlist,
-        string probePath, long received, CancellationToken cancellationToken)
+        string probePath, long received, string[]? selectedLanguages, CancellationToken cancellationToken)
     {
         workspace.PathFor(playlist);
         if (string.IsNullOrWhiteSpace(probePath) || !File.Exists(probePath))
-            throw new IOException("Offline HLS requires Jellyfin's configured FFprobe executable.");
+            throw new DownloadSelectionException("Offline HLS requires Jellyfin's configured FFprobe executable. Configure the media tools or choose a progressive source.");
         const string probeFile = "audio-probe.json";
         var arguments = new List<string> { "-v", "error", "-max_alloc", "67108864" };
         arguments.AddRange(InputArguments(playlist));
-        arguments.AddRange(["-select_streams", "a", "-show_entries", "stream=index,codec_name,extradata_size", "-of", "json"]);
-        await RunToFileAsync(probePath, workspace, probeFile, arguments, received, 65536, TimeSpan.FromMinutes(1), false, cancellationToken).ConfigureAwait(false);
+        arguments.AddRange(["-show_entries", "stream=index,codec_type,codec_name,extradata_size:stream_tags=language", "-of", "json"]);
+        await RunToFileAsync(probePath, workspace, probeFile, arguments, received, 65536, TimeSpan.FromMinutes(1), false, "PreparingAudio", cancellationToken).ConfigureAwait(false);
         var audio = new List<HlsAudioInput>();
         try
         {
             using var document = JsonDocument.Parse(await File.ReadAllBytesAsync(workspace.PathFor(probeFile), cancellationToken).ConfigureAwait(false));
             var streams = document.RootElement.GetProperty("streams");
             if (streams.GetArrayLength() > 128) throw new InvalidDataException("The HLS source contains too many audio tracks.");
+            if (!streams.EnumerateArray().Any(stream => stream.TryGetProperty("codec_type", out var type) && type.GetString() == "video"))
+                throw new DownloadSelectionException("Audio-only HLS export is not supported. Choose a progressive audio source or an HLS variant containing video.");
+            var retainedLanguages = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var indices = new HashSet<int>();
             var normalized = 0;
             foreach (var stream in streams.EnumerateArray())
             {
+                if (!stream.TryGetProperty("codec_type", out var type) || type.GetString() != "audio") continue;
+                var language = stream.TryGetProperty("tags", out var tags) && tags.TryGetProperty("language", out var label) ? label.GetString() : null;
+                if (selectedLanguages is not null && (language is null || !selectedLanguages.Contains(language, StringComparer.OrdinalIgnoreCase))) continue;
+                if (language is not null) retainedLanguages.Add(language);
                 var index = stream.GetProperty("index").GetInt32();
                 if (index is < 0 or > 8191 || !indices.Add(index)) throw new InvalidDataException("The HLS audio stream identities are invalid.");
                 var needsConfiguration = stream.GetProperty("codec_name").GetString() == "aac"
                     && (!stream.TryGetProperty("extradata_size", out var extra) || extra.GetInt32() == 0);
                 audio.Add(new(index, needsConfiguration ? normalized++ : null));
             }
+            if (selectedLanguages is not null && selectedLanguages.Any(language => !retainedLanguages.Contains(language)))
+                throw new DownloadSelectionException("A selected audio language could not be identified in the staged media. Retain all tracks or choose another HLS version.");
         }
         finally { workspace.Delete(probeFile); }
 
@@ -52,25 +61,25 @@ internal sealed class HlsRemuxer(string encoderPath)
             arguments.AddRange(["-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+frag_keyframe+empty_moov+default_base_moof+delay_moov",
                 "-protocol_whitelist", "pipe", "-f", "mp4", "pipe:1"]);
             await RunToFileAsync(encoderPath, workspace, NormalizedAudio, arguments, received, long.MaxValue,
-                TimeSpan.FromMinutes(30), false, cancellationToken).ConfigureAwait(false);
+                TimeSpan.FromMinutes(30), false, "PreparingAudio", cancellationToken).ConfigureAwait(false);
         }
         return audio;
     }
 
     internal async Task RemuxAsync(DownloadTransferWorkspace workspace, string playlist, IReadOnlyList<HlsAudioInput> audio,
-        IReadOnlyList<HlsSubtitleInput> subtitles, long received, CancellationToken cancellationToken)
+        IReadOnlyList<HlsSubtitleInput> subtitles, long received, bool retainEmbeddedSubtitles, CancellationToken cancellationToken)
     {
         workspace.PathFor(playlist);
         foreach (var subtitle in subtitles) workspace.PathFor(subtitle.FileName);
         var normalized = audio.Any(stream => stream.NormalizedIndex.HasValue);
         if (normalized) workspace.PathFor(NormalizedAudio);
-        await RunToFileAsync(encoderPath, workspace, "remux.part", Arguments(playlist, audio, subtitles), received,
-            long.MaxValue, TimeSpan.FromMinutes(30), true, cancellationToken).ConfigureAwait(false);
+        await RunToFileAsync(encoderPath, workspace, "remux.part", Arguments(playlist, audio, subtitles, retainEmbeddedSubtitles), received,
+            long.MaxValue, TimeSpan.FromMinutes(30), true, "Assembling", cancellationToken).ConfigureAwait(false);
         if (normalized) workspace.Delete(NormalizedAudio);
     }
 
     private static async Task RunToFileAsync(string executable, DownloadTransferWorkspace workspace, string outputName,
-        IEnumerable<string> arguments, long received, long maximumBytes, TimeSpan timeout, bool matroska, CancellationToken cancellationToken)
+        IEnumerable<string> arguments, long received, long maximumBytes, TimeSpan timeout, bool matroska, string phase, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         workspace.Delete(outputName);
@@ -114,12 +123,12 @@ internal sealed class HlsRemuxer(string encoderPath)
                     }
                     await workspace.AppendAsync(output, buffer.AsMemory(0, read), deadline.Token).ConfigureAwait(false);
                     bytes += read;
-                    await workspace.ReportAsync(received, received).ConfigureAwait(false);
+                    await workspace.ReportAsync(received, null, phase: phase).ConfigureAwait(false);
                 }
                 await process.WaitForExitAsync(deadline.Token).WaitAsync(DownloadTransferWorkspace.IdleTimeout, deadline.Token).ConfigureAwait(false);
                 await stderr.ConfigureAwait(false);
                 if (process.ExitCode != 0 || bytes == 0 || (matroska && (bytes < 4 || !header.AsSpan().SequenceEqual(new byte[] { 0x1a, 0x45, 0xdf, 0xa3 }))))
-                    throw new IOException("The HLS media could not be prepared without conversion. Check the configured media tools and source format.");
+                    throw new DownloadSelectionException("The HLS media could not be prepared without conversion. Check FFmpeg/FFprobe or choose a version with compatible codecs.");
                 await output.FlushAsync(deadline.Token).ConfigureAwait(false);
             }
         }
@@ -162,7 +171,7 @@ internal sealed class HlsRemuxer(string encoderPath)
         return arguments;
     }
 
-    private static IEnumerable<string> Arguments(string playlist, IReadOnlyList<HlsAudioInput> audio, IReadOnlyList<HlsSubtitleInput> subtitles)
+    private static IEnumerable<string> Arguments(string playlist, IReadOnlyList<HlsAudioInput> audio, IReadOnlyList<HlsSubtitleInput> subtitles, bool retainEmbeddedSubtitles)
     {
         var arguments = EncoderArguments(playlist);
         var normalized = audio.Any(stream => stream.NormalizedIndex.HasValue);
@@ -187,8 +196,9 @@ internal sealed class HlsRemuxer(string encoderPath)
             var disposition = subtitle.Default ? (subtitle.Forced ? "default+forced" : "default") : (subtitle.Forced ? "forced" : "0");
             arguments.AddRange(["-disposition:s:" + stream, disposition]);
         }
+        if (retainEmbeddedSubtitles) arguments.AddRange(["-map", "0:s?"]);
         arguments.AddRange([
-            "-map", "0:s?", "-c", "copy", "-max_muxing_queue_size", "1024", "-max_interleave_delta", "1000000", "-avoid_negative_ts", "make_zero",
+            "-c", "copy", "-max_muxing_queue_size", "1024", "-max_interleave_delta", "1000000", "-avoid_negative_ts", "make_zero",
             // All subprocess output passes through the bounded managed writer, including AAC preparation.
             "-protocol_whitelist", "pipe", "-f", "matroska", "pipe:1"
         ]);

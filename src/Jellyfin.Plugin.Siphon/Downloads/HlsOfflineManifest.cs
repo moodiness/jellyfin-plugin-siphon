@@ -22,6 +22,7 @@ internal sealed class HlsOfflineManifest
     internal List<HlsEntry> Entries { get; } = [];
     internal bool IsMaster => Variants.Count != 0;
     internal double DurationSeconds { get; private set; }
+    internal bool HasClosedCaptions { get; private set; }
 
     internal static HlsOfflineManifest Parse(string text, Uri finalUrl)
     {
@@ -79,7 +80,7 @@ internal sealed class HlsOfflineManifest
                         var type = Required(attributes, "TYPE");
                         if (type is not ("AUDIO" or "SUBTITLES" or "CLOSED-CAPTIONS"))
                             throw Unsupported("The HLS rendition type is not supported for offline delivery.");
-                        if (type == "CLOSED-CAPTIONS") break; // In-band captions remain in the copied video bitstream.
+                        if (type == "CLOSED-CAPTIONS") { HasClosedCaptions = true; break; } // Copied video retains in-band captions.
                         var uri = attributes.TryGetValue("URI", out var resource) ? Resource(resources, resource) : null;
                         if (type == "SUBTITLES" && uri is null) throw Unsupported("The HLS subtitle rendition is missing a playlist.");
                         Renditions.Add(new HlsRendition(type, Required(attributes, "GROUP-ID"), Label(Required(attributes, "NAME")),

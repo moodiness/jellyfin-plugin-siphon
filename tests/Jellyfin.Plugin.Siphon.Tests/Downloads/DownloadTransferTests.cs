@@ -25,8 +25,8 @@ public sealed class DownloadTransferTests
             return response;
         });
         var service = new DownloadTransferService(http, null!, null!);
-        await Assert.ThrowsAsync<IOException>(() => service.TransferAsync(Source(), directory.Path, 16384, _ => Task.CompletedTask, default));
-        var result = await service.TransferAsync(Source(), directory.Path, 16384, _ => Task.CompletedTask, default);
+        await Assert.ThrowsAsync<IOException>(() => service.TransferAsync(Source(), directory.Path, 16384, new DownloadTransferOptions(), _ => Task.CompletedTask, default));
+        var result = await service.TransferAsync(Source(), directory.Path, 16384, new DownloadTransferOptions(), _ => Task.CompletedTask, default);
         Assert.Equal(bytes, await File.ReadAllBytesAsync(System.IO.Path.Combine(directory.Path, result.FileName)));
         Assert.Equal(bytes.Length, result.Bytes);
     }
@@ -53,8 +53,8 @@ public sealed class DownloadTransferTests
             return Response(new MemoryStream(newBytes), newBytes.Length, returnedTag);
         });
         var service = new DownloadTransferService(http, null!, null!);
-        await Assert.ThrowsAsync<IOException>(() => service.TransferAsync(Source(), directory.Path, 16384, _ => Task.CompletedTask, default));
-        var result = await service.TransferAsync(Source(), directory.Path, 16384, _ => Task.CompletedTask, default);
+        await Assert.ThrowsAsync<IOException>(() => service.TransferAsync(Source(), directory.Path, 16384, new DownloadTransferOptions(), _ => Task.CompletedTask, default));
+        var result = await service.TransferAsync(Source(), directory.Path, 16384, new DownloadTransferOptions(), _ => Task.CompletedTask, default);
         Assert.Equal(newBytes, await File.ReadAllBytesAsync(System.IO.Path.Combine(directory.Path, result.FileName)));
     }
 
@@ -72,8 +72,8 @@ public sealed class DownloadTransferTests
             return Response(new MemoryStream(newBytes), newBytes.Length, "W/\"version\"");
         });
         var service = new DownloadTransferService(http, null!, null!);
-        await Assert.ThrowsAsync<IOException>(() => service.TransferAsync(Source(), directory.Path, 16384, _ => Task.CompletedTask, default));
-        var result = await service.TransferAsync(Source(), directory.Path, 16384, _ => Task.CompletedTask, default);
+        await Assert.ThrowsAsync<IOException>(() => service.TransferAsync(Source(), directory.Path, 16384, new DownloadTransferOptions(), _ => Task.CompletedTask, default));
+        var result = await service.TransferAsync(Source(), directory.Path, 16384, new DownloadTransferOptions(), _ => Task.CompletedTask, default);
         Assert.Equal(newBytes, await File.ReadAllBytesAsync(System.IO.Path.Combine(directory.Path, result.FileName)));
     }
 
@@ -83,7 +83,7 @@ public sealed class DownloadTransferTests
         using var directory = new TransferDirectory();
         var http = new TransferHttp((_, _, _) => Response(new NonSeekableStream(new byte[4096]), null, "\"version\""));
         var service = new DownloadTransferService(http, null!, null!);
-        await Assert.ThrowsAsync<IOException>(() => service.TransferAsync(Source(), directory.Path, 1024, _ => Task.CompletedTask, default));
+        await Assert.ThrowsAsync<IOException>(() => service.TransferAsync(Source(), directory.Path, 1024, new DownloadTransferOptions(), _ => Task.CompletedTask, default));
         Assert.True(Directory.EnumerateFiles(directory.Path).Sum(path => new FileInfo(path).Length) <= 1024);
         Assert.False(File.Exists(System.IO.Path.Combine(directory.Path, "media.mp4")));
     }
@@ -96,7 +96,7 @@ public sealed class DownloadTransferTests
         var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var http = new TransferHttp((_, _, _) => Response(new WaitingStream(reading), null, null));
         var service = new DownloadTransferService(http, null!, null!);
-        var transfer = service.TransferAsync(Source(), directory.Path, 16384, _ => Task.CompletedTask, cancelled.Token);
+        var transfer = service.TransferAsync(Source(), directory.Path, 16384, new DownloadTransferOptions(), _ => Task.CompletedTask, cancelled.Token);
         await reading.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await cancelled.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => transfer);
@@ -111,13 +111,15 @@ public sealed class DownloadTransferTests
         await interrupted.WriteAsync("audio-probe.json", "{\"streams\":["u8.ToArray(), default);
         await interrupted.WriteAsync("audio-config.m4a", new byte[2048], default);
         await interrupted.WriteAsync("h00001.ts", new byte[512], default);
+        await interrupted.WriteAsync("remux.part", new byte[256], default);
         var bytes = Enumerable.Repeat((byte)'v', 4096).ToArray();
         var http = new TransferHttp((_, _, _) => Response(new MemoryStream(bytes), bytes.Length, "\"replacement\""));
         var service = new DownloadTransferService(http, null!, null!);
 
-        var result = await service.TransferAsync(Source(), directory.Path, 8192, _ => Task.CompletedTask, default);
+        var result = await service.TransferAsync(Source(), directory.Path, 8192, new DownloadTransferOptions(), _ => Task.CompletedTask, default);
 
         Assert.Equal(bytes, await File.ReadAllBytesAsync(System.IO.Path.Combine(directory.Path, result.FileName)));
+        Assert.False(File.Exists(System.IO.Path.Combine(directory.Path, "remux.part")));
         Assert.True(Directory.EnumerateFiles(directory.Path).Sum(path => new FileInfo(path).Length) <= 8192);
     }
 

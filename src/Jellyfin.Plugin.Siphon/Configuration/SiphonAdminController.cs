@@ -16,7 +16,7 @@ public sealed class SiphonAdminController(StremioClient client, ISiphonStateStor
     [HttpGet("Status")]
     public ActionResult<StatusResponse> GetStatus()
     {
-        var items = state.GetItems();
+        var items = state.GetReadSnapshot().Items;
         return new StatusResponse(items.Count, items.Count(item => item.Type == "movie"), items.Count(item => item.Type == "series"));
     }
 

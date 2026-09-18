@@ -2,7 +2,6 @@ using System.Globalization;
 using Jellyfin.Data.Enums;
 using Jellyfin.Database.Implementations;
 using Jellyfin.Database.Implementations.Entities;
-using Jellyfin.Plugin.Siphon.Identity;
 using Jellyfin.Plugin.Siphon.Infrastructure;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.TV;
@@ -20,9 +19,9 @@ public sealed class FollowedCalendarService(ISiphonStateStore state, ILibraryMan
     internal const string AvailabilityNote = "Dates are announced releases, not verified stream availability. Date-only releases begin at 00:00 UTC.";
 
     internal async Task<FollowedCalendarSnapshot> GetSnapshotAsync(User user, DateTimeOffset now, CancellationToken ct,
-        IReadOnlyList<ManagedItem>? managedSnapshot = null, CalendarWindow? window = null)
+        IReadOnlyList<ManagedItemSnapshot>? managedSnapshot = null, CalendarWindow? window = null)
     {
-        var managed = (managedSnapshot ?? state.GetItems()).Where(item => item.Type == "series" && !string.IsNullOrEmpty(item.Key)).ToArray();
+        var managed = (managedSnapshot ?? state.GetReadSnapshot().Items).Where(item => item.Type == "series" && !string.IsNullOrEmpty(item.Key)).ToArray();
         var followed = await SelectFollowedAsync(user.Id, managed, ct).ConfigureAwait(false);
         var candidates = managed.Where(item => followed.Contains(item.ContentKey))
             .OrderBy(item => item.Key, StringComparer.Ordinal).ToArray();
@@ -54,7 +53,7 @@ public sealed class FollowedCalendarService(ISiphonStateStore state, ILibraryMan
         return new(result, seriesIds, false);
     }
 
-    internal async Task<IReadOnlySet<string>> SelectFollowedAsync(Guid userId, IReadOnlyList<ManagedItem> items, CancellationToken ct)
+    internal async Task<IReadOnlySet<string>> SelectFollowedAsync(Guid userId, IReadOnlyList<ManagedItemSnapshot> items, CancellationToken ct)
     {
         if (userId == Guid.Empty || items.Count == 0) return new HashSet<string>(StringComparer.Ordinal);
         var keys = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -89,7 +88,7 @@ public sealed class FollowedCalendarService(ISiphonStateStore state, ILibraryMan
         {
             ct.ThrowIfCancellationRequested();
             foreach (var episode in Accessible(user, batch).OfType<Episode>())
-                if (episode.GetProviderId("Siphon") is { } key && state.FindByKey(key) is { Type: "series" }) accessible.Add(episode.Id);
+                if (episode.GetProviderId("Siphon") is { } key && state.ReadByKey(key) is { Type: "series" }) accessible.Add(episode.Id);
         }
         return entries.Where(entry => accessible.Contains(entry.Episode.Id)).ToArray();
     }

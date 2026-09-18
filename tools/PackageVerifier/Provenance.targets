@@ -1,0 +1,17 @@
+<Project>
+  <!-- Explicit automation import for historical projects; never edits their source tree.
+       Usage: dotnet build SOURCE.csproj -c Release -p:CustomBeforeMicrosoftCommonTargets=/absolute/path/Provenance.targets
+       Set SIPHON_SOURCE_ROOT to the historical checkout before building/packaging. -->
+  <PropertyGroup>
+    <SiphonPackagingScript>$(MSBuildThisFileDirectory)../../scripts/package.py</SiphonPackagingScript>
+    <PythonExe Condition="'$(PythonExe)' == '' and '$(OS)' == 'Windows_NT'">python</PythonExe>
+    <PythonExe Condition="'$(PythonExe)' == ''">python3</PythonExe>
+  </PropertyGroup>
+  <Target Name="GenerateSiphonBuildProvenance" BeforeTargets="CoreCompile" DependsOnTargets="ResolveReferences" Condition="'$(AssemblyName)' == 'Jellyfin.Plugin.Siphon'">
+    <Exec Command="&quot;$(PythonExe)&quot; &quot;$(SiphonPackagingScript)&quot; --write-build-provenance &quot;$(IntermediateOutputPath)SiphonBuildProvenance.g.cs&quot;" />
+    <ItemGroup>
+      <Compile Remove="$(IntermediateOutputPath)SiphonBuildProvenance.g.cs" />
+      <Compile Include="$(IntermediateOutputPath)SiphonBuildProvenance.g.cs" />
+    </ItemGroup>
+  </Target>
+</Project>

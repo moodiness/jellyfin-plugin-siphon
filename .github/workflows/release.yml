@@ -3,40 +3,89 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to publish or recover; historical projects receive provenance without source edits'
+        required: true
+        type: string
+      assets_only:
+        description: 'Verify/publish assets without opening the catalog pull request'
+        default: false
+        type: boolean
+      recover_run_id:
+        description: 'Optional prior workflow run ID: reuse its exact artifacts rather than rebuild'
+        required: false
+        type: string
+
+# One publisher for the entire repository, not one per tag. Never cancel a publisher.
+concurrency:
+  group: siphon-release-publication
+  cancel-in-progress: false
 
 permissions:
   contents: write
+  pull-requests: write
+  actions: read
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      SIPHON_SOURCE_ROOT: ${{ github.workspace }}/source
+      PYTHONDONTWRITEBYTECODE: '1'
     steps:
+      # Tooling belongs to this workflow revision, not to the historical source tag.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: automation
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          path: source
+          fetch-depth: 0
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
         with:
           dotnet-version: '10.0.x'
-      - name: Verify release version
+      - name: Check clean release tag and metadata
+        # Git, Python 3.10+ and gh are provided by the Ubuntu runner.
+        run: python3 automation/scripts/check-release.py --tag "$RELEASE_TAG" --require-clean
+      - name: Build and test tagged source
+        if: ${{ !inputs.recover_run_id }}
+        run: dotnet test source/Jellyfin.Plugin.Siphon.sln -c Release "-p:CustomBeforeMicrosoftCommonTargets=$GITHUB_WORKSPACE/automation/tools/PackageVerifier/Provenance.targets"
+      - name: Package actual binaries
+        if: ${{ !inputs.recover_run_id }}
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: python3 scripts/check-release.py
-      - name: Build and test
-        run: dotnet test Jellyfin.Plugin.Siphon.sln -c Release
-      - name: Package plugin
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: python3 automation/scripts/package.py --output "$RUNNER_TEMP/siphon-release" --release-url "https://github.com/$RELEASE_REPOSITORY/releases/download/$RELEASE_TAG"
+      - name: Recover exact artifacts without rebuilding the plugin
+        if: ${{ inputs.recover_run_id }}
         env:
-          RELEASE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}
-        run: python3 scripts/package.py --release-url "$RELEASE_URL"
-      - name: Update repository manifest
-        run: cp artifacts/manifest.json manifest.json
-      - name: Commit repository manifest
+          RECOVER_RUN_ID: ${{ inputs.recover_run_id }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add manifest.json
-          git diff --cached --quiet || git commit -m "chore(release): update plugin manifest for ${{ github.ref_name }}"
-          git push origin HEAD:main
-      - name: Publish release assets
+          gh run download "$RECOVER_RUN_ID" --repo "$RELEASE_REPOSITORY" --name "siphon-release-$RELEASE_TAG" --dir "$RUNNER_TEMP/siphon-release"
+          dotnet restore source/src/Jellyfin.Plugin.Siphon/Jellyfin.Plugin.Siphon.csproj
+      - name: Verify source, archive binaries and metadata
         env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: python3 automation/scripts/check-release.py --tag "$RELEASE_TAG" --require-clean --artifacts "$RUNNER_TEMP/siphon-release" --release-url "https://github.com/$RELEASE_REPOSITORY/releases/download/$RELEASE_TAG"
+      - name: Publish immutable assets before proposing catalog update
+        env:
+          ASSETS_ONLY: ${{ inputs.assets_only }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
         run: |
-          gh release create "$RELEASE_TAG" artifacts/*.zip artifacts/SHA256SUMS --title "$RELEASE_TAG" --generate-notes
+          args=()
+          if [ "$ASSETS_ONLY" = "true" ]; then args+=(--assets-only); fi
+          python3 automation/scripts/release.py --tag "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --artifacts "$RUNNER_TEMP/siphon-release" "${args[@]}"
+      - name: Retain exact verified publication artifacts for recovery
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: siphon-release-${{ inputs.tag || github.ref_name }}
+          path: ${{ runner.temp }}/siphon-release/*
+          if-no-files-found: ignore

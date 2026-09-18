@@ -16,6 +16,30 @@ public sealed class DownloadsController(DownloadQueueService queue, IAuthorizati
     public Task<IActionResult> Enqueue([FromBody] DownloadQueueRequest request)
         => ForUser(async user => Ok(await queue.EnqueueAsync(user, request, HttpContext.RequestAborted).ConfigureAwait(false)));
 
+    [HttpPost("Preparation")]
+    public Task<IActionResult> Preparation([FromBody] DownloadPreparationRequest request)
+        => ForUser(async user => Ok(await queue.PreparationAsync(user, request, HttpContext.RequestAborted).ConfigureAwait(false)));
+
+    [HttpPost("BatchPreview")]
+    public Task<IActionResult> BatchPreview([FromBody] DownloadBatchPreviewRequest request)
+        => ForUser(async user => Ok(await queue.BatchPreviewAsync(user, request.ItemId, HttpContext.RequestAborted).ConfigureAwait(false)));
+
+    [HttpPost("Batch")]
+    public Task<IActionResult> Batch([FromBody] DownloadBatchRequest request)
+        => ForUser(async user => Ok(await queue.BatchAsync(user, request, HttpContext.RequestAborted).ConfigureAwait(false)));
+
+    [HttpPost("{id:guid}/Pause")]
+    public Task<IActionResult> Pause(Guid id)
+        => ForUser(async user => Ok(await queue.PauseAsync(user, id, HttpContext.RequestAborted).ConfigureAwait(false)));
+
+    [HttpPost("{id:guid}/Resume")]
+    public Task<IActionResult> Resume(Guid id)
+        => ForUser(async user => Ok(await queue.ResumeAsync(user, id, HttpContext.RequestAborted).ConfigureAwait(false)));
+
+    [HttpPut("{id:guid}/Priority")]
+    public Task<IActionResult> Priority(Guid id, [FromBody] DownloadPriorityRequest request)
+        => ForUser(async user => Ok(await queue.SetPriorityAsync(user, id, request.Priority, HttpContext.RequestAborted).ConfigureAwait(false)));
+
     [HttpPost("{id:guid}/Cancel")]
     public Task<IActionResult> Cancel(Guid id) => ForUser(async user =>
     {
@@ -65,9 +89,9 @@ public sealed class DownloadsController(DownloadQueueService queue, IAuthorizati
         if (user is null) return Unauthorized();
         // Read only the authenticated account; userId route/query values never grant impersonation.
         try { return await operation(user.Id).ConfigureAwait(false); }
-        catch (DownloadQueueException exception) { return StatusCode(exception.StatusCode, new { Message = exception.Message }); }
+        catch (DownloadQueueException exception) { return StatusCode(exception.StatusCode, new { exception.Code, exception.Message }); }
         catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested) { throw; }
-        catch { return StatusCode(503, new { Message = "The download queue is temporarily unavailable." }); }
+        catch { return StatusCode(503, new { Code = "DownloadUnavailable", Message = "The download queue is temporarily unavailable." }); }
     }
 
     private void PrivateResponse()

@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 namespace Jellyfin.Plugin.Siphon.Downloads;
 
 [JsonConverter(typeof(JsonStringEnumConverter<DownloadJobState>))]
-internal enum DownloadJobState { Queued, Running, Completed, Failed, Cancelled }
+internal enum DownloadJobState { Queued, Running, Paused, Completed, Failed, Cancelled }
 
 // Only stable native identities and digests belong in this ledger, never a resolved source.
 internal sealed record DownloadJob
@@ -23,6 +23,12 @@ internal sealed record DownloadJob
     public long? TotalBytes { get; init; }
     public long StoredBytes { get; init; }
     public long ReservedBytes { get; init; }
+    public int Priority { get; init; }
+    public string Phase { get; init; } = "Waiting";
+    public string[]? AudioLanguages { get; init; }
+    public string[]? SubtitleLanguages { get; init; }
+    public double? BytesPerSecond { get; init; }
+    public double? EstimatedSecondsRemaining { get; init; }
     public string? FileName { get; init; }
     public string? ContentType { get; init; }
     public DateTimeOffset CreatedUtc { get; init; }
@@ -32,12 +38,36 @@ internal sealed record DownloadJob
 }
 
 public sealed record DownloadJobSummary(Guid Id, Guid ItemId, string MediaSourceId, string Name, string State,
-    long BytesReceived, long? TotalBytes, DateTimeOffset CreatedUtc, DateTimeOffset UpdatedUtc, string? Error, bool CanRetry);
-public sealed record DownloadQueueResponse(bool Enabled, bool Allowed, IReadOnlyList<DownloadJobSummary> Jobs, long UsedBytes, long MaximumBytes);
-public sealed record DownloadQueueRequest(Guid ItemId, string MediaSourceId);
+    long BytesReceived, long? TotalBytes, DateTimeOffset CreatedUtc, DateTimeOffset UpdatedUtc, string? Error, bool CanRetry,
+    int Priority, string Phase, double? BytesPerSecond, double? EstimatedSecondsRemaining, DateTimeOffset? NextEligibleUtc,
+    string[]? AudioLanguages, string[]? SubtitleLanguages);
+public sealed record DownloadQueueResponse(bool Enabled, bool Allowed, IReadOnlyList<DownloadJobSummary> Jobs, long UsedBytes, long MaximumBytes,
+    long UserMaximumBytes, long ReservedBytes, bool WindowEnabled, int WindowStartUtcHour, int WindowEndUtcHour);
+public sealed record DownloadQueueRequest(Guid ItemId, string MediaSourceId, string[]? AudioLanguages = null, string[]? SubtitleLanguages = null, int Priority = 0);
+public sealed record DownloadPriorityRequest(int Priority);
+public sealed record DownloadPreparationRequest(Guid ItemId, string MediaSourceId);
+public sealed record DownloadPreparation(string Kind, string[] AudioLanguages, string[] SubtitleLanguages,
+    long? EstimatedSourceBytes, long? EstimatedTemporaryBytes, string[] Warnings);
+public sealed record DownloadBatchPreviewRequest(Guid ItemId);
+public sealed record DownloadBatchSource(string MediaSourceId, string Name, long? Size, string Kind);
+public sealed record DownloadBatchItem(Guid ItemId, string Name, int? SeasonNumber, int? EpisodeNumber, DownloadBatchSource[] Sources);
+public sealed record DownloadBatchPreview(string Token, DateTimeOffset ExpiresAtUtc, DownloadBatchItem[] Items, bool Truncated, int MaximumJobs);
+public sealed record DownloadBatchRequest(string Token, DownloadQueueRequest[] Items);
+public sealed record DownloadBatchRejection(Guid ItemId, string Message, string Code);
+public sealed record DownloadBatchResult(DownloadJobSummary[] Jobs, DownloadBatchRejection[] Rejected);
+public sealed record DownloadQueueHealth(bool Enabled, int Queued, int Running, int Paused, int Failed, int Completed,
+    long StoredBytes, long ReservedBytes, long MaximumBytes);
 public sealed record DownloadFileTicket(string Url, DateTimeOffset ExpiresAtUtc);
 
-internal sealed class DownloadQueueException(int statusCode, string message) : Exception(message)
+internal sealed class DownloadQueueException(int statusCode, string message, string? code = null) : Exception(message)
 {
     public int StatusCode { get; } = statusCode;
+    public string Code { get; } = code ?? statusCode switch
+    {
+        400 => "DownloadInvalidRequest",
+        403 => "DownloadPermissionDenied",
+        404 => "DownloadSourceUnavailable",
+        429 => "DownloadBusy",
+        _ => "DownloadUnavailable"
+    };
 }

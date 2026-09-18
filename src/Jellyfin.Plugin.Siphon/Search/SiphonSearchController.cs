@@ -55,4 +55,22 @@ public sealed class SiphonSearchController(AddonSearchService search, IAuthoriza
         }
         catch (Exception) { return StatusCode(502, new { Message = "The title could not be added. Its addon may be unavailable or could not supply usable metadata." }); }
     }
+
+    [HttpDelete("Items/{id:guid}")]
+    public async Task<ActionResult<SearchRemoval>> Remove(Guid id, CancellationToken cancellationToken)
+    {
+        var user = (await authorization.GetAuthorizationInfo(HttpContext).ConfigureAwait(false)).User;
+        if (user is null) return Unauthorized();
+        try
+        {
+            var result = await search.RemoveAsync(id, user, cancellationToken).ConfigureAwait(false);
+            return result is null ? NotFound() : result;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (SearchAdmissionException exception)
+        {
+            return StatusCode(exception.Code == "Busy" ? 503 : 409, new { exception.Code, exception.Message });
+        }
+        catch (Exception) { return StatusCode(502, new { Message = "The saved title could not be removed. Refresh additions and check the Siphon server log before retrying." }); }
+    }
 }

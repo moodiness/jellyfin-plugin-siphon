@@ -1,5 +1,4 @@
 using Jellyfin.Plugin.Siphon.Configuration;
-using Jellyfin.Plugin.Siphon.Identity;
 using Jellyfin.Plugin.Siphon.Infrastructure;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Session;
@@ -14,8 +13,6 @@ public sealed class CalendarNotificationService(ConfigurationAccessor configurat
     SiphonStateStore state, FollowedCalendarService calendar, CalendarNotificationStore inbox,
     IUserManager users, ISessionManager sessions, ILogger<CalendarNotificationService> logger) : BackgroundService
 {
-    private long _revision = -1;
-    private IReadOnlyList<ManagedItem> _managed = [];
     private int _offset;
     private readonly Dictionary<Guid, (long Revision, DateTimeOffset NextScanUtc)> _observed = [];
 
@@ -46,8 +43,6 @@ public sealed class CalendarNotificationService(ConfigurationAccessor configurat
         await inbox.SynchronizeRecipientsAsync(all.Keys.ToHashSet(), enabledIds, DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
         if (enabled.Length == 0)
         {
-            _managed = [];
-            _revision = -1;
             _offset = 0;
             return;
         }
@@ -64,14 +59,10 @@ public sealed class CalendarNotificationService(ConfigurationAccessor configurat
             IReadOnlyList<CalendarNotification> generated;
             try
             {
-                var revision = state.Revision;
-                if (_revision != revision)
-                {
-                    _managed = state.GetItems();
-                    _revision = revision;
-                }
+                var managed = state.GetReadSnapshot();
+                var revision = managed.Revision!.Value;
                 var now = DateTimeOffset.UtcNow;
-                var snapshot = await calendar.GetSnapshotAsync(all[id], now, ct, _managed).ConfigureAwait(false);
+                var snapshot = await calendar.GetSnapshotAsync(all[id], now, ct, managed.Items).ConfigureAwait(false);
                 if (snapshot.Truncated)
                 {
                     logger.LogWarning("Siphon calendar observation exceeded its episode limit for user {UserId}; cursor not advanced", id);

@@ -85,6 +85,58 @@ public sealed class NotificationWebhookDeliveryTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Service.TestAsync(fixture.User.Id, default));
     }
 
+    [Theory]
+    [InlineData("Discord", "/private-topic?wait=true", "content")]
+    [InlineData("Slack", "/private-topic", "blocks")]
+    [InlineData("Ntfy", "/", "topic")]
+    public async Task VendorTestsUseCheckedPostWithoutManualSecretExchange(string adapter, string path, string requiredField)
+    {
+        using var fixture = new Fixture();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var origin = new TcpListener(IPAddress.Loopback, 0);
+        origin.Start();
+        var url = "http://" + origin.LocalEndpoint + "/private-topic";
+        await fixture.Preferences.SaveAsync(fixture.User.Id, new() { NotificationsEnabled = true }, deadline.Token);
+        await fixture.Service.ConfigureAsync(fixture.User.Id, new(true, url) { Adapter = adapter }, deadline.Token);
+        var served = Receive(origin, "204 No Content", deadline.Token);
+        var result = await fixture.Service.TestAsync(fixture.User.Id, deadline.Token);
+        var request = await served;
+        Assert.True(result.Success);
+        Assert.Equal("POST " + path + " HTTP/1.1", request.StartLine);
+        using var document = JsonDocument.Parse(request.Body);
+        Assert.True(document.RootElement.TryGetProperty(requiredField, out _));
+        Assert.StartsWith("sha256=", request.Headers["X-Siphon-Signature"]);
+        var status = fixture.Service.GetStatus(fixture.User.Id);
+        Assert.Equal("Delivered", status.LastOutcome);
+        Assert.Equal(1, status.LastAttemptCount);
+        Assert.NotNull(status.LastAttemptUtc);
+        Assert.Null(status.NextAttemptUtc);
+        Assert.Equal(1, fixture.Service.GetHealth().ConfiguredUsers);
+    }
+
+    [Fact]
+    public async Task FailedTestIsExplicitlyAbandonedAndStatusNeverIncludesReceiverResponse()
+    {
+        using var fixture = new Fixture();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var origin = new TcpListener(IPAddress.Loopback, 0);
+        origin.Start();
+        await fixture.Preferences.SaveAsync(fixture.User.Id, new() { NotificationsEnabled = true }, deadline.Token);
+        await fixture.Service.ConfigureAsync(fixture.User.Id,
+            new(true, "http://" + origin.LocalEndpoint + "/private-topic") { Adapter = "Slack" }, deadline.Token);
+        var served = Receive(origin, "503 secret-receiver-error", deadline.Token);
+        var result = await fixture.Service.TestAsync(fixture.User.Id, deadline.Token);
+        await served;
+        Assert.False(result.Success);
+        Assert.Equal("WebhookDeliveryFailed", result.Code);
+        var status = fixture.Service.GetStatus(fixture.User.Id);
+        Assert.Equal("Abandoned", status.LastOutcome);
+        Assert.Equal(1, status.AbandonedCount);
+        Assert.Equal(1, fixture.Service.GetHealth().Abandoned);
+        Assert.DoesNotContain("secret-receiver-error", JsonSerializer.Serialize(status));
+        Assert.Null(status.NextAttemptUtc);
+    }
+
     private static async Task<Request> Receive(TcpListener origin, string response, CancellationToken ct)
     {
         using var connection = await origin.AcceptTcpClientAsync(ct);
