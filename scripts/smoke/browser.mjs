@@ -92,7 +92,10 @@ try {
 
     // Native web login uses the actual form and Jellyfin's own ApiClient/session setup.
     stage = 'native-admin-login';
-    await page.goto(config.base + '/web/index.html#/login');
+    // Jellyfin's native return URL avoids entering and tearing down the home
+    // queries. Global network idleness is not a reliable SPA readiness signal.
+    const adminRoute = '/configurationpage?name=siphon';
+    await page.goto(config.base + '/web/index.html#/login?url=' + encodeURIComponent(adminRoute));
     const manual = page.locator('#btnManual, .btnManual').or(page.getByRole('button', { name: /manual login|sign in manually/i })).first();
     const username = page.locator('input[autocomplete="username"]').first();
     await Promise.any([manual.waitFor({ state: 'visible' }), username.waitFor({ state: 'visible' })]);
@@ -100,13 +103,9 @@ try {
     await username.fill('smoke-admin');
     await page.locator('#txtManualPassword, input[name="password"]').first().fill(config.password);
     await page.locator('#txtManualPassword, input[name="password"]').first().press('Enter');
-    await page.waitForURL(url => !/login/i.test(url.hash), { timeout: 30000 });
-    // Let the newly authenticated home queries finish before navigating away.
-    // Otherwise Jellyfin can emit an uncaught query cancellation during route teardown.
-    await page.waitForLoadState('networkidle');
+    await page.waitForURL(url => url.hash === '#' + adminRoute, { timeout: 30000 });
     evidence.nativeAdminLogin = true;
     stage = 'embedded-admin-load';
-    await page.goto(config.base + '/web/index.html#/configurationpage?name=siphon');
     await page.locator('#SiphonConfigPage').waitFor({ state: 'visible' });
     await page.waitForFunction(() => document.querySelector('#siphonFields')?.disabled === false);
     await keyboardTabs('#SiphonConfigPage');
