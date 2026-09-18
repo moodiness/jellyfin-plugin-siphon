@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/moodiness/jellyfin-plugin-siphon/main/assets/siphon-jellyfin.png",
     "versions": [
       {
+        "version": "1.6.2.0",
+        "targetAbi": "12.1.0.0",
+        "sourceUrl": "https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.6.2/siphon-1.6.2.0.zip",
+        "checksum": "0ccf05b5abd503e953ea0d5346775ce1",
+        "timestamp": "2026-09-18T19:22:17Z",
+        "changelog": "Identify failed catalog subscriptions in Tasks and synchronization history with stable identities and safe causes, persisted across restarts without exposing credentials or upstream errors. Partial synchronization still reports Failed and preserves prior media. Fix equivalent GUID handling and keep non-playable metadata available for canonical and retired versions so native progress/stop reports can save resume state without reopening retired sources or crossing user boundaries. Adds English/French failure details and regression coverage for catalog preservation, safe persistence and playback reporting."
+      },
+      {
         "version": "1.6.1.0",
         "targetAbi": "12.1.0.0",
         "sourceUrl": "https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.6.1/siphon-1.6.1.0.zip",
