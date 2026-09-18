@@ -623,6 +623,20 @@ http {
             evidence.update(episodes=len(selections), ownerBoundPreview=True, singleUsePreview=True, windowReopened=True)
 
     def notifications(self):
+        def observation():
+            paths = list((self.temp / "config").glob("**/siphon/calendar-notifications.json"))
+            require(len(paths) == 1, "Owned notification cursor path is ambiguous")
+            users = json.loads(paths[0].read_text())["Users"]
+            cursor = next(value for key, value in users.items() if uuid.UUID(key) == uuid.UUID(self.alice.user_id))
+            calendar = self.alice.call("GET", "/Siphon/Calendar?from=2020-01-01&to=2020-01-31")["Items"]
+            return {
+                "observedUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "cursorUpdatedUtc": cursor["UpdatedUtc"], "enabled": cursor["Enabled"],
+                "observedEpisodes": sum(uuid.UUID(row["SeriesId"]) == uuid.UUID(self.series) for row in cursor["Observations"]),
+                "calendarEpisodes": [row["EpisodeNumber"] for row in calendar if uuid.UUID(row["SeriesId"]) == uuid.UUID(self.series)],
+                "inbox": [{"kind": row["Kind"], "episode": row["Episode"]["EpisodeNumber"]} for row in cursor["Inbox"]]
+            }
+
         with self.step("signed-notification-adapters") as evidence:
             self.alice.call("POST", f"/Users/{self.alice.user_id}/FavoriteItems/{self.series}")
             self.alice.call("PUT", "/Siphon/Preferences", {"SearchMode": "Inherit", "NotificationsEnabled": True})
@@ -674,15 +688,20 @@ http {
             secret = self.alice.call("POST", "/Siphon/Notifications/Webhook/Secret")["Secret"]
             require(not self.alice.call("GET", "/Siphon/Notifications")["Items"], "Opt-in unexpectedly delivered historical backlog")
             before = len(self.fixture_api.call("GET", "/control/events"))
+            evidence["beforePublication"] = observation()
             self.fixture_api.call("POST", "/control/episodes", {"count": 2})
             self.sync()
             eventually(lambda: self.items("Episode"),
                 lambda rows: any(uuid.UUID(row["SeriesId"]) == uuid.UUID(self.series) and row["IndexNumber"] == 2 for row in rows),
                 description="second native episode publication")
             evidence["secondEpisodePublished"] = True
-            inbox = eventually(lambda: self.alice.call("GET", "/Siphon/Notifications"),
-                lambda value: any(row["Kind"] == "NewEpisode" and row["Episode"]["EpisodeNumber"] == 2 for row in value["Items"]),
-                timeout=150, description="native followed-series notification")
+            evidence["afterPublication"] = observation()
+            try:
+                inbox = eventually(lambda: self.alice.call("GET", "/Siphon/Notifications"),
+                    lambda value: any(row["Kind"] == "NewEpisode" and row["Episode"]["EpisodeNumber"] == 2 for row in value["Items"]),
+                    timeout=150, description="native followed-series notification")
+            finally:
+                evidence["afterObservation"] = observation()
             require(not self.bob.call("GET", "/Siphon/Notifications")["Items"], "Private notification appeared for an unfollowing user")
             events = eventually(lambda: self.fixture_api.call("GET", "/control/events"), lambda rows: len(rows) > before,
                                 timeout=90, description="actual calendar event webhook")
