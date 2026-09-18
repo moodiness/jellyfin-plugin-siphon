@@ -99,9 +99,12 @@ try {
     stage = 'native-login-form';
     const manual = page.locator('#btnManual, .btnManual').or(page.getByRole('button', { name: /manual login|sign in manually/i })).first();
     const username = page.locator('input[autocomplete="username"]').first();
-    await Promise.any([manual.waitFor({ state: 'visible' }), username.waitFor({ state: 'visible' })]);
+    // The manual button is visible in the initial template, then disappears when
+    // the public-user response opens the form. Wait for a rendered login choice.
+    const publicUserCard = page.locator('#divUsers .card').first();
+    await Promise.any([publicUserCard.waitFor({ state: 'visible' }), username.waitFor({ state: 'visible' })]);
     stage = 'native-login-manual';
-    if (await manual.isVisible()) await manual.click();
+    if (!await username.isVisible()) await manual.click();
     stage = 'native-login-username';
     await username.fill('smoke-admin');
     stage = 'native-login-password';
