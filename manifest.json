@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/moodiness/jellyfin-plugin-siphon/main/assets/siphon-jellyfin.png",
     "versions": [
       {
+        "version": "1.6.0.0",
+        "targetAbi": "12.1.0.0",
+        "sourceUrl": "https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.6.0/siphon-1.6.0.0.zip",
+        "checksum": "5b9a7605f16ff145ae8799f81f029ed2",
+        "timestamp": "2026-09-18T00:07:04Z",
+        "changelog": "Persistent private downloads with pause, priority, per-user quotas, UTC scheduling, batch preparation and explicit track selection; bounded playback admission and read snapshots; opt-in notification adapters and digests; translated administration and personal controls, aggregate local health, offline backup and restore, and verified assets-first publication. Saved-library restoration no longer blocks host startup. Search additions/removals publish only affected titles, recover missing preview artwork, preserve retained history and expose confirmed removal controls. A padded catalog image preserves the original logo. Finite HLS exports support validated video formats; audio-only/live HLS and unsupported DRM are rejected, and resumed HLS jobs restage rather than append."
+      },
+      {
         "version": "1.5.0.0",
         "targetAbi": "12.1.0.0",
         "sourceUrl": "https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.5.0/siphon-1.5.0.0.zip",
