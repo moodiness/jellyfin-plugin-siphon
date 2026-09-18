@@ -71,8 +71,11 @@ public sealed class CalendarIsolationTests
             var first = FollowedSeriesSelectorTests.Episode("contention");
             var second = first with
             {
-                Key = first.ContentKey + ":1:2", VideoId = first.ContentId + ":video:2",
-                Episode = 2, Path = first.Path + "-2", StreamIdentities = [new("series", first.ContentId + ":video:2")]
+                Key = first.ContentKey + ":1:2",
+                VideoId = first.ContentId + ":video:2",
+                Episode = 2,
+                Path = first.Path + "-2",
+                StreamIdentities = [new("series", first.ContentId + ":video:2")]
             };
             await database.Seed(first.ContentKey, favorite: true);
             await using var context = database.CreateDbContext();
@@ -85,8 +88,11 @@ public sealed class CalendarIsolationTests
             };
             Episode Published(ManagedItem item) => new()
             {
-                Id = identities["siphon:media:" + item.Key], Name = item.Name, SeriesName = item.SeriesName,
-                ParentIndexNumber = item.Season, IndexNumber = item.Episode,
+                Id = identities["siphon:media:" + item.Key],
+                Name = item.Name,
+                SeriesName = item.SeriesName,
+                ParentIndexNumber = item.Season,
+                IndexNumber = item.Episode,
                 PremiereDate = new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc),
                 ProviderIds = new Dictionary<string, string> { ["Siphon"] = item.Key }
             };
