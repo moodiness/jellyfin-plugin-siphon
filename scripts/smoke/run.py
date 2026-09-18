@@ -5,9 +5,11 @@ import base64
 from contextlib import contextmanager
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import signal
@@ -446,6 +448,7 @@ http {
             expected = (self.temp / "fixture/media/movie.mp4").read_bytes()
             require(hashlib.sha256(data).digest() == hashlib.sha256(expected).digest(), "Native progressive playback bytes differ from generated fixture")
             evidence.update(profileIsolation=True, importedIdentityPreserved=True, progressiveSha256=hashlib.sha256(data).hexdigest())
+        self.internal_playback_routing()
         with self.step("series-search-artwork-add-remove-and-catalog-retention") as evidence:
             series_preview = next((item for item in found if item.get("CanAdd") and item["Type"] == "Series"), None)
             require(series_preview is not None, "Series discovery did not return an importable preview")
@@ -521,6 +524,99 @@ http {
             if opened.get("RequiresClosing") and opened.get("LiveStreamId"):
                 self.alice.call("POST", "/LiveStreams/Close?" + urllib.parse.urlencode({"LiveStreamId": opened["LiveStreamId"]}))
             evidence.update(nativeProbed=True, decodedSeconds=2, revokedPlayback=True)
+
+    def internal_playback_routing(self):
+        with self.step("native-playback-with-unreachable-public-origin") as evidence:
+            original = self.config()
+            ingress = self.api.base
+            # Closed loopback port inside the owned container: no external DNS or server.
+            public = "http://127.0.0.2:1"
+            public_origin = urllib.parse.urlsplit(public).netloc
+            try:
+                self.save_config({**original, "PublicBaseUrl": public})
+                reachable = self.docker("exec", self.name + "-jellyfin", "bash", "-c",
+                                        "if (exec 3<>/dev/tcp/127.0.0.2/1) 2>/dev/null; then echo open; else echo closed; fi",
+                                        timeout=15)
+                require(reachable == "closed", "Owned public origin unexpectedly accepted a TCP connection")
+                evidence["publicOriginRejectedInsideContainer"] = True
+                profile = {"Name": "Owned local remux", "MaxStreamingBitrate": 10000000, "DirectPlayProfiles": [],
+                    "TranscodingProfiles": [{"Type": "Video", "Container": "mp4", "Protocol": "hls", "VideoCodec": "h264",
+                        "AudioCodec": "aac", "Context": "Streaming", "MaxAudioChannels": "2"}]}
+
+                def open_selected(suffix):
+                    selected = self.source(self.alice, suffix)
+                    info = self.alice.call("POST", f"/Items/{self.movie}/PlaybackInfo?UserId={self.alice.user_id}", {
+                        "UserId": self.alice.user_id, "MediaSourceId": selected["MediaSourceId"],
+                        "AutoOpenLiveStream": True, "EnableDirectPlay": False, "EnableDirectStream": False,
+                        "DeviceProfile": profile})
+                    opened = next(row for row in info["MediaSources"] if row["Id"] == selected["MediaSourceId"])
+                    require(not opened.get("RequiresOpening") and not opened.get("LiveStreamId") and not opened.get("RequiresClosing"),
+                            "PlaybackInfo did not finish the finite source opening lifecycle")
+                    require(urllib.parse.urlsplit(opened["Path"]).netloc == public_origin,
+                            "Opening changed the advertised public origin")
+                    encoder = urllib.parse.urlsplit(opened.get("EncoderPath", ""))
+                    require(encoder.scheme == "http" and ipaddress.ip_address(encoder.hostname).is_private
+                            and encoder.port == 8096 and encoder.path.startswith("/Siphon/media/"),
+                            "Native encoder input did not use owned local HTTP")
+                    require(any(row.get("Type") == "Video" and row.get("Codec") for row in opened["MediaStreams"])
+                            and any(row.get("Type") == "Audio" for row in opened["MediaStreams"]),
+                            "Native local probing did not discover video and audio")
+                    return opened, info
+
+                def inspect_playlists(root, origin):
+                    pending, seen, segments = [root], set(), 0
+                    while pending:
+                        url = pending.pop()
+                        if url in seen:
+                            continue
+                        seen.add(url)
+                        require(len(seen) <= 16, "Unexpected owned HLS playlist fanout")
+                        parsed = urllib.parse.urlsplit(url)
+                        require(parsed.netloc == origin, "HLS child escaped the reader origin")
+                        # Fetch capabilities through unchanged ingress without exporting them.
+                        body = self.alice.call("GET", parsed.path + ("?" + parsed.query if parsed.query else ""), raw=True)
+                        text = body.decode("utf-8")
+                        require(text.startswith("#EXTM3U") and public_origin not in text,
+                                "Nested HLS retained the unreachable public origin")
+                        references = re.findall(r'URI="([^"\r\n]+)"', text)
+                        references.extend(line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#"))
+                        for reference in references:
+                            child = urllib.parse.urljoin(url, reference)
+                            part = urllib.parse.urlsplit(child)
+                            require(part.netloc == origin, "HLS reference changed reader origin")
+                            if part.path.endswith(".m3u8"):
+                                pending.append(child)
+                            elif part.path.endswith((".ts", ".m4s", ".mp4")):
+                                payload = self.alice.call("GET", part.path + ("?" + part.query if part.query else ""), raw=True)
+                                require(bool(payload), "Owned HLS segment was empty")
+                                segments += 1
+                    require(segments > 0, "Owned HLS exposed no media segments")
+                    return len(seen), segments
+
+                progressive, info = open_selected(" HTTP")
+                native = urllib.parse.urljoin("http://jellyfin:8096", progressive["TranscodingUrl"])
+                playlists, segments = inspect_playlists(native, "jellyfin:8096")
+                self.docker("exec", self.name + "-jellyfin", FFMPEG, "-v", "error", "-i", native,
+                            "-t", "2", "-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-", timeout=90)
+                evidence.update(selectedProgressiveVersionPreserved=True, progressivePublicPathPreserved=True,
+                                progressiveEncoderLocal=True, nativeRemuxPlaylistCount=playlists,
+                                nativeRemuxSegmentCount=segments, nativeRemuxDecodedSeconds=2)
+
+                hls, _ = open_selected(" HLS")
+                encoder = hls["EncoderPath"]
+                playlists, segments = inspect_playlists(encoder, urllib.parse.urlsplit(encoder).netloc)
+                require(playlists > 1, "Upstream HLS did not exercise nested playlists")
+                self.docker("exec", self.name + "-jellyfin", FFMPEG, "-v", "error", "-i", encoder,
+                            "-t", "2", "-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-", timeout=90)
+                evidence.update(selectedHlsVersionPreserved=True, hlsPublicPathPreserved=True,
+                                hlsEncoderLocal=True, hlsPlaylistCount=playlists, hlsSegmentCount=segments,
+                                hlsDecodedSeconds=2, nestedReferencesRetainReaderOrigin=True)
+            finally:
+                # The public client origin must survive the owned scenario unchanged.
+                self.save_config(original)
+                evidence["publicConfigurationRestored"] = self.config()["PublicBaseUrl"] == original["PublicBaseUrl"]
+                require(evidence["publicConfigurationRestored"], "Owned public configuration was not restored")
+                require(self.api.base == ingress, "Ingress API origin changed during internal routing scenario")
 
     def job(self, api, identifier):
         return next(row for row in api.call("GET", "/Siphon/Downloads")["Jobs"] if row["Id"] == identifier)

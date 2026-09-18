@@ -31,6 +31,7 @@ The current source implements the following boundaries:
 
 - upstream media and subtitle requests are made by the server, not directly by clients;
 - clients receive opaque, expiring capability tokens rather than upstream URLs or addon headers;
+- native FFmpeg/ffprobe self-reads use a bound local Jellyfin address and its native HTTP port, not public URL overrides or caller-supplied hosts. Public client paths remain unchanged and relative HLS child capabilities retain the reader's origin/base path. Local requests still require valid capabilities and current account/library permissions; addon and upstream-media SSRF policy is not relaxed;
 - HTTP(S) media and HLS are supported; a separately opt-in, bounded MonoTorrent engine handles supported P2P sources. Debrid clients and external-player handoffs are not implemented;
 - DNS resolution and redirects are checked against SSRF policy, including HTTPS downgrade and cross-origin credential handling;
 - private destinations require exact hostname exceptions configured by an administrator; exception-approved connections are not pooled, so later requests cannot reuse them after an exception is removed;

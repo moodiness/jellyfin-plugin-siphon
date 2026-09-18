@@ -1,5 +1,8 @@
 using System.Globalization;
+using System.Net;
 using Jellyfin.Plugin.Siphon.Infrastructure;
+using MediaBrowser.Common.Net;
+using MediaBrowser.Controller;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
@@ -21,7 +24,9 @@ public sealed class SiphonMediaSourceProvider(
     Configuration.ConfigurationAccessor configuration,
     IMediaEncoder encoder,
     PlaybackAccess access,
-    IMediaSegmentManager segmentManager) : IMediaSourceProvider
+    IMediaSegmentManager segmentManager,
+    IServerApplicationHost applicationHost,
+    INetworkManager network) : IMediaSourceProvider
 {
     public async Task<IEnumerable<MediaSourceInfo>> GetMediaSources(BaseItem item, CancellationToken cancellationToken)
     {
@@ -42,6 +47,7 @@ public sealed class SiphonMediaSourceProvider(
         var selectedVersions = string.IsNullOrEmpty(video.GetProviderId(NativeVersionService.VersionProvider))
             ? available
             : available.Where(version => version.Item.Id == video.Id);
+        var localBaseUrl = LocalBaseUrl();
         return selectedVersions.Select(version =>
         {
             var stream = version.Stream;
@@ -49,6 +55,8 @@ public sealed class SiphonMediaSourceProvider(
             var source = nativeSources[version.Item.Id.ToString("N", CultureInfo.InvariantCulture)];
             source.Name = stream.Name;
             source.Path = configuration.Current.PublicBaseUrl.TrimEnd('/') + "/Siphon/source/" + token;
+            source.EncoderPath = localBaseUrl + "/Siphon/source/" + token;
+            source.EncoderProtocol = MediaProtocol.Http;
             source.Protocol = MediaProtocol.Http;
             source.IsRemote = true;
             source.Size ??= stream.Size;
@@ -81,12 +89,17 @@ public sealed class SiphonMediaSourceProvider(
         var versionId = versions.FindVersionId(item, sourceId);
         if (versionId == Guid.Empty) throw new InvalidOperationException("The selected version is no longer available. Reload the item.");
         var session = sessions.Create(item, selected);
+        var encoderPath = LocalBaseUrl() + "/Siphon/media/" + ProxySessionStore.GetMediaPath(session);
 
         var source = new MediaSourceInfo
         {
             Id = versionId.ToString("N", CultureInfo.InvariantCulture),
             Name = session.Source.Name,
-            Path = sessions.GetUrl(session),
+            // GetMediaInfo reads Path rather than EncoderPath. Keep this source local
+            // until probing finishes, then return the public playback URL to clients.
+            Path = encoderPath,
+            EncoderPath = encoderPath,
+            EncoderProtocol = MediaProtocol.Http,
             Protocol = MediaProtocol.Http,
             IsRemote = true,
             Type = MediaSourceType.Default,
@@ -108,6 +121,7 @@ public sealed class SiphonMediaSourceProvider(
             MediaType = DlnaProfileType.Video,
             ExtractChapters = false
         }, deadline.Token).ConfigureAwait(false);
+        source.Path = sessions.GetUrl(session);
         source.Container = info.Container;
         source.Formats = info.Formats;
         source.Bitrate = info.Container == "hls" ? null : info.Bitrate;
@@ -119,6 +133,14 @@ public sealed class SiphonMediaSourceProvider(
         await versions.SaveMediaInfoAsync(versionId, source, cancellationToken).ConfigureAwait(false);
         source.HasSegments = segmentManager.HasSegments(versionId);
         return new ProxyLiveStream(source);
+    }
+
+    private string LocalBaseUrl()
+    {
+        // Published URLs and subnet overrides belong to clients, not local FFmpeg.
+        // Use an actual bound interface, the container's HTTP port and Jellyfin BaseUrl.
+        var host = network.GetBindAddress(IPAddress.Loopback, out _, skipOverrides: true);
+        return applicationHost.GetLocalApiUrl(host, Uri.UriSchemeHttp, applicationHost.HttpPort).TrimEnd('/');
     }
 
     /// <summary>Jellyfin owns playback; each proxy lease belongs to one user and selected source.</summary>

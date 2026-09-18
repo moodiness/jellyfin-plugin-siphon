@@ -152,7 +152,7 @@ public sealed class SiphonProxyController(
             }
 
             acquired = true;
-            await ProxyAsync(session, ct).ConfigureAwait(false);
+            await ProxyAsync(session, tokenKind == 0 ? "../" : "../media/", ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -274,7 +274,7 @@ public sealed class SiphonProxyController(
             && (uint)position < (uint)people.Count ? people[position].PhotoUrl : null;
 
 
-    private async Task ProxyAsync(ProxySession session, CancellationToken ct)
+    private async Task ProxyAsync(ProxySession session, string childPrefix, CancellationToken ct)
     {
         if (session.Source.P2p is not null)
         {
@@ -368,7 +368,7 @@ public sealed class SiphonProxyController(
                 }
 
                 await using var fullBody = await full.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-                await WritePlaylistAsync(session, fullBody, ReadOnlyMemory<byte>.Empty, full.RequestMessage?.RequestUri ?? finalUrl, readDeadline, ct).ConfigureAwait(false);
+                await WritePlaylistAsync(session, fullBody, ReadOnlyMemory<byte>.Empty, full.RequestMessage?.RequestUri ?? finalUrl, childPrefix, readDeadline, ct).ConfigureAwait(false);
                 return;
             }
             if (rootMedia)
@@ -402,11 +402,11 @@ public sealed class SiphonProxyController(
                 }
 
                 await using var completeBody = await full.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-                await WritePlaylistAsync(session, completeBody, ReadOnlyMemory<byte>.Empty, full.RequestMessage?.RequestUri ?? finalUrl, readDeadline, ct).ConfigureAwait(false);
+                await WritePlaylistAsync(session, completeBody, ReadOnlyMemory<byte>.Empty, full.RequestMessage?.RequestUri ?? finalUrl, childPrefix, readDeadline, ct).ConfigureAwait(false);
             }
             else
             {
-                await WritePlaylistAsync(session, body, prefix.AsMemory(0, prefixLength), finalUrl, readDeadline, ct).ConfigureAwait(false);
+                await WritePlaylistAsync(session, body, prefix.AsMemory(0, prefixLength), finalUrl, childPrefix, readDeadline, ct).ConfigureAwait(false);
             }
 
             return;
@@ -440,7 +440,7 @@ public sealed class SiphonProxyController(
         }
     }
 
-    private async Task WritePlaylistAsync(ProxySession session, Stream body, ReadOnlyMemory<byte> prefix, Uri finalUrl, CancellationTokenSource readDeadline, CancellationToken ct)
+    private async Task WritePlaylistAsync(ProxySession session, Stream body, ReadOnlyMemory<byte> prefix, Uri finalUrl, string childPrefix, CancellationTokenSource readDeadline, CancellationToken ct)
     {
         using var buffer = new MemoryStream();
         await buffer.WriteAsync(prefix, ct).ConfigureAwait(false);
@@ -464,7 +464,10 @@ public sealed class SiphonProxyController(
         var text = new UTF8Encoding(false, true).GetString(buffer.GetBuffer(), 0, (int)buffer.Length);
         // Validate all URI syntax before creating any child leases; malformed playlists leave no partial cache.
         _ = HlsPlaylistRewriter.Rewrite(text, finalUrl, _ => "validated");
-        var rewritten = HlsPlaylistRewriter.Rewrite(text, finalUrl, uri => sessions.GetUrl(sessions.CreateChild(session, uri)));
+        // Relative capabilities stay on the reader's origin and base path. FFmpeg's
+        // local playlists must not send segment/key requests back through the public proxy.
+        var rewritten = HlsPlaylistRewriter.Rewrite(text, finalUrl,
+            uri => childPrefix + ProxySessionStore.GetMediaPath(sessions.CreateChild(session, uri)));
         var bytes = Encoding.UTF8.GetBytes(rewritten);
         Response.StatusCode = 200;
         Response.ContentType = "application/vnd.apple.mpegurl";

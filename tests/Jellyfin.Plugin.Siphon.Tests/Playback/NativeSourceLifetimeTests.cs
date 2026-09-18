@@ -163,6 +163,47 @@ public sealed class NativeSourceLifetimeTests
             "not-a-source", null, false, CancellationToken.None));
     }
 
+    [Fact]
+    public async Task RemuxUsesProbedTracksWithoutOpeningAgainWhileNewPlaybackStillProbes()
+    {
+        var fixture = new ReportingFixture();
+        fixture.Backend.Source.MediaStreams =
+        [
+            new() { Type = MediaStreamType.Video, Index = 0, Codec = "hevc" },
+            new() { Type = MediaStreamType.Audio, Index = 3, Language = "fra", Codec = "dts" }
+        ];
+        var discovery = Assert.Single(await fixture.Manager.GetPlaybackMediaSources(fixture.Primary, fixture.User, true, true, CancellationToken.None));
+        Assert.True(discovery.RequiresOpening);
+        Assert.NotNull(discovery.OpenToken);
+
+        var remux = Assert.Single(await fixture.Manager.GetPlaybackMediaSources(fixture.Primary, fixture.User, false, false, CancellationToken.None));
+        Assert.False(remux.RequiresOpening || remux.RequiresClosing || remux.SupportsProbing);
+        Assert.Null(remux.OpenToken);
+        Assert.Equal(fixture.Version.Id.ToString("N"), remux.Id);
+        Assert.Equal(3, Assert.Single(remux.MediaStreams, stream => stream.Type == MediaStreamType.Audio).Index);
+        Assert.Equal("dts", Assert.Single(remux.MediaStreams, stream => stream.Type == MediaStreamType.Audio).Codec);
+        Assert.Equal("https://server.example/selected-source", remux.Path);
+        var nextPlayback = Assert.Single(await fixture.Manager.GetPlaybackMediaSources(fixture.Primary, fixture.User, true, true, CancellationToken.None));
+        Assert.True(nextPlayback.RequiresOpening);
+        Assert.NotNull(nextPlayback.OpenToken);
+    }
+
+    [Fact]
+    public async Task ColdStreamingSourcesStillRequireOpeningAndRetiredSourcesAreNotReturned()
+    {
+        var fixture = new ReportingFixture();
+        fixture.Backend.Source.MediaStreams = [];
+        var cold = Assert.Single(await fixture.Manager.GetPlaybackMediaSources(fixture.Primary, fixture.User, false, false, CancellationToken.None));
+        Assert.True(cold.RequiresOpening);
+        Assert.NotNull(cold.OpenToken);
+
+        fixture.Version.SetProviderId(NativeVersionService.SourceOrderProvider, "-1");
+        Assert.Empty(await fixture.Manager.GetPlaybackMediaSources(fixture.Primary, fixture.User, false, false, CancellationToken.None));
+        fixture.Version.SetProviderId(NativeVersionService.SourceOrderProvider, "0");
+        fixture.Version.SetProviderId(NativeVersionService.OwnerProvider, Guid.NewGuid().ToString("N"));
+        Assert.Empty(await fixture.Manager.GetPlaybackMediaSources(fixture.Primary, fixture.User, false, false, CancellationToken.None));
+    }
+
     private static void AssertMetadataOnly(MediaSourceInfo source)
     {
         Assert.Null(source.Path);
@@ -178,6 +219,7 @@ public sealed class NativeSourceLifetimeTests
         public Movie Primary { get; } = new() { Id = Guid.NewGuid(), RunTimeTicks = TimeSpan.FromMinutes(10).Ticks };
         public Movie Version { get; } = new() { Id = Guid.NewGuid(), RunTimeTicks = TimeSpan.FromMinutes(14).Ticks };
         public NativeMediaSourceManager Manager { get; }
+        public Sources Backend { get; }
 
         public ReportingFixture()
         {
@@ -189,6 +231,7 @@ public sealed class NativeSourceLifetimeTests
             Version.SetProviderId(NativeVersionService.VersionProvider, Primary.Id.ToString("N"));
             Version.SetProviderId(NativeVersionService.OwnerProvider, User.Id.ToString("N"));
             var native = DispatchProxy.Create<IMediaSourceManager, Sources>();
+            Backend = (Sources)(object)native;
             ((Sources)(object)native).Source = new MediaSourceInfo
             {
                 Id = Version.Id.ToString("N"),
@@ -252,7 +295,8 @@ public sealed class NativeSourceLifetimeTests
                 return Task.CompletedTask;
             }
             if (method?.Name == "GetStaticMediaSources") return new[] { Source };
-            if (method?.Name == "GetPlaybackMediaSources") return Task.FromResult<IReadOnlyList<MediaSourceInfo>>([Source]);
+            if (method?.Name == "GetPlaybackMediaSources") return Task.FromResult<IReadOnlyList<MediaSourceInfo>>(
+                [System.Text.Json.JsonSerializer.Deserialize<MediaSourceInfo>(System.Text.Json.JsonSerializer.Serialize(Source))!]);
             throw new NotSupportedException(method?.Name);
         }
     }
