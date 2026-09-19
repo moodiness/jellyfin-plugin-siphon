@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/moodiness/jellyfin-plugin-siphon/main/assets/siphon-jellyfin.png",
     "versions": [
       {
+        "version": "1.6.3.0",
+        "targetAbi": "12.1.0.0",
+        "sourceUrl": "https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.6.3/siphon-1.6.3.0.zip",
+        "checksum": "d91dbda4e8a81ab00490aeb82057658f",
+        "timestamp": "2026-09-18T23:59:09Z",
+        "changelog": "Route native FFmpeg and ffprobe reads through Jellyfin's bound local HTTP address and port instead of the public reverse proxy, while preserving public playback URLs for clients. Keep rewritten HLS playlists, segments and keys on the reader's origin and base path. Avoid reopening and probing an already-probed selected version during remux and seek. Preserve capability authorization, account isolation, range validation and private-host safeguards. Includes regression and real Jellyfin coverage with an unreachable public playback hostname."
+      },
+      {
         "version": "1.6.2.0",
         "targetAbi": "12.1.0.0",
         "sourceUrl": "https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.6.2/siphon-1.6.2.0.zip",
