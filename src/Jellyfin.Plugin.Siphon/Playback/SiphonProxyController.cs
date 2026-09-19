@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
@@ -8,6 +9,7 @@ using Jellyfin.Plugin.Siphon.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.Siphon.Playback;
 
@@ -22,13 +24,17 @@ public sealed class SiphonProxyController(
     ISafeHttpClient http,
     ConfigurationAccessor configuration,
     PlaybackAccess access,
-    PlaybackDownloadService downloads) : ControllerBase
+    PlaybackDownloadService downloads,
+    ILogger<SiphonProxyController> logger) : ControllerBase
 {
     private static readonly SemaphoreSlim GlobalSlots = new(64, 64);
     private static readonly SemaphoreSlim ResolutionGate = new(4, 4);
     private static readonly PlaybackRequestBudget InvalidRequests = new();
     private static readonly PlaybackRequestBudget PlaybackRequests = new();
     private static readonly PlaybackRequestBudget ImageRequests = new();
+    private string _stage = "authorization";
+    private int? _upstreamStatus;
+    private long _started;
 
     [HttpGet("s/{token}")]
     [HttpHead("s/{token}")]
@@ -64,6 +70,9 @@ public sealed class SiphonProxyController(
         var admitted = false;
         ProxySession? session = null;
         var acquired = false;
+        _stage = "authorization";
+        _upstreamStatus = null;
+        _started = Stopwatch.GetTimestamp();
         try
         {
             if (token.Length > 4096)
@@ -111,6 +120,7 @@ public sealed class SiphonProxyController(
                         session = sessions.GetDefault(selectionKey);
                         if (session is null)
                         {
+                            _stage = "source-resolution";
                             var sources = await resolver.GetSourcesAsync(item, userId, ct).ConfigureAwait(false);
                             var selected = sourceId is null ? sources.FirstOrDefault() : sources.FirstOrDefault(source => source.Id == sourceId);
                             if (selected is null)
@@ -158,8 +168,16 @@ public sealed class SiphonProxyController(
         {
             HttpContext.Abort();
         }
-        catch (Exception)
+        catch (Exception error)
         {
+            LogFailure(error switch
+            {
+                OperationCanceledException => "timeout",
+                HttpRequestException => "transport",
+                InvalidDataException => "invalid-media",
+                IOException => "io",
+                _ => "internal"
+            });
             if (Response.HasStarted)
             {
                 HttpContext.Abort();
@@ -179,6 +197,14 @@ public sealed class SiphonProxyController(
 
             if (admitted) GlobalSlots.Release();
         }
+    }
+
+    private void LogFailure(string cause)
+    {
+        // Only bounded, locally chosen fields: exception text and request/source URLs
+        // can contain credentials. Do not pass an exception object to the logger.
+        logger.LogWarning("Siphon relay failed: stage={Stage}, cause={Cause}, upstreamStatus={UpstreamStatus}, responseStarted={ResponseStarted}, elapsedMs={ElapsedMs}",
+            _stage, cause, _upstreamStatus, Response.HasStarted, (long)Stopwatch.GetElapsedTime(_started).TotalMilliseconds);
     }
     private async Task ExecuteImageAsync(string token, string? type)
     {
@@ -278,6 +304,7 @@ public sealed class SiphonProxyController(
     {
         if (session.Source.P2p is not null)
         {
+            _stage = "p2p-media";
             await downloads.RelayP2pPlaybackAsync(HttpContext, session.Source, ct).ConfigureAwait(false);
             return;
         }
@@ -287,6 +314,7 @@ public sealed class SiphonProxyController(
         headers.Remove("If-Range");
         headers["Accept-Encoding"] = "identity";
         var range = Request.Headers.Range.ToString();
+        RangeItemHeaderValue? requestedRange = null;
         if (range.Length != 0)
         {
             if (range.Length > 256 || !RangeHeaderValue.TryParse(range, out var parsed) || parsed.Unit != "bytes" || parsed.Ranges.Count != 1)
@@ -295,6 +323,7 @@ public sealed class SiphonProxyController(
                 return;
             }
 
+            requestedRange = parsed.Ranges.Single();
             headers["Range"] = parsed.ToString();
             var ifRange = Request.Headers.IfRange.ToString();
             if (ifRange.Length <= 1024 && RangeConditionHeaderValue.TryParse(ifRange, out var condition))
@@ -303,8 +332,73 @@ public sealed class SiphonProxyController(
             }
         }
 
+        var rootMedia = session.RootToken == session.Token;
+        var classified = false;
+        EntityTagHeaderValue? classifiedTag = null;
+        DateTimeOffset? classifiedDate = null;
+        long? classifiedLength = null;
+        // Long byte-zero responses classify themselves. For seeks and short ranges,
+        // finish and dispose the prefix response before opening the requested body.
+        if (requestedRange is not null && (requestedRange.From != 0 || requestedRange.To < 511))
+        {
+            var classificationHeaders = new Dictionary<string, string>(headers, StringComparer.OrdinalIgnoreCase)
+            {
+                ["Range"] = "bytes=0-511"
+            };
+            classificationHeaders.Remove("If-Range");
+            _stage = "classification-headers";
+            _upstreamStatus = null;
+            using (var classification = await http.SendAsync(session.Source.Url, HttpMethod.Get, classificationHeaders, ct).ConfigureAwait(false))
+            {
+                _upstreamStatus = (int)classification.StatusCode;
+                if (classification.StatusCode == HttpStatusCode.NotFound)
+                {
+                    Response.StatusCode = 404;
+                    return;
+                }
+                if (classification.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.PartialContent))
+                {
+                    LogFailure("upstream-status");
+                    Response.StatusCode = 502;
+                    return;
+                }
+                _stage = "classification-validation";
+                if ((classification.StatusCode == HttpStatusCode.PartialContent
+                        && classification.Content.Headers.ContentRange is not { Unit: "bytes", From: 0, To: not null })
+                    || classification.Content.Headers.ContentEncoding.Any(e => !e.Equals("identity", StringComparison.OrdinalIgnoreCase)))
+                {
+                    throw new InvalidDataException("Unable to classify upstream representation.");
+                }
+                _stage = "classification-body";
+                await using var classificationBody = await classification.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+                var start = new byte[512];
+                var length = await ReadPrefixAsync(classificationBody, start, readDeadline).ConfigureAwait(false);
+                _stage = "classification-validation";
+                if (Encoding.UTF8.GetString(start, 0, length).TrimStart('\uFEFF', ' ', '\r', '\n', '\t').StartsWith("#EXTM3U", StringComparison.Ordinal))
+                {
+                    // Playlists are fetched whole and rewritten below, never relayed as slices.
+                    headers.Remove("Range");
+                    headers.Remove("If-Range");
+                }
+                else
+                {
+                    if (rootMedia) NativeMediaClassifier.RequireSupported(start.AsSpan(0, length));
+                    classified = true;
+                    classifiedTag = classification.Headers.ETag;
+                    classifiedDate = classification.Content.Headers.LastModified;
+                    classifiedLength = classification.Content.Headers.ContentRange?.Length
+                        ?? (classification.StatusCode == HttpStatusCode.OK ? classification.Content.Headers.ContentLength : null);
+                    if (!headers.ContainsKey("If-Range") && classification.Headers.ETag is { IsWeak: false } tag && tag.Tag != "*")
+                        headers["If-Range"] = tag.ToString();
+                }
+            }
+        }
+
         // GET is intentional for HEAD: determining rewritten HLS length requires its representation.
+        _stage = "media-headers";
+        _upstreamStatus = null;
         using var upstream = await http.SendAsync(session.Source.Url, HttpMethod.Get, headers, ct).ConfigureAwait(false);
+        _upstreamStatus = (int)upstream.StatusCode;
         if (upstream.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
         {
             Response.StatusCode = 416;
@@ -319,69 +413,44 @@ public sealed class SiphonProxyController(
         if (upstream.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.PartialContent))
         {
             Response.StatusCode = upstream.StatusCode == HttpStatusCode.NotFound ? 404 : 502;
+            if (Response.StatusCode == 502) LogFailure("upstream-status");
             return;
         }
 
+        _stage = "media-validation";
         if (upstream.Content.Headers.ContentEncoding.Any(e => !e.Equals("identity", StringComparison.OrdinalIgnoreCase)))
         {
             throw new InvalidDataException("Unexpected content encoding.");
         }
         if (upstream.StatusCode == HttpStatusCode.PartialContent
-            && upstream.Content.Headers.ContentRange is not { Unit: "bytes", From: not null, To: not null })
+            && (upstream.Content.Headers.ContentRange is not { Unit: "bytes", From: not null, To: not null } receivedRange
+                || !headers.TryGetValue("Range", out var sentRange)
+                || (receivedRange.Length is { } total
+                    && (!PlaybackDownloadService.TryBounds(sentRange, total, out var from, out var to)
+                        || receivedRange.From != from || receivedRange.To > to))
+                || (upstream.Content.Headers.ContentLength is { } bodyLength && bodyLength != receivedRange.To - receivedRange.From + 1)))
         {
             throw new InvalidDataException("Invalid upstream byte range.");
         }
 
         var finalUrl = upstream.RequestMessage?.RequestUri ?? session.Source.Url;
-        var rootMedia = session.RootToken == session.Token;
-        var classifiedBinary = false;
-        // Every ranged root is classified from byte zero, even bytes=0-1. HLS
-        // children can also be playlists, but keys and encrypted segments are opaque.
-        if (upstream.StatusCode == HttpStatusCode.PartialContent
-            && (rootMedia || upstream.Content.Headers.ContentRange?.From > 0))
+        var partial = upstream.StatusCode == HttpStatusCode.PartialContent;
+        if (partial && classified
+            && ((classifiedTag is not null && upstream.Headers.ETag is { } currentTag && !classifiedTag.Equals(currentTag))
+                || (classifiedDate is not null && upstream.Content.Headers.LastModified is { } currentDate && classifiedDate != currentDate)
+                || (classifiedLength is not null && upstream.Content.Headers.ContentRange?.Length is { } currentLength && classifiedLength != currentLength)))
         {
-            var classificationHeaders = new Dictionary<string, string>(session.Source.RequestHeaders, StringComparer.OrdinalIgnoreCase)
-            {
-                ["Range"] = "bytes=0-511",
-                ["Accept-Encoding"] = "identity"
-            };
-            classificationHeaders.Remove("If-Range");
-            using var classification = await http.SendAsync(session.Source.Url, HttpMethod.Get, classificationHeaders, ct).ConfigureAwait(false);
-            if (classification.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.PartialContent)
-                || (classification.StatusCode == HttpStatusCode.PartialContent
-                    && classification.Content.Headers.ContentRange is not { Unit: "bytes", From: 0, To: not null })
-                || classification.Content.Headers.ContentEncoding.Any(e => !e.Equals("identity", StringComparison.OrdinalIgnoreCase)))
-            {
-                throw new InvalidDataException("Unable to classify upstream representation.");
-            }
-            await using var classificationBody = await classification.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-            var start = new byte[512];
-            var length = await ReadPrefixAsync(classificationBody, start, readDeadline).ConfigureAwait(false);
-            if (Encoding.UTF8.GetString(start, 0, length).TrimStart('\uFEFF', ' ', '\r', '\n', '\t').StartsWith("#EXTM3U", StringComparison.Ordinal))
-            {
-                classificationHeaders.Remove("Range");
-                using var full = await http.SendAsync(session.Source.Url, HttpMethod.Get, classificationHeaders, ct).ConfigureAwait(false);
-                if (full.StatusCode != HttpStatusCode.OK
-                    || full.Content.Headers.ContentEncoding.Any(e => !e.Equals("identity", StringComparison.OrdinalIgnoreCase)))
-                {
-                    throw new InvalidDataException("Invalid HLS response.");
-                }
-
-                await using var fullBody = await full.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-                await WritePlaylistAsync(session, fullBody, ReadOnlyMemory<byte>.Empty, full.RequestMessage?.RequestUri ?? finalUrl, childPrefix, readDeadline, ct).ConfigureAwait(false);
-                return;
-            }
-            if (rootMedia)
-            {
-                NativeMediaClassifier.RequireSupported(start.AsSpan(0, length));
-                classifiedBinary = true;
-            }
+            throw new InvalidDataException("The classified representation changed.");
         }
+        if (partial && !classified && upstream.Content.Headers.ContentRange?.From != 0)
+            throw new InvalidDataException("The response does not include a classified prefix.");
         var mediaType = upstream.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
+        _stage = "media-prefix";
         await using var body = await upstream.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
         var prefix = new byte[512];
         var prefixLength = await ReadPrefixAsync(body, prefix, readDeadline).ConfigureAwait(false);
 
+        _stage = "media-validation";
         var hls = finalUrl.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase)
             || mediaType.Equals("application/vnd.apple.mpegurl", StringComparison.OrdinalIgnoreCase)
             || mediaType.Equals("application/x-mpegurl", StringComparison.OrdinalIgnoreCase)
@@ -393,25 +462,32 @@ public sealed class SiphonProxyController(
             if (upstream.StatusCode == HttpStatusCode.PartialContent)
             {
                 // A ranged playlist is not a complete parseable representation.
+                await body.DisposeAsync().ConfigureAwait(false);
+                upstream.Dispose();
                 headers.Remove("Range");
                 headers.Remove("If-Range");
+                _stage = "playlist-headers";
+                _upstreamStatus = null;
                 using var full = await http.SendAsync(session.Source.Url, HttpMethod.Get, headers, ct).ConfigureAwait(false);
+                _upstreamStatus = (int)full.StatusCode;
                 if (full.StatusCode != HttpStatusCode.OK || full.Content.Headers.ContentEncoding.Any(e => !e.Equals("identity", StringComparison.OrdinalIgnoreCase)))
                 {
                     throw new InvalidDataException("Invalid HLS response.");
                 }
 
+                _stage = "playlist-body";
                 await using var completeBody = await full.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
                 await WritePlaylistAsync(session, completeBody, ReadOnlyMemory<byte>.Empty, full.RequestMessage?.RequestUri ?? finalUrl, childPrefix, readDeadline, ct).ConfigureAwait(false);
             }
             else
             {
+                _stage = "playlist-body";
                 await WritePlaylistAsync(session, body, prefix.AsMemory(0, prefixLength), finalUrl, childPrefix, readDeadline, ct).ConfigureAwait(false);
             }
 
             return;
         }
-        if (rootMedia && !classifiedBinary)
+        if (rootMedia && (!partial || !classified))
             NativeMediaClassifier.RequireSupported(prefix.AsSpan(0, prefixLength));
 
         Response.StatusCode = (int)upstream.StatusCode;
@@ -430,11 +506,15 @@ public sealed class SiphonProxyController(
 
         if (!HttpMethods.IsHead(Request.Method))
         {
+            _stage = "client-write";
             await Response.Body.WriteAsync(prefix.AsMemory(0, prefixLength), ct).ConfigureAwait(false);
             var chunk = new byte[64 * 1024];
-            int count;
-            while ((count = await PlaybackDownloadService.ReadUpstreamAsync(body, chunk, readDeadline, configuration.Current.AddonTimeoutSeconds).ConfigureAwait(false)) != 0)
+            while (true)
             {
+                _stage = "media-body";
+                var count = await PlaybackDownloadService.ReadUpstreamAsync(body, chunk, readDeadline, configuration.Current.AddonTimeoutSeconds).ConfigureAwait(false);
+                if (count == 0) break;
+                _stage = "client-write";
                 await Response.Body.WriteAsync(chunk.AsMemory(0, count), ct).ConfigureAwait(false);
             }
         }
@@ -463,6 +543,7 @@ public sealed class SiphonProxyController(
 
         var text = new UTF8Encoding(false, true).GetString(buffer.GetBuffer(), 0, (int)buffer.Length);
         // Validate all URI syntax before creating any child leases; malformed playlists leave no partial cache.
+        _stage = "playlist-validation";
         _ = HlsPlaylistRewriter.Rewrite(text, finalUrl, _ => "validated");
         // Relative capabilities stay on the reader's origin and base path. FFmpeg's
         // local playlists must not send segment/key requests back through the public proxy.
@@ -475,6 +556,7 @@ public sealed class SiphonProxyController(
         ProtectBytes();
         if (!HttpMethods.IsHead(Request.Method))
         {
+            _stage = "client-write";
             await Response.Body.WriteAsync(bytes, ct).ConfigureAwait(false);
         }
     }
