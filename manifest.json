@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/moodiness/jellyfin-plugin-siphon/main/assets/siphon-jellyfin.png",
     "versions": [
       {
+        "version": "1.6.5.0",
+        "targetAbi": "12.1.0.0",
+        "sourceUrl": "https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.6.5/siphon-1.6.5.0.zip",
+        "checksum": "efa73ca73c775988aa306614cbe1f37e",
+        "timestamp": "2026-09-19T12:51:47Z",
+        "changelog": "Preserve the exact opened native source for Jellyfin remux, HLS and seek requests after discovery withdrawal by binding a private source snapshot to the user, PlaySessionId and native version. Reuse the already-authorized opaque proxy lease, revalidate permissions, ownership, content and session identity, and fail closed without substituting another version. Add controlled Jellyfin 12.1 coverage for progressive and nested HLS playback, seeking, decoded audio/video and playback revocation. Verified with 584 tests and the complete owned Jellyfin smoke workflow."
+      },
+      {
         "version": "1.6.4.0",
         "targetAbi": "12.1.0.0",
         "sourceUrl": "https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.6.4/siphon-1.6.4.0.zip",
