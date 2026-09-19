@@ -1,6 +1,11 @@
 using System.Globalization;
 using System.Reflection;
+using Jellyfin.Data;
 using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Database.Implementations.Enums;
+using Jellyfin.Plugin.Siphon.Configuration;
+using Jellyfin.Plugin.Siphon.Identity;
+using Jellyfin.Plugin.Siphon.Infrastructure;
 using Jellyfin.Plugin.Siphon.Playback;
 using MediaBrowser.Common.Extensions;
 using MediaBrowser.Controller.Entities;
@@ -41,7 +46,7 @@ public sealed class NativeSourceLifetimeTests
         var library = DispatchProxy.Create<ILibraryManager, Library>();
         ((Library)(object)library).Video = video;
         ((Library)(object)library).Primary = primary;
-        var manager = new NativeMediaSourceManager(native, library, CreateAccess(library, user));
+        var manager = new NativeMediaSourceManager(native, library, CreateAccess(library, user), new ProxySessionStore(new ConfigurationAccessor()), new HttpContextAccessor());
         var opened = await manager.OpenLiveStream(new LiveStreamRequest
         {
             OpenToken = typeof(SiphonMediaSourceProvider).FullName!.GetMD5().ToString("N", CultureInfo.InvariantCulture) + "_fixture"
@@ -66,7 +71,7 @@ public sealed class NativeSourceLifetimeTests
         var native = DispatchProxy.Create<IMediaSourceManager, Sources>();
         var backend = (Sources)(object)native;
         backend.Source = new MediaSourceInfo { Id = "tuner" };
-        var manager = new NativeMediaSourceManager(native, null!, null!);
+        var manager = new NativeMediaSourceManager(native, null!, null!, null!, null!);
         var opened = await manager.OpenLiveStream(new LiveStreamRequest { OpenToken = "another-provider_tuner" }, CancellationToken.None);
         Assert.Equal("native-lease", opened.MediaSource.LiveStreamId);
         Assert.True(opened.MediaSource.RequiresClosing);
@@ -97,7 +102,7 @@ public sealed class NativeSourceLifetimeTests
             OpenToken = "private-capability",
             MediaStreams = [new() { Type = MediaStreamType.Audio, Language = "fra" }]
         };
-        var manager = new NativeMediaSourceManager(native, library, CreateAccess(library, user));
+        var manager = new NativeMediaSourceManager(native, library, CreateAccess(library, user), new ProxySessionStore(new ConfigurationAccessor()), new HttpContextAccessor());
         // Jellyfin's DTO builder indexes element zero before asynchronous source discovery.
         var metadata = manager.GetStaticMediaSources(primary, true)[0];
         Assert.Equal(primary.Id.ToString("N"), metadata.Id);
@@ -189,6 +194,59 @@ public sealed class NativeSourceLifetimeTests
     }
 
     [Fact]
+    public async Task OpenedPlaybackSurvivesDiscoveryWithdrawalWithoutChangingItsSource()
+    {
+        var fixture = new ReportingFixture();
+        fixture.Backend.Source.MediaStreams = [new() { Type = MediaStreamType.Video, Index = 0, Codec = "hevc" }];
+        await fixture.Manager.OpenLiveStream(new LiveStreamRequest
+        {
+            OpenToken = fixture.Backend.Source.OpenToken,
+            UserId = fixture.User.Id,
+            PlaySessionId = fixture.PlaySessionId
+        }, CancellationToken.None);
+        fixture.Backend.Withdrawn = true;
+        fixture.Version.SetProviderId(NativeVersionService.SourceOrderProvider, "-1");
+
+        var resumed = Assert.Single(await fixture.Manager.GetPlaybackMediaSources(fixture.Primary, fixture.User, false, false, CancellationToken.None));
+        Assert.Equal(fixture.Version.Id.ToString("N"), resumed.Id);
+        Assert.Equal(fixture.Backend.Source.EncoderPath, resumed.EncoderPath);
+        Assert.Equal("hevc", Assert.Single(resumed.MediaStreams).Codec);
+        resumed.MediaStreams[0].Codec = "corrupted";
+        var again = Assert.Single(await fixture.Manager.GetPlaybackMediaSources(fixture.Primary, fixture.User, false, false, CancellationToken.None));
+        Assert.Equal("hevc", Assert.Single(again.MediaStreams).Codec);
+        Assert.Empty(await fixture.Manager.GetPlaybackMediaSources(fixture.Primary, fixture.User, true, false, CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData("permission")]
+    [InlineData("owner")]
+    [InlineData("configuration")]
+    [InlineData("playback")]
+    [InlineData("source")]
+    public async Task OpenedPlaybackCannotOutliveAuthorizationOrCrossSelection(string change)
+    {
+        var fixture = new ReportingFixture();
+        await fixture.Manager.OpenLiveStream(new LiveStreamRequest
+        {
+            OpenToken = fixture.Backend.Source.OpenToken,
+            UserId = fixture.User.Id,
+            PlaySessionId = fixture.PlaySessionId
+        }, CancellationToken.None);
+        fixture.Backend.Withdrawn = true;
+        if (change == "permission") fixture.User.SetPermission(PermissionKind.EnableMediaPlayback, false);
+        if (change == "owner") fixture.Version.SetProviderId(NativeVersionService.OwnerProvider, Guid.NewGuid().ToString("N"));
+        if (change == "configuration") fixture.Sessions.Invalidate(user => user == fixture.User.Id);
+        if (change is "playback" or "source")
+            new HttpContextAccessor().HttpContext!.Request.QueryString = new QueryString("?PlaySessionId="
+                + (change == "playback" ? Guid.NewGuid().ToString("N") : fixture.PlaySessionId)
+                + "&MediaSourceId=" + (change == "source" ? Guid.NewGuid() : fixture.Version.Id));
+        if (change is "permission" or "owner")
+            await Assert.ThrowsAsync<MediaBrowser.Common.Extensions.ResourceNotFoundException>(() => fixture.Manager.GetPlaybackMediaSources(fixture.Primary, fixture.User, false, false, CancellationToken.None));
+        else
+            Assert.Empty(await fixture.Manager.GetPlaybackMediaSources(fixture.Primary, fixture.User, false, false, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task ColdStreamingSourcesStillRequireOpeningAndRetiredSourcesAreNotReturned()
     {
         var fixture = new ReportingFixture();
@@ -220,9 +278,14 @@ public sealed class NativeSourceLifetimeTests
         public Movie Version { get; } = new() { Id = Guid.NewGuid(), RunTimeTicks = TimeSpan.FromMinutes(14).Ticks };
         public NativeMediaSourceManager Manager { get; }
         public Sources Backend { get; }
+        public string PlaySessionId { get; } = Guid.NewGuid().ToString("N");
+        public ProxySessionStore Sessions { get; } = new(new ConfigurationAccessor(() => new PluginConfiguration { PublicBaseUrl = "https://server.example" }));
 
         public ReportingFixture()
         {
+            User.SetPermission(PermissionKind.EnableMediaPlayback, true);
+            var lease = Sessions.Create(new ManagedItem { Key = "movie:fixture", Type = "movie", ContentId = "fixture", ContentKey = "movie:fixture", VideoId = "fixture", Name = "Fixture", Path = "fixture.strm" },
+                new ResolvedStream("selected-source", "Selected", new Uri("https://upstream.example/video.mkv"), new Dictionary<string, string>(), "video.mkv", null) { UserId = User.Id });
             Primary.SetProviderId("Siphon", "movie:fixture");
             Version.SetProviderId("Siphon", "movie:fixture");
             Version.PrimaryVersionId = Primary.Id;
@@ -236,6 +299,7 @@ public sealed class NativeSourceLifetimeTests
             {
                 Id = Version.Id.ToString("N"),
                 Path = "https://server.example/selected-source",
+                EncoderPath = "http://127.0.0.1:8096/Siphon/media/" + ProxySessionStore.GetMediaPath(lease),
                 RequiresOpening = true,
                 OpenToken = typeof(SiphonMediaSourceProvider).FullName!.GetMD5().ToString("N", CultureInfo.InvariantCulture) + "_fixture",
                 SupportsDirectPlay = true,
@@ -247,7 +311,9 @@ public sealed class NativeSourceLifetimeTests
             var library = DispatchProxy.Create<ILibraryManager, Library>();
             ((Library)(object)library).Video = Version;
             ((Library)(object)library).Primary = Primary;
-            Manager = new NativeMediaSourceManager(native, library, CreateAccess(library, User));
+            Manager = new NativeMediaSourceManager(native, library, CreateAccess(library, User), Sessions, new HttpContextAccessor());
+            var context = new HttpContextAccessor().HttpContext!;
+            context.Request.QueryString = new QueryString("?PlaySessionId=" + PlaySessionId + "&MediaSourceId=" + Version.Id.ToString("N"));
         }
     }
 
@@ -274,6 +340,7 @@ public sealed class NativeSourceLifetimeTests
     public class Sources : DispatchProxy
     {
         public MediaSourceInfo Source { get; set; } = null!;
+        public bool Withdrawn { get; set; }
         public bool LeaseOpen { get; private set; }
         protected override object? Invoke(MethodInfo? method, object?[]? args)
         {
@@ -283,6 +350,8 @@ public sealed class NativeSourceLifetimeTests
                 return Task.FromResult(new LiveStreamResponse(new MediaSourceInfo
                 {
                     Id = Source.Id,
+                    Path = Source.Path,
+                    EncoderPath = Source.EncoderPath,
                     MediaStreams = Source.MediaStreams,
                     RunTimeTicks = Source.RunTimeTicks,
                     LiveStreamId = "native-lease",
@@ -295,6 +364,7 @@ public sealed class NativeSourceLifetimeTests
                 return Task.CompletedTask;
             }
             if (method?.Name == "GetStaticMediaSources") return new[] { Source };
+            if (method?.Name == "GetPlaybackMediaSources" && Withdrawn) return Task.FromResult<IReadOnlyList<MediaSourceInfo>>([]);
             if (method?.Name == "GetPlaybackMediaSources") return Task.FromResult<IReadOnlyList<MediaSourceInfo>>(
                 [System.Text.Json.JsonSerializer.Deserialize<MediaSourceInfo>(System.Text.Json.JsonSerializer.Serialize(Source))!]);
             throw new NotSupportedException(method?.Name);

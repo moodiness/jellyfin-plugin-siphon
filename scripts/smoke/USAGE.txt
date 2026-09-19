@@ -65,6 +65,10 @@ playback: Addon search creates a native preview; import retains its identity.
   Client Path must retain that public origin while EncoderPath uses local HTTP.
   Native progressive-to-HLS remux playlists/segments and upstream nested HLS
   references are traversed, and bundled FFmpeg decodes video/audio from both.
+  After opening HTTP media, the fixture withdraws all addon streams and a scoped
+  refresh confirms an empty source list. The original playback must still produce
+  its first HLS segments and decoded video/audio after a seek to 20 seconds.
+  Fixture discovery is restored in finally; fresh discoveries remain separate.
   Ingress stays unchanged; configuration is restored in finally before remaining
   scenarios. Evidence contains only routing booleans, playlist/segment counts
   and decoded durations, never capability URLs or credentials.

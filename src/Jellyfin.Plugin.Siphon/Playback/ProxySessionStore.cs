@@ -1,6 +1,8 @@
 using System.Security.Cryptography;
+using System.Text.Json;
 using Jellyfin.Plugin.Siphon.Configuration;
 using Jellyfin.Plugin.Siphon.Identity;
+using MediaBrowser.Model.Dto;
 
 namespace Jellyfin.Plugin.Siphon.Playback;
 
@@ -20,6 +22,7 @@ public sealed class ProxySessionStore(ConfigurationAccessor configuration)
     private readonly Dictionary<string, Entry> _sessions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, (string Token, DateTimeOffset Expires)> _defaults = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Dictionary<Uri, string>> _children = new(StringComparer.Ordinal);
+    private readonly Dictionary<(Guid User, string Playback, Guid Version), (string Token, byte[] Source, DateTimeOffset Expires)> _playbacks = new();
     private DateTimeOffset _nextPrune;
 
     private static bool SameHeaders(IReadOnlyDictionary<string, string> first, IReadOnlyDictionary<string, string> second)
@@ -44,6 +47,44 @@ public sealed class ProxySessionStore(ConfigurationAccessor configuration)
         }
     }
 
+
+    internal void BindPlayback(Guid userId, string? playSessionId, MediaSourceInfo source)
+    {
+        if (userId == Guid.Empty || string.IsNullOrWhiteSpace(playSessionId) || playSessionId.Length > 128
+            || !Guid.TryParse(source.Id, out var version) || !Uri.TryCreate(source.EncoderPath, UriKind.Absolute, out var uri)) return;
+        var segments = uri.AbsolutePath.Split('/');
+        if (segments.Length < 3) return;
+        var token = segments[^2];
+        var snapshot = JsonSerializer.SerializeToUtf8Bytes(source);
+        if (snapshot.Length > 1024 * 1024) throw new InvalidOperationException("Playback snapshot exceeds size limit.");
+        lock (_gate)
+        {
+            var session = Get(token);
+            if (session is null || session.Download || session.RootToken != token || session.Source.UserId != userId) return;
+            var now = DateTimeOffset.UtcNow;
+            foreach (var expired in _playbacks.Where(pair => pair.Value.Expires <= now).Select(pair => pair.Key).ToArray())
+                _playbacks.Remove(expired);
+            var key = (userId, playSessionId, version);
+            if (_playbacks.Count >= 1024 && !_playbacks.ContainsKey(key))
+                throw new InvalidOperationException("Playback binding capacity reached.");
+            _playbacks[key] = (token, snapshot, now + Lifetime);
+        }
+    }
+
+    internal (ProxySession Session, MediaSourceInfo Source)? GetPlayback(Guid userId, string playSessionId, Guid version)
+    {
+        lock (_gate)
+        {
+            var key = (userId, playSessionId, version);
+            if (!_playbacks.TryGetValue(key, out var saved)) return null;
+            if (saved.Expires <= DateTimeOffset.UtcNow) { _playbacks.Remove(key); return null; }
+            var session = Get(saved.Token);
+            if (session is null) { _playbacks.Remove(key); return null; }
+            // Native helpers mutate DTOs while choosing tracks and output formats.
+            // Keep the successful opening snapshot private and return an independent copy.
+            return (session, JsonSerializer.Deserialize<MediaSourceInfo>(saved.Source)!);
+        }
+    }
 
     internal ProxySession? GetDefault(string key)
     {
@@ -172,6 +213,7 @@ public sealed class ProxySessionStore(ConfigurationAccessor configuration)
             _sessions.Clear();
             _defaults.Clear();
             _children.Clear();
+            _playbacks.Clear();
         }
     }
 
@@ -243,6 +285,8 @@ public sealed class ProxySessionStore(ConfigurationAccessor configuration)
             return;
         }
 
+        foreach (var key in _playbacks.Where(pair => pair.Value.Token == token).Select(pair => pair.Key).ToArray())
+            _playbacks.Remove(key);
         foreach (var key in _defaults.Where(p => p.Value.Token == token).Select(p => p.Key).ToArray())
         {
             _defaults.Remove(key);

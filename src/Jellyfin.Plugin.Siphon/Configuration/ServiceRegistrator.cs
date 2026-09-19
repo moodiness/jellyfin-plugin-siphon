@@ -132,7 +132,9 @@ public sealed class ServiceRegistrator : MediaBrowser.Controller.Plugins.IPlugin
             new Playback.NativeMediaSourceManager(
                 services.GetRequiredKeyedService<IMediaSourceManager>(nativeManagerKey),
                 services.GetRequiredService<ILibraryManager>(),
-                services.GetRequiredService<Playback.PlaybackAccess>()), nativeManager.Lifetime));
+                services.GetRequiredService<Playback.PlaybackAccess>(),
+                services.GetRequiredService<Playback.ProxySessionStore>(),
+                services.GetRequiredService<Microsoft.AspNetCore.Http.IHttpContextAccessor>()), nativeManager.Lifetime));
 
         const string nativeSubtitleKey = "Siphon.OriginalSubtitleManager";
         var subtitleType = typeof(MediaBrowser.Controller.Subtitles.ISubtitleManager);

@@ -594,10 +594,21 @@ http {
                     return len(seen), segments
 
                 progressive, info = open_selected(" HTTP")
+                self.fixture_api.call("POST", "/control/streams", {"enabled": False})
+                withdrawn = self.alice.call("POST", f"/Siphon/Items/{self.movie}/Sources/Refresh")
+                require(not withdrawn["Sources"], "Controlled addon did not withdraw its sources")
                 native = urllib.parse.urljoin("http://jellyfin:8096", progressive["TranscodingUrl"])
                 playlists, segments = inspect_playlists(native, "jellyfin:8096")
                 self.docker("exec", self.name + "-jellyfin", FFMPEG, "-v", "error", "-i", native,
                             "-t", "2", "-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-", timeout=90)
+                decoded = self.docker("exec", self.name + "-jellyfin", FFMPEG, "-v", "error", "-abort_on", "empty_output",
+                                      "-ss", "20", "-i", native, "-t", "2", "-map", "0:v:0", "-map", "0:a:0", "-f", "framehash", "-", timeout=90)
+                frames = [line.split(",") for line in decoded.splitlines() if line and not line.startswith("#")]
+                require(any(row[0].strip() == "0" for row in frames) and any(row[0].strip() == "1" for row in frames),
+                        "Native HLS seek produced no decoded video/audio after withdrawal")
+                evidence["openedSourceSurvivesDiscoveryWithdrawal"] = True
+                self.fixture_api.call("POST", "/control/streams", {"enabled": True})
+                self.alice.call("POST", f"/Siphon/Items/{self.movie}/Sources/Refresh")
                 evidence.update(selectedProgressiveVersionPreserved=True, progressivePublicPathPreserved=True,
                                 progressiveEncoderLocal=True, nativeRemuxPlaylistCount=playlists,
                                 nativeRemuxSegmentCount=segments, nativeRemuxDecodedSeconds=2)
@@ -612,6 +623,7 @@ http {
                                 hlsEncoderLocal=True, hlsPlaylistCount=playlists, hlsSegmentCount=segments,
                                 hlsDecodedSeconds=2, nestedReferencesRetainReaderOrigin=True)
             finally:
+                self.fixture_api.call("POST", "/control/streams", {"enabled": True})
                 # The public client origin must survive the owned scenario unchanged.
                 self.save_config(original)
                 evidence["publicConfigurationRestored"] = self.config()["PublicBaseUrl"] == original["PublicBaseUrl"]

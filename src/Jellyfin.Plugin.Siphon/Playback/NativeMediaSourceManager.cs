@@ -8,11 +8,13 @@ using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.MediaInfo;
+using Microsoft.AspNetCore.Http;
 
 namespace Jellyfin.Plugin.Siphon.Playback;
 
 /// <summary>Keeps Jellyfin's native source processing while restoring the addon's version order.</summary>
-public sealed class NativeMediaSourceManager(IMediaSourceManager inner, ILibraryManager library, PlaybackAccess access) : IMediaSourceManager
+public sealed class NativeMediaSourceManager(IMediaSourceManager inner, ILibraryManager library, PlaybackAccess access,
+    ProxySessionStore sessions, IHttpContextAccessor contexts) : IMediaSourceManager
 {
     private static readonly string SourceTokenPrefix = typeof(SiphonMediaSourceProvider).FullName!
         .GetMD5().ToString("N", CultureInfo.InvariantCulture) + "_";
@@ -56,6 +58,23 @@ public sealed class NativeMediaSourceManager(IMediaSourceManager inner, ILibrary
         var managed = NativeVersionService.IsManaged(item);
         user ??= access.CurrentUser();
         if (managed && (user is null || access.GetVideo(item.Id, user.Id) is null)) return [];
+        if (managed && !allowMediaProbe && contexts.HttpContext is { } context
+            && context.Request.Query["PlaySessionId"].ToString() is { Length: > 0 and <= 128 } playback
+            && Guid.TryParse(context.Request.Query["MediaSourceId"], out var versionId))
+        {
+            var saved = sessions.GetPlayback(user!.Id, playback, versionId);
+            if (saved is { } opened)
+            {
+                if (access.GetVideo(versionId, user.Id) is not { } version
+                    || !SameManagedContent(version, (Video)item)
+                    || ((Video)item).PrimaryVersionId.HasValue && versionId != item.Id
+                    || !GetVersions((Video)item, user.Id, includeRetired: true).ContainsKey(versionId)
+                    || version.GetProviderId(NativeVersionService.SourceProvider) != opened.Session.Source.Id
+                    || !access.AllowsLease(opened.Session))
+                    throw new ResourceNotFoundException("The selected Siphon source is unavailable.");
+                return [opened.Source];
+            }
+        }
         var sources = await inner.GetPlaybackMediaSources(
             item, user, managed ? false : allowMediaProbe, enablePathSubstitution, cancellationToken).ConfigureAwait(false);
         if (!managed) return sources;
@@ -251,6 +270,10 @@ public sealed class NativeMediaSourceManager(IMediaSourceManager inner, ILibrary
         // readers. A native live-stream ID would be closed on an audio switch and then reused.
         source.LiveStreamId = null;
         source.RequiresClosing = false;
+        source.RequiresOpening = false;
+        source.OpenToken = null;
+        source.SupportsProbing = false;
+        sessions.BindPlayback(request.UserId == Guid.Empty ? access.CurrentUser()?.Id ?? Guid.Empty : request.UserId, request.PlaySessionId, source);
     }
 
     public Task<MediaSourceInfo> GetLiveStream(string id, CancellationToken cancellationToken) => inner.GetLiveStream(id, cancellationToken);
