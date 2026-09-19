@@ -2,7 +2,7 @@
   "name": "Siphon",
   "guid": "b2df1c14-4b7e-4e7b-9a95-8f9ad8d2b0c1",
   "imageUrl": "https://raw.githubusercontent.com/moodiness/jellyfin-plugin-siphon/main/assets/siphon-jellyfin.png",
-  "version": "1.6.3.0",
+  "version": "1.6.4.0",
   "targetAbi": "12.1.0.0",
   "framework": "net10.0",
   "owner": "moodiness",
@@ -26,5 +26,5 @@
     "MonoTorrent.Trackers.dll",
     "ReusableTasks.dll"
   ],
-  "changelog": "Route native FFmpeg and ffprobe reads through Jellyfin's bound local HTTP address and port instead of the public reverse proxy, while preserving public playback URLs for clients. Keep rewritten HLS playlists, segments and keys on the reader's origin and base path. Avoid reopening and probing an already-probed selected version during remux and seek. Preserve capability authorization, account isolation, range validation and private-host safeguards. Includes regression and real Jellyfin coverage with an unreachable public playback hostname."
+  "changelog": "Avoid overlapping classification and media responses within a playback relay request. Classify long byte-zero reads in place and finish prefix classification before seeks or short ranges. Preserve HLS rewriting, exact source selection, authorization and SSRF safeguards; reject conflicting advertised representations and invalid ranges. Add credential-free stage and cause diagnostics for relay failures. Verified with 578 tests and real Jellyfin playback, including bounded reads at 6 GiB and generated HEVC/AAC seeking. Independent FFmpeg requests can still overlap; the reported production NAS failure is not yet verified resolved."
 }
