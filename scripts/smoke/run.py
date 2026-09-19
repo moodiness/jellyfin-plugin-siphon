@@ -867,18 +867,18 @@ http {
             else:
                 origin = "published-v1.4.1-release"
                 try:
-                    request = urllib.request.Request("https://api.github.com/repos/moodiness/jellyfin-plugin-siphon/releases/tags/v1.4.1", headers={"User-Agent": "siphon-owned-smoke"})
-                    with urllib.request.urlopen(request, timeout=30) as response:
-                        release = json.load(response)
-                    asset = next(asset for asset in release["assets"] if asset["name"] == "siphon-1.4.1.0.zip")
+                    # The release asset is immutable and the checksum below is pinned.
+                    # Avoid GitHub's shared unauthenticated API quota in hosted runners.
                     package = self.temp / "siphon-1.4.1.0.zip"
-                    with urllib.request.urlopen(asset["browser_download_url"], timeout=60) as response:
+                    with urllib.request.urlopen(
+                        "https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.4.1/siphon-1.4.1.0.zip",
+                        timeout=60) as response:
                         data = response.read(128 * 1024 * 1024 + 1)
                     require(len(data) <= 128 * 1024 * 1024, "Prior release archive exceeds limit")
                     require(hashlib.sha256(data).hexdigest() == "7b7ee5f591272133bd2662e6df518c6d0c722f32339e1b563126cc240347ce60",
                             "Published v1.4.1 archive differs from the verified historical binary")
                     package.write_bytes(data)
-                except (urllib.error.URLError, KeyError, StopIteration) as error:
+                except urllib.error.URLError as error:
                     raise Unavailable("Real v1.4.1 release ZIP unavailable; supply --previous-package with a verified 1.4.1.0 historical binary. Upgrade was NOT exercised.") from error
             require(self.archive_metadata(package)["version"] == "1.4.1.0", "Upgrade must begin with a real 1.4.1.0 archive")
             require(hashlib.sha256(package.read_bytes()).hexdigest() == "7b7ee5f591272133bd2662e6df518c6d0c722f32339e1b563126cc240347ce60",
