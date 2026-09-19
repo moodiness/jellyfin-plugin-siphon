@@ -8,13 +8,13 @@ Siphon brings **Stremio addons into Jellyfin**: catalogs, metadata, subtitles, a
 
 Siphon targets **Jellyfin 12.1** and .NET 10. The current source includes an opt-in, bounded MonoTorrent engine. It is not a debrid client or an external-player integration.
 
-**[Latest published release](https://github.com/moodiness/jellyfin-plugin-siphon/releases/latest).** Git tags use three components and plugin versions use four: tag `v1.6.5` corresponds to plugin version `1.6.5.0`. The stable repository manifest on `main` advertises verified published archives and retains earlier compatible versions.
+**[Latest published release](https://github.com/moodiness/jellyfin-plugin-siphon/releases/latest).** Git tags use three components and plugin versions use four: tag `v1.6.6` corresponds to plugin version `1.6.6.0`. The stable repository manifest on `main` advertises verified published archives and retains earlier compatible versions.
 
 **Siphon 1.5.0.0** adds isolated per-user playback/subtitle addons and search preferences; durable native collections and playlists; catalog collections; selected-version resumable downloads; selective orphan-history recovery; field provenance and per-title source diagnostics; a followed-series calendar and opt-in notifications; all IntroDB timing types; and real, bounded P2P playback. It also includes native addon Search, targeted synchronization, a twenty-run decision history, provider quota/cooldown tracking, shared response caching, the supplied Siphon icon, and authoritative addon metadata with an optional missing-season-only TMDB supplement. The published package also validates media response types and constrains document rendering on media routes.
 
 **Siphon 1.6.0.0** adds private persistent downloads with pause, priority, quotas, scheduling, batch preparation and track selection; finite-HLS offline exports; signed notification adapters and optional digests; French/English controls and local operational health; verified offline backup/restore and assets-first release automation. Background downloads and external delivery remain disabled by default. It also bounds request admission and state reads, moves saved-library restoration off the host startup path, and scopes search additions/removals to the affected titles.
 
-**Current source: 1.6.5.0.** After a successful native opening, remux and seek requests carrying the same user, PlaySessionId and exact version reuse a private copy of that opening's source and probed tracks, even when discovery is withdrawn. The already-authorized opaque proxy lease is reused without silently substituting another version. Permissions, content identity, ownership, session identity and lease validity are rechecked; invalid or expired sessions fail closed. This release retains local FFmpeg/ffprobe routing, HLS rewriting and the existing SSRF, range and playback protections.
+**Current source: 1.6.6.0.** Large seeks reuse the successful native media classification already attached to the authorized proxy lease instead of starting another byte-zero classification request that can stall. Range bounds, representation validators, source identity, authorization, HLS rewriting and fail-closed behavior remain enforced. This release also retains opened-source continuity across remux and seek requests, local FFmpeg/ffprobe routing and the existing SSRF and playback protections.
 
 ## Features
 
@@ -72,7 +72,7 @@ The repository manifest points to the release archive and includes its Jellyfin 
 
 1. Download the complete plugin ZIP and `SHA256SUMS` from the [latest release](https://github.com/moodiness/jellyfin-plugin-siphon/releases/latest).
 2. Verify the archive against `SHA256SUMS`.
-3. Stop Jellyfin and extract the complete archive into one matching versioned plugin directory, for example `Siphon_1.6.5.0`. The folder must contain `Jellyfin.Plugin.Siphon.dll` and `meta.json`. Keep previous binaries outside the plugin directory for rollback; do not leave two copies installed or remove the separate Siphon data directory.
+3. Stop Jellyfin and extract the complete archive into one matching versioned plugin directory, for example `Siphon_1.6.6.0`. The folder must contain `Jellyfin.Plugin.Siphon.dll` and `meta.json`. Keep previous binaries outside the plugin directory for rollback; do not leave two copies installed or remove the separate Siphon data directory.
 4. Restart Jellyfin.
 5. Configure Siphon from the plugin dashboard.
 
@@ -417,7 +417,7 @@ dotnet test Jellyfin.Plugin.Siphon.sln -c Release
 python3 scripts/package.py
 ```
 
-The build targets `net10.0` and Jellyfin ABI `12.1.0.0`. Release packaging verifies compiled version, PE assembly references, source provenance and runtime dependency bytes before producing `artifacts/siphon-1.6.5.0.zip`, a candidate repository manifest and internal `SHA256SUMS`. A stale binary, source/binary mismatch or incompatible ABI fails packaging. The tag for version 1.6.5.0 is `v1.6.5`; generating local artifacts does not publish another release.
+The build targets `net10.0` and Jellyfin ABI `12.1.0.0`. Release packaging verifies compiled version, PE assembly references, source provenance and runtime dependency bytes before producing `artifacts/siphon-1.6.6.0.zip`, a candidate repository manifest and internal `SHA256SUMS`. A stale binary, source/binary mismatch or incompatible ABI fails packaging. The tag for version 1.6.6.0 is `v1.6.6`; generating local artifacts does not publish another release.
 
 Release automation publishes **only the plugin ZIP and a public `SHA256SUMS` covering that ZIP**. The candidate manifest and internal package checksums remain in workflow recovery artifacts, not as release attachments. New releases take their detailed notes from the **annotated Git tag**, not a file in the source tree. The annotation must begin with `## Siphon <four-component version>`, a blank line, then the complete release notes; the short `build.yaml` changelog remains the catalog summary. For example, `git tag -a v1.6.3 --cleanup=verbatim -F -` reads the Markdown annotation from standard input without adding a notes file to the repository. Include the changes, compatibility, installation and verification details; tag signatures are excluded from the release body.
 
@@ -432,7 +432,7 @@ The integration harness creates its own Docker network, Jellyfin instances, acco
 ```bash
 npm ci --prefix scripts/smoke --ignore-scripts --no-audit --no-fund
 node scripts/smoke/node_modules/playwright/cli.js install chromium
-python3 scripts/smoke/run.py full --image jellyfin/jellyfin:12.1 --package artifacts/siphon-1.6.5.0.zip
+python3 scripts/smoke/run.py full --image jellyfin/jellyfin:12.1 --package artifacts/siphon-1.6.6.0.zip
 ```
 
 Docker must be running. Linux browser hosts also need Playwright's system dependencies; `--chromium-executable /absolute/path/to/chromium` selects an existing browser explicitly. Missing runtime prerequisites exit with code 77, not a passing result. The harness cleans its owned resources and exports credential-free evidence/screenshots; it neither reuses nor modifies personal Jellyfin services. These fixtures do not certify every addon, client, library size or HLS format.
