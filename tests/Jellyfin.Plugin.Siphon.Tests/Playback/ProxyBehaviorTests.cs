@@ -410,6 +410,94 @@ public sealed class ProxyBehaviorTests : IDisposable
         Assert.Equal($"bytes {offset}-{content.Length - 1}/{content.Length}", context.Response.Headers.ContentRange);
     }
 
+
+    [Fact]
+    public async Task SuccessfulNativeMediaClassificationIsReusedForLaterLargeSeek()
+    {
+        var content = BinaryFixture();
+        var ranges = new List<string?>();
+        var origin = new ResponseOrigin(headers =>
+        {
+            var range = headers?.GetValueOrDefault("Range");
+            ranges.Add(range);
+            var start = 0;
+            var end = content.Length - 1;
+            if (range is not null)
+            {
+                var parsed = RangeHeaderValue.Parse(range).Ranges.Single();
+                start = (int)(parsed.From ?? 0);
+                end = (int)Math.Min(parsed.To ?? end, end);
+            }
+
+            var response = new HttpResponseMessage(range is null ? HttpStatusCode.OK : HttpStatusCode.PartialContent)
+            {
+                Content = new ByteArrayContent(content[start..(end + 1)])
+            };
+            response.Content.Headers.ContentType = new MediaTypeHeaderValue("video/mp4");
+            response.Content.Headers.ContentLength = end - start + 1;
+            response.Headers.AcceptRanges.Add("bytes");
+            if (range is not null) response.Content.Headers.ContentRange = new ContentRangeHeaderValue(start, end, content.Length);
+            return response;
+        });
+        using var fixture = CreateFixture(content, "https://upstream.example/movie.mp4", transport: origin);
+
+        var opening = NewContext("GET", "");
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = opening };
+        await fixture.Controller.Media(fixture.Session.Token);
+        Assert.Equal(200, opening.Response.StatusCode);
+
+        var seek = NewContext("GET", "bytes=700-");
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = seek };
+        await fixture.Controller.Media(fixture.Session.Token);
+
+        Assert.Equal(206, seek.Response.StatusCode);
+        Assert.Equal(content[700..], ((MemoryStream)seek.Response.Body).ToArray());
+        Assert.Equal([null, "bytes=700-"], ranges);
+    }
+
+    [Fact]
+    public async Task ReusedNativeClassificationStillRejectsChangedRepresentation()
+    {
+        var content = BinaryFixture();
+        var changed = false;
+        var origin = new ResponseOrigin(headers =>
+        {
+            var range = headers?.GetValueOrDefault("Range");
+            var bytes = changed ? content.Select(value => (byte)(value ^ 0xff)).ToArray() : content;
+            var start = 0;
+            var end = bytes.Length - 1;
+            if (range is not null)
+            {
+                var parsed = RangeHeaderValue.Parse(range).Ranges.Single();
+                start = (int)(parsed.From ?? 0);
+                end = (int)Math.Min(parsed.To ?? end, end);
+            }
+
+            var response = new HttpResponseMessage(range is null ? HttpStatusCode.OK : HttpStatusCode.PartialContent)
+            {
+                Content = new ByteArrayContent(bytes[start..(end + 1)])
+            };
+            response.Content.Headers.ContentType = new MediaTypeHeaderValue("video/mp4");
+            response.Content.Headers.ContentLength = end - start + 1;
+            response.Headers.ETag = new EntityTagHeaderValue(changed ? "\"changed\"" : "\"original\"");
+            if (range is not null) response.Content.Headers.ContentRange = new ContentRangeHeaderValue(start, end, bytes.Length);
+            return response;
+        });
+        using var fixture = CreateFixture(content, "https://upstream.example/movie.mp4", transport: origin);
+
+        var opening = NewContext("GET", "");
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = opening };
+        await fixture.Controller.Media(fixture.Session.Token);
+        Assert.Equal(200, opening.Response.StatusCode);
+
+        changed = true;
+        var seek = NewContext("GET", "bytes=700-");
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = seek };
+        await fixture.Controller.Media(fixture.Session.Token);
+
+        Assert.Equal(502, seek.Response.StatusCode);
+        Assert.Empty(((MemoryStream)seek.Response.Body).ToArray());
+    }
     [Theory]
     [InlineData("bytes=0-")]
     [InlineData("bytes=20-90")]

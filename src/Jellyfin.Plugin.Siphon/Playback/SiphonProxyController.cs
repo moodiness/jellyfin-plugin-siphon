@@ -333,13 +333,18 @@ public sealed class SiphonProxyController(
         }
 
         var rootMedia = session.RootToken == session.Token;
-        var classified = false;
+        var nativeMedia = rootMedia ? sessions.GetNativeMedia(session) : null;
+        var hasNativeMediaClassification = nativeMedia is not null;
+        var classified = nativeMedia is not null;
         EntityTagHeaderValue? classifiedTag = null;
-        DateTimeOffset? classifiedDate = null;
-        long? classifiedLength = null;
+        if (nativeMedia?.ETag is { } cachedEtag && EntityTagHeaderValue.TryParse(cachedEtag, out var parsedTag))
+            classifiedTag = parsedTag;
+        DateTimeOffset? classifiedDate = nativeMedia?.LastModified;
+        long? classifiedLength = nativeMedia?.Length;
         // Long byte-zero responses classify themselves. For seeks and short ranges,
         // finish and dispose the prefix response before opening the requested body.
-        if (requestedRange is not null && (requestedRange.From != 0 || requestedRange.To < 511))
+        if (requestedRange is not null && !hasNativeMediaClassification
+            && (requestedRange.From != 0 || requestedRange.To < 511))
         {
             var classificationHeaders = new Dictionary<string, string>(headers, StringComparer.OrdinalIgnoreCase)
             {
@@ -376,7 +381,6 @@ public sealed class SiphonProxyController(
                 _stage = "classification-validation";
                 if (Encoding.UTF8.GetString(start, 0, length).TrimStart('\uFEFF', ' ', '\r', '\n', '\t').StartsWith("#EXTM3U", StringComparison.Ordinal))
                 {
-                    // Playlists are fetched whole and rewritten below, never relayed as slices.
                     headers.Remove("Range");
                     headers.Remove("If-Range");
                 }
@@ -394,7 +398,7 @@ public sealed class SiphonProxyController(
             }
         }
 
-        // GET is intentional for HEAD: determining rewritten HLS length requires its representation.
+
         _stage = "media-headers";
         _upstreamStatus = null;
         using var upstream = await http.SendAsync(session.Source.Url, HttpMethod.Get, headers, ct).ConfigureAwait(false);
@@ -487,9 +491,16 @@ public sealed class SiphonProxyController(
 
             return;
         }
-        if (rootMedia && (!partial || !classified))
-            NativeMediaClassifier.RequireSupported(prefix.AsSpan(0, prefixLength));
 
+        if (rootMedia && !hasNativeMediaClassification)
+        {
+            if (!partial || !classified)
+                NativeMediaClassifier.RequireSupported(prefix.AsSpan(0, prefixLength));
+            sessions.MarkNativeMedia(session,
+                classifiedTag?.ToString() ?? upstream.Headers.ETag?.ToString(),
+                classifiedDate ?? upstream.Content.Headers.LastModified,
+                classifiedLength ?? upstream.Content.Headers.ContentRange?.Length ?? upstream.Content.Headers.ContentLength);
+        }
         Response.StatusCode = (int)upstream.StatusCode;
         Response.ContentType = GetMediaContentType(mediaType);
         Response.ContentLength = upstream.Content.Headers.ContentLength;

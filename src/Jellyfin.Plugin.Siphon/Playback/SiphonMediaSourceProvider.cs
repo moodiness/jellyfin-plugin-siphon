@@ -129,7 +129,13 @@ public sealed class SiphonMediaSourceProvider(
         source.RunTimeTicks = info.RunTimeTicks;
         source.MediaStreams = info.MediaStreams;
         source.MediaAttachments = info.MediaAttachments;
-        source.SupportsProbing = false;
+        if (!string.Equals(info.Container, "hls", StringComparison.OrdinalIgnoreCase)
+            && !session.Source.Url.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase)
+            && !session.Source.Url.AbsolutePath.EndsWith(".m3u", StringComparison.OrdinalIgnoreCase))
+        {
+            // A successful Jellyfin probe has already validated the root media bytes.
+            sessions.MarkNativeMedia(session, null, null, info.Size ?? session.Source.Size);
+        }
         await versions.SaveMediaInfoAsync(versionId, source, cancellationToken).ConfigureAwait(false);
         source.HasSegments = segmentManager.HasSegments(versionId);
         return new ProxyLiveStream(source);

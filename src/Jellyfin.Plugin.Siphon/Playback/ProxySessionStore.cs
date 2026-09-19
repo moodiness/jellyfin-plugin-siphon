@@ -13,6 +13,8 @@ public sealed record ProxySession(string Token, ResolvedStream Source, string It
     public DateTimeOffset? DownloadExpiresAtUtc { get; init; }
 }
 
+internal readonly record struct NativeMediaClassification(string? ETag, DateTimeOffset? LastModified, long? Length);
+
 /// <summary>Bounded server-only leases. Tokens contain no resource or credential information.</summary>
 public sealed class ProxySessionStore(ConfigurationAccessor configuration)
 {
@@ -23,6 +25,8 @@ public sealed class ProxySessionStore(ConfigurationAccessor configuration)
     private readonly Dictionary<string, (string Token, DateTimeOffset Expires)> _defaults = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Dictionary<Uri, string>> _children = new(StringComparer.Ordinal);
     private readonly Dictionary<(Guid User, string Playback, Guid Version), (string Token, byte[] Source, DateTimeOffset Expires)> _playbacks = new();
+    private readonly Dictionary<string, NativeMediaClassification> _nativeMedia = new(StringComparer.Ordinal);
+
     private DateTimeOffset _nextPrune;
 
     private static bool SameHeaders(IReadOnlyDictionary<string, string> first, IReadOnlyDictionary<string, string> second)
@@ -46,6 +50,29 @@ public sealed class ProxySessionStore(ConfigurationAccessor configuration)
             return Add(new ProxySession(NewToken(), source, item.Key) { Download = download, DownloadExpiresAtUtc = download ? DateTimeOffset.UtcNow.AddMinutes(5) : null });
         }
     }
+    internal void MarkNativeMedia(ProxySession session, string? etag, DateTimeOffset? lastModified, long? length)
+    {
+        lock (_gate)
+        {
+            if (!session.Download && session.Source.P2p is null
+                && _sessions.TryGetValue(session.RootToken, out var root)
+                && root.Session.RootToken == session.RootToken)
+            {
+                var previous = _nativeMedia.GetValueOrDefault(session.RootToken);
+                _nativeMedia[session.RootToken] = new(etag ?? previous.ETag, lastModified ?? previous.LastModified, length ?? previous.Length);
+            }
+        }
+    }
+
+    internal NativeMediaClassification? GetNativeMedia(ProxySession session)
+    {
+        lock (_gate)
+        {
+            return _sessions.ContainsKey(session.RootToken)
+                && _nativeMedia.TryGetValue(session.RootToken, out var media) ? media : null;
+        }
+    }
+
 
 
     internal void BindPlayback(Guid userId, string? playSessionId, MediaSourceInfo source)
@@ -214,6 +241,7 @@ public sealed class ProxySessionStore(ConfigurationAccessor configuration)
             _defaults.Clear();
             _children.Clear();
             _playbacks.Clear();
+            _nativeMedia.Clear();
         }
     }
 
@@ -294,6 +322,7 @@ public sealed class ProxySessionStore(ConfigurationAccessor configuration)
 
         if (entry.Session.RootToken == token)
         {
+            _nativeMedia.Remove(token);
             foreach (var child in _sessions.Where(p => p.Value.Session.RootToken == token).Select(p => p.Key).ToArray())
             {
                 _sessions.Remove(child);
