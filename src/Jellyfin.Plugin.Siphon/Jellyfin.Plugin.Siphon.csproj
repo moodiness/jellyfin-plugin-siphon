@@ -7,7 +7,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
-    <Version>1.6.4.0</Version>
+    <Version>1.6.5.0</Version>
     <RepositoryUrl>https://github.com/moodiness/jellyfin-plugin-siphon</RepositoryUrl>
     <PythonExe Condition="'$(PythonExe)' == '' and '$(OS)' == 'Windows_NT'">python</PythonExe>
     <PythonExe Condition="'$(PythonExe)' == ''">python3</PythonExe>

@@ -2,7 +2,7 @@
   "name": "Siphon",
   "guid": "b2df1c14-4b7e-4e7b-9a95-8f9ad8d2b0c1",
   "imageUrl": "https://raw.githubusercontent.com/moodiness/jellyfin-plugin-siphon/main/assets/siphon-jellyfin.png",
-  "version": "1.6.4.0",
+  "version": "1.6.5.0",
   "targetAbi": "12.1.0.0",
   "framework": "net10.0",
   "owner": "moodiness",
@@ -26,5 +26,5 @@
     "MonoTorrent.Trackers.dll",
     "ReusableTasks.dll"
   ],
-  "changelog": "Avoid overlapping classification and media responses within a playback relay request. Classify long byte-zero reads in place and finish prefix classification before seeks or short ranges. Preserve HLS rewriting, exact source selection, authorization and SSRF safeguards; reject conflicting advertised representations and invalid ranges. Add credential-free stage and cause diagnostics for relay failures. Verified with 578 tests and real Jellyfin playback, including bounded reads at 6 GiB and generated HEVC/AAC seeking. Independent FFmpeg requests can still overlap; the reported production NAS failure is not yet verified resolved."
+  "changelog": "Preserve the exact opened native source for Jellyfin remux, HLS and seek requests after discovery withdrawal by binding a private source snapshot to the user, PlaySessionId and native version. Reuse the already-authorized opaque proxy lease, revalidate permissions, ownership, content and session identity, and fail closed without substituting another version. Add controlled Jellyfin 12.1 coverage for progressive and nested HLS playback, seeking, decoded audio/video and playback revocation. Verified with 584 tests and the complete owned Jellyfin smoke workflow."
 }
