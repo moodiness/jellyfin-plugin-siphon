@@ -358,6 +358,10 @@ The public base URL is for clients and must remain reachable by them. FFmpeg and
 
 Upstream connection and idle-read deadlines use the configured addon timeout; this does not limit a film's total playback duration. Private-host exceptions do not leave reusable approved connections after revocation. Media ranges preserve original bytes, and HLS resources are classified and rewritten even when an upstream URL has a misleading extension.
 
+Ranged playback does not open a second upstream response while holding the requested media body unread. A sufficiently long byte-zero response supplies its own classification prefix; seeks and short ranges finish and dispose a separate prefix response first. HLS still passes through the playlist rewriter, and changed advertised representation validators or lengths are rejected rather than mixing responses. This addresses origins that refuse overlapping reads within a relay request; it does not serialize independent players or repair an unavailable origin.
+
+Playback relay failures log only the failing stage, a fixed cause category, numeric upstream status when available, whether the client response started, and elapsed milliseconds. `classification-headers`/`classification-body`, `media-headers`/`media-prefix`/`media-body`, and playlist stages distinguish where a 502 or aborted transfer occurred. No source URL, capability, request header, exception message or upstream body is included in this diagnostic. A reproduced constrained-origin fix is not evidence that an uninstrumented failure on another server had the same cause.
+
 Live-TV catalogs using Stremio's `tv` type are not imported. HTTP(S) support does not imply live-TV catalog support.
 
 ### Source diagnostics and selected-version downloads

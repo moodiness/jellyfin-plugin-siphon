@@ -16,6 +16,7 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Entities;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -391,6 +392,111 @@ public sealed class ProxyBehaviorTests : IDisposable
         Assert.Equal("bytes 0-1/1024", context.Response.Headers.ContentRange);
     }
 
+    [Theory]
+    [InlineData("bytes=0-", 0)]
+    [InlineData("bytes=700-", 700)]
+    public async Task OpenEndedPlaybackDoesNotNeedTwoSimultaneousOriginResponses(string range, int offset)
+    {
+        var content = BinaryFixture();
+        var origin = new SingleResponseOrigin(content);
+        using var fixture = CreateFixture(content, "https://upstream.example/movie.mp4", transport: origin);
+        var context = NewContext("GET", range);
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = context };
+
+        await fixture.Controller.Media(fixture.Session.Token);
+
+        Assert.Equal(206, context.Response.StatusCode);
+        Assert.Equal(content[offset..], ((MemoryStream)context.Response.Body).ToArray());
+        Assert.Equal($"bytes {offset}-{content.Length - 1}/{content.Length}", context.Response.Headers.ContentRange);
+    }
+
+    [Theory]
+    [InlineData("bytes=0-")]
+    [InlineData("bytes=20-90")]
+    public async Task SingleResponseOriginPlaylistsAreStillRewritten(string range)
+    {
+        var bytes = Encoding.UTF8.GetBytes("#EXTM3U\n#EXTINF:6,\nhttps://secret.example/segment.ts?credential=private\n#EXT-X-ENDLIST\n");
+        using var fixture = CreateFixture(bytes, "https://upstream.example/opaque", transport: new SingleResponseOrigin(bytes));
+        var context = NewContext("GET", range);
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = context };
+        await fixture.Controller.Media(fixture.Session.Token);
+        Assert.Equal(200, context.Response.StatusCode);
+        var playlist = Encoding.UTF8.GetString(((MemoryStream)context.Response.Body).ToArray());
+        Assert.StartsWith("#EXTM3U", playlist);
+        Assert.DoesNotContain("secret.example", playlist);
+        Assert.DoesNotContain("credential", playlist);
+        Assert.Contains("../", playlist);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SeekRejectsChangedRepresentationButAcceptsEqualStrongValidators(bool changed)
+    {
+        var bytes = BinaryFixture();
+        var origin = new ResponseOrigin(headers =>
+        {
+            var classify = headers!["Range"] == "bytes=0-511";
+            var response = new HttpResponseMessage(HttpStatusCode.PartialContent)
+            {
+                Content = new ByteArrayContent(classify ? bytes[..512] : bytes[700..])
+            };
+            response.Content.Headers.ContentRange = new ContentRangeHeaderValue(classify ? 0 : 700, classify ? 511 : 1023, 1024);
+            response.Headers.ETag = new EntityTagHeaderValue(changed && !classify ? "\"new\"" : "\"original\"");
+            return response;
+        });
+        using var fixture = CreateFixture(bytes, "https://upstream.example/opaque", transport: origin);
+        var context = NewContext("GET", "bytes=700-");
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = context };
+        await fixture.Controller.Media(fixture.Session.Token);
+        Assert.Equal(changed ? 502 : 206, context.Response.StatusCode);
+        Assert.Equal(changed ? [] : bytes[700..], ((MemoryStream)context.Response.Body).ToArray());
+    }
+
+    [Fact]
+    public async Task RangeIgnoredAfterClassificationValidatesTheNewWholeRepresentation()
+    {
+        var bytes = BinaryFixture();
+        var origin = new ResponseOrigin(headers =>
+        {
+            var classify = headers!["Range"] == "bytes=0-511";
+            var response = new HttpResponseMessage(classify ? HttpStatusCode.PartialContent : HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(classify ? bytes[..512] : "<MPD><BaseURL>https://secret.example/</BaseURL></MPD>"u8.ToArray())
+            };
+            if (classify) response.Content.Headers.ContentRange = new ContentRangeHeaderValue(0, 511, 1024);
+            return response;
+        });
+        using var fixture = CreateFixture(bytes, "https://upstream.example/opaque", transport: origin);
+        var context = NewContext("GET", "bytes=700-");
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = context };
+        await fixture.Controller.Media(fixture.Session.Token);
+        Assert.Equal(502, context.Response.StatusCode);
+        Assert.Empty(((MemoryStream)context.Response.Body).ToArray());
+    }
+
+    [Theory]
+    [InlineData("bytes=700-", "classification-headers")]
+    [InlineData("bytes=0-", "media-headers")]
+    public async Task RelayFailureDiagnosticsNeverIncludeExceptionsOrCapabilities(string range, string stage)
+    {
+        const string secret = "https://secret.example/path?credential=private";
+        var warnings = new Warnings();
+        var origin = new ResponseOrigin(_ => throw new HttpRequestException(secret));
+        using var fixture = CreateFixture([], secret, transport: origin, logger: warnings);
+        var context = NewContext("GET", range);
+        fixture.Controller.ControllerContext = new ControllerContext { HttpContext = context };
+        await fixture.Controller.Media(fixture.Session.Token);
+        Assert.Equal(502, context.Response.StatusCode);
+        var message = Assert.Single(warnings.Messages);
+        Assert.Contains("stage=" + stage, message);
+        Assert.Contains("cause=transport", message);
+        Assert.DoesNotContain("secret.example", message);
+        Assert.DoesNotContain("private", message);
+        Assert.DoesNotContain(fixture.Session.Token, message);
+        Assert.Empty(warnings.Exceptions);
+    }
+
     [Fact]
     public async Task HlsChildKeysAndEncryptedBytesRemainOpaque()
     {
@@ -438,13 +544,13 @@ public sealed class ProxyBehaviorTests : IDisposable
         return content;
     }
 
-    private Fixture CreateFixture(byte[] content, string url, string type = "video/mp4", Stream? body = null, int timeoutSeconds = 30, HttpStatusCode? classificationStatus = null, bool child = false)
+    private Fixture CreateFixture(byte[] content, string url, string type = "video/mp4", Stream? body = null, int timeoutSeconds = 30, HttpStatusCode? classificationStatus = null, bool child = false, ISafeHttpClient? transport = null, ILogger<SiphonProxyController>? logger = null)
     {
         var config = new ConfigurationAccessor(() => new PluginConfiguration { PublicBaseUrl = "https://jellyfin.example", AddonTimeoutSeconds = timeoutSeconds });
         var tokens = new CapabilityTokenService(new SiphonSecretStore(Paths()));
         var store = new SiphonStateStore(Paths());
         store.SaveAsync([Item()], CancellationToken.None).GetAwaiter().GetResult();
-        var http = new MemoryOrigin(content, type, body, classificationStatus);
+        var http = transport ?? new MemoryOrigin(content, type, body, classificationStatus);
         var client = new StremioClient(http, config);
         var registry = new AddonRegistry(client, config, NullLogger<AddonRegistry>.Instance);
         var resolver = new StreamResolver(client, registry, config, NullLogger<StreamResolver>.Instance, new SourceBindingStore(Paths()));
@@ -461,7 +567,7 @@ public sealed class ProxyBehaviorTests : IDisposable
         var library = DispatchProxy.Create<ILibraryManager, NativeSourceLifetimeTests.Library>();
         ((NativeSourceLifetimeTests.Library)(object)library).Video = video;
         var access = NativeSourceLifetimeTests.CreateAccess(library, user, authenticated: false);
-        return new Fixture(new SiphonProxyController(tokens, store, resolver, sessions, http, config, access, null!), session, store, client, user, sessions);
+        return new Fixture(new SiphonProxyController(tokens, store, resolver, sessions, http, config, access, null!, logger ?? NullLogger<SiphonProxyController>.Instance), session, store, client, user, sessions);
     }
 
     private ManagedItem Item() => new()
@@ -523,6 +629,57 @@ public sealed class ProxyBehaviorTests : IDisposable
             response.Headers.TryAddWithoutValidation("Set-Cookie", "secret=value");
             if (ranged) response.Content.Headers.ContentRange = new ContentRangeHeaderValue(start, end, data.Length);
             return Task.FromResult(response);
+        }
+    }
+
+    private sealed class SingleResponseOrigin(byte[] data) : ISafeHttpClient
+    {
+        private bool _active;
+
+        public Task<HttpResponseMessage> SendAsync(Uri uri, HttpMethod method, IReadOnlyDictionary<string, string>? headers, CancellationToken cancellationToken)
+        {
+            if (_active) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+            var range = headers?.TryGetValue("Range", out var value) == true ? RangeHeaderValue.Parse(value).Ranges.Single() : null;
+            var start = (int)(range?.From ?? 0);
+            var end = (int)Math.Min(range?.To ?? data.Length - 1, data.Length - 1);
+            _active = true;
+            var content = new StreamContent(new ResponseStream(data[start..(end + 1)], () => _active = false));
+            content.Headers.ContentType = new MediaTypeHeaderValue("video/mp4");
+            content.Headers.ContentLength = end - start + 1;
+            if (range is not null) content.Headers.ContentRange = new ContentRangeHeaderValue(start, end, data.Length);
+            return Task.FromResult(new HttpResponseMessage(range is null ? HttpStatusCode.OK : HttpStatusCode.PartialContent)
+            {
+                RequestMessage = new HttpRequestMessage(method, uri),
+                Content = content
+            });
+        }
+
+        private sealed class ResponseStream(byte[] bytes, Action release) : MemoryStream(bytes, writable: false)
+        {
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing) release();
+                base.Dispose(disposing);
+            }
+        }
+    }
+
+    private sealed class ResponseOrigin(Func<IReadOnlyDictionary<string, string>?, HttpResponseMessage> respond) : ISafeHttpClient
+    {
+        public Task<HttpResponseMessage> SendAsync(Uri uri, HttpMethod method, IReadOnlyDictionary<string, string>? headers, CancellationToken cancellationToken)
+            => Task.FromResult(respond(headers));
+    }
+
+    private sealed class Warnings : ILogger<SiphonProxyController>
+    {
+        public List<string> Messages { get; } = [];
+        public List<Exception> Exceptions { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == LogLevel.Warning) Messages.Add(formatter(state, exception));
+            if (exception is not null) Exceptions.Add(exception);
         }
     }
 
