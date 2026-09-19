@@ -15,6 +15,7 @@ ROOT = Path(os.environ.get("FIXTURE_ROOT", "/fixture"))
 LOCK = threading.Lock()
 EVENTS = []
 EPISODES = 1
+STREAMS_ENABLED = True
 COUNTERS = {"addon": 0, "media": 0, "segments": 0, "receiver": 0}
 BASE = "http://fixture:8080"
 
@@ -103,6 +104,8 @@ class Handler(BaseHTTPRequestHandler):
                 identifier = identifier.removesuffix(".json")
                 return self.reply(200, {"meta": series(identifier) if kind == "series" else movie(identifier)})
             if resource.startswith("stream/"):
+                if not STREAMS_ENABLED:
+                    return self.reply(200, {"streams": []})
                 return self.reply(200, {"streams": [
                     {"name": profile + " HTTP", "url": BASE + "/media/movie.mp4", "behaviorHints": {"filename": "generated.mp4", "videoSize": (ROOT / "media/movie.mp4").stat().st_size}},
                     {"name": profile + " HLS", "url": BASE + "/media/master.m3u8"},
@@ -151,12 +154,15 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(404)
 
     def do_POST(self):
-        global EPISODES
+        global EPISODES, STREAMS_ENABLED
         length = int(self.headers.get("Content-Length", 0))
         if not 0 <= length <= 1024 * 1024:
             return self.reply(413)
         body = self.rfile.read(length)
         path = urlsplit(self.path).path
+        if path == "/control/streams":
+            STREAMS_ENABLED = bool(json.loads(body)["enabled"])
+            return self.reply(200, {"enabled": STREAMS_ENABLED})
         if path == "/control/episodes":
             EPISODES = max(1, min(5, int(json.loads(body)["count"])))
             return self.reply(200, {"count": EPISODES})

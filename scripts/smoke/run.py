@@ -594,10 +594,21 @@ http {
                     return len(seen), segments
 
                 progressive, info = open_selected(" HTTP")
+                self.fixture_api.call("POST", "/control/streams", {"enabled": False})
+                withdrawn = self.alice.call("POST", f"/Siphon/Items/{self.movie}/Sources/Refresh")
+                require(not withdrawn["Sources"], "Controlled addon did not withdraw its sources")
                 native = urllib.parse.urljoin("http://jellyfin:8096", progressive["TranscodingUrl"])
                 playlists, segments = inspect_playlists(native, "jellyfin:8096")
                 self.docker("exec", self.name + "-jellyfin", FFMPEG, "-v", "error", "-i", native,
                             "-t", "2", "-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-", timeout=90)
+                decoded = self.docker("exec", self.name + "-jellyfin", FFMPEG, "-v", "error", "-abort_on", "empty_output",
+                                      "-ss", "20", "-i", native, "-t", "2", "-map", "0:v:0", "-map", "0:a:0", "-f", "framehash", "-", timeout=90)
+                frames = [line.split(",") for line in decoded.splitlines() if line and not line.startswith("#")]
+                require(any(row[0].strip() == "0" for row in frames) and any(row[0].strip() == "1" for row in frames),
+                        "Native HLS seek produced no decoded video/audio after withdrawal")
+                evidence["openedSourceSurvivesDiscoveryWithdrawal"] = True
+                self.fixture_api.call("POST", "/control/streams", {"enabled": True})
+                self.alice.call("POST", f"/Siphon/Items/{self.movie}/Sources/Refresh")
                 evidence.update(selectedProgressiveVersionPreserved=True, progressivePublicPathPreserved=True,
                                 progressiveEncoderLocal=True, nativeRemuxPlaylistCount=playlists,
                                 nativeRemuxSegmentCount=segments, nativeRemuxDecodedSeconds=2)
@@ -612,6 +623,7 @@ http {
                                 hlsEncoderLocal=True, hlsPlaylistCount=playlists, hlsSegmentCount=segments,
                                 hlsDecodedSeconds=2, nestedReferencesRetainReaderOrigin=True)
             finally:
+                self.fixture_api.call("POST", "/control/streams", {"enabled": True})
                 # The public client origin must survive the owned scenario unchanged.
                 self.save_config(original)
                 evidence["publicConfigurationRestored"] = self.config()["PublicBaseUrl"] == original["PublicBaseUrl"]
@@ -855,18 +867,18 @@ http {
             else:
                 origin = "published-v1.4.1-release"
                 try:
-                    request = urllib.request.Request("https://api.github.com/repos/moodiness/jellyfin-plugin-siphon/releases/tags/v1.4.1", headers={"User-Agent": "siphon-owned-smoke"})
-                    with urllib.request.urlopen(request, timeout=30) as response:
-                        release = json.load(response)
-                    asset = next(asset for asset in release["assets"] if asset["name"] == "siphon-1.4.1.0.zip")
+                    # The release asset is immutable and the checksum below is pinned.
+                    # Avoid GitHub's shared unauthenticated API quota in hosted runners.
                     package = self.temp / "siphon-1.4.1.0.zip"
-                    with urllib.request.urlopen(asset["browser_download_url"], timeout=60) as response:
+                    with urllib.request.urlopen(
+                        "https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.4.1/siphon-1.4.1.0.zip",
+                        timeout=60) as response:
                         data = response.read(128 * 1024 * 1024 + 1)
                     require(len(data) <= 128 * 1024 * 1024, "Prior release archive exceeds limit")
                     require(hashlib.sha256(data).hexdigest() == "7b7ee5f591272133bd2662e6df518c6d0c722f32339e1b563126cc240347ce60",
                             "Published v1.4.1 archive differs from the verified historical binary")
                     package.write_bytes(data)
-                except (urllib.error.URLError, KeyError, StopIteration) as error:
+                except urllib.error.URLError as error:
                     raise Unavailable("Real v1.4.1 release ZIP unavailable; supply --previous-package with a verified 1.4.1.0 historical binary. Upgrade was NOT exercised.") from error
             require(self.archive_metadata(package)["version"] == "1.4.1.0", "Upgrade must begin with a real 1.4.1.0 archive")
             require(hashlib.sha256(package.read_bytes()).hexdigest() == "7b7ee5f591272133bd2662e6df518c6d0c722f32339e1b563126cc240347ce60",

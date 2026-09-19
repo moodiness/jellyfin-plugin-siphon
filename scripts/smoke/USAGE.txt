@@ -65,6 +65,10 @@ playback: Addon search creates a native preview; import retains its identity.
   Client Path must retain that public origin while EncoderPath uses local HTTP.
   Native progressive-to-HLS remux playlists/segments and upstream nested HLS
   references are traversed, and bundled FFmpeg decodes video/audio from both.
+  After opening HTTP media, the fixture withdraws all addon streams and a scoped
+  refresh confirms an empty source list. The original playback must still produce
+  its first HLS segments and decoded video/audio after a seek to 20 seconds.
+  Fixture discovery is restored in finally; fresh discoveries remain separate.
   Ingress stays unchanged; configuration is restored in finally before remaining
   scenarios. Evidence contains only routing booleans, playlist/segment counts
   and decoded durations, never capability URLs or credentials.
@@ -109,7 +113,7 @@ full: Real historical upgrade followed by all current playback/export/notificati
   segment/browser paths. CI runs this command, not source-text shell checks.
 
 Historical artifact
-By default the runner resolves the public v1.4.1 release through GitHub's API and
+By default the runner downloads the immutable public v1.4.1 release asset and
 fetches siphon-1.4.1.0.zip. The verified published SHA-256 is pinned:
   7b7ee5f591272133bd2662e6df518c6d0c722f32339e1b563126cc240347ce60
 An offline copy can be supplied with --previous-package; the same exact checksum,
