@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/moodiness/jellyfin-plugin-siphon/main/assets/siphon-jellyfin.png",
     "versions": [
       {
+        "version": "1.6.4.0",
+        "targetAbi": "12.1.0.0",
+        "sourceUrl": "https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.6.4/siphon-1.6.4.0.zip",
+        "checksum": "9700b01e22c202dca163e402a6ba04de",
+        "timestamp": "2026-09-19T10:52:17Z",
+        "changelog": "Avoid overlapping classification and media responses within a playback relay request. Classify long byte-zero reads in place and finish prefix classification before seeks or short ranges. Preserve HLS rewriting, exact source selection, authorization and SSRF safeguards; reject conflicting advertised representations and invalid ranges. Add credential-free stage and cause diagnostics for relay failures. Verified with 578 tests and real Jellyfin playback, including bounded reads at 6 GiB and generated HEVC/AAC seeking. Independent FFmpeg requests can still overlap; the reported production NAS failure is not yet verified resolved."
+      },
+      {
         "version": "1.6.3.0",
         "targetAbi": "12.1.0.0",
         "sourceUrl": "https://github.com/moodiness/jellyfin-plugin-siphon/releases/download/v1.6.3/siphon-1.6.3.0.zip",
